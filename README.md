@@ -58,8 +58,15 @@ pytest-xdist's workers have to be off for the outer run (`-n 0`): its
 controlling process collects nothing, and an empty selection is refused.
 Without `--mutate`, the plugin does nothing.
 
-The selection is collected from your checkout and run at the last commit, so
-a test that is not committed yet makes the run refuse.
+Only the selection reaches the mutants' runs. Options that change how tests
+run, such as `-p`, `-o`, `-W` or `--runxfail`, are not passed on: put them in
+the repository's pytest configuration, which every run reads. An option left
+behind either makes the run refuse, or leaves survivors it would have killed;
+it never adds a kill.
+
+The selection is collected from your checkout and run at the last commit. A
+test that is not committed yet makes the run refuse, and an uncommitted edit
+to a test is not in the run at all.
 
 ## A whole source tree
 

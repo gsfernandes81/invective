@@ -33,7 +33,4 @@ module-name = ["invective", "pytest_invective"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The checkout's own `src`, ahead of any installed copy. A run of invective
-# against itself tests a worktree, and the worktree's `src` is the one that
-# holds the mutant.
-pythonpath = ["src"]
+# `src` goes on the path in `tests/conftest.py`, not with `pythonpath` here.

@@ -10,16 +10,19 @@ names a file, the first test to fail is written there as the session ends.
 That is how the engine learns which test killed a mutant.
 
 **Nothing from `invective` is imported unless `--mutate` is given.** pytest
-loads this plugin before a repository's own `pythonpath` setting takes
-effect, so a package imported here comes from wherever it is installed. In a
-run of invective against its own code, that is the checkout and not the
-worktree that holds the mutant, and every mutant would survive.
+before 8.4 loads plugins before a repository's own `pythonpath` setting takes
+effect, and every pytest loads them before any `conftest.py`, so a package
+imported here comes from wherever it is installed. In a run of invective
+against its own code, that is the checkout and not the worktree that holds
+the mutant, and every mutant would survive.
 """
 
 from __future__ import annotations
 
 import json
+import locale
 import os
+import sys
 import tempfile
 
 import pytest
@@ -57,6 +60,12 @@ def pytest_configure(config):
 
     if not config.getoption("mutate"):
         return
+    if path:
+        # Every mutant's run would start a campaign of its own, and each of
+        # theirs another, without end.
+        raise pytest.UsageError(
+            "--mutate reached a mutant's own run; is it in PYTEST_ADDOPTS or "
+            "the repository's addopts? Give it on the command line only.")
     if config.getoption("numprocesses", None):
         # Under pytest-xdist the controlling process collects nothing, so the
         # selection a mutant would be run against is empty.
@@ -90,8 +99,12 @@ class _Verdict:
     def _note(self, report):
         if report.failed and not self.killer:
             # As pytest's own summary prints it: relative to where the run
-            # started, which is the top of the worktree.
-            self.killer = self.config.cwd_relative_nodeid(report.nodeid)
+            # started, which is the top of the worktree. Rewritten that way,
+            # the file's path has Windows separators on Windows, and a node
+            # id spells its path with `/` everywhere.
+            path, sep, rest = self.config.cwd_relative_nodeid(
+                report.nodeid).partition("::")
+            self.killer = path.replace(os.sep, "/") + sep + rest
 
     def pytest_sessionfinish(self):
         with open(self.path, "w", encoding="utf-8") as fh:
@@ -102,9 +115,8 @@ class _Verdict:
 def pytest_runtestloop(session):
     config = session.config
     targets = config.getoption("mutate")
-    # pytest's own loop stops a run whose collection failed, and only lists
-    # the tests of a --collect-only one.
-    if not targets or session.testsfailed or config.option.collectonly:
+    # pytest's own loop only lists the tests of a --collect-only run.
+    if not targets or config.option.collectonly:
         return None
     from invective import mutate
 
@@ -112,6 +124,12 @@ def pytest_runtestloop(session):
     say = tr.write_line if tr is not None else print
     reports = []
     try:
+        if session.testsfailed:
+            # Even with --continue-on-collection-errors: the tests that did
+            # collect are not the selection that was asked for.
+            raise mutate.Refusal("%d error(s) during collection, so the "
+                                 "selection is not the one asked for"
+                                 % session.testsfailed)
         if not session.items:
             # An empty selection is no selection: run as it stands, pytest
             # would run every test it could find instead.
@@ -123,7 +141,7 @@ def pytest_runtestloop(session):
             # One node id a line, read by pytest's own `@file`: a selection
             # of thousands is too long for a Windows command line.
             listed = os.path.join(box, "selection.txt")
-            with open(listed, "w", encoding="utf-8") as fh:
+            with open(listed, "w", **_ARGFILE_ENCODING) as fh:
                 fh.write("".join(node + "\n" for node in selection))
             for target in targets:
                 report = mutate.mutate(root, target, ["@" + listed],
@@ -140,6 +158,13 @@ def pytest_runtestloop(session):
         pytest.exit("invective refused the run", returncode=2)
 
     config.stash[_REPORTS] = reports
+    if tr is None:
+        # `pytest_terminal_summary` belongs to the terminal plugin, and
+        # without it the score would never be shown.
+        from invective.mutate import summary
+        for report in reports:
+            for line in summary(report):
+                print(line)
     out = config.getoption("mutate_json")
     if out:
         with open(out, "w", encoding="utf-8") as fh:
@@ -147,11 +172,31 @@ def pytest_runtestloop(session):
     return True
 
 
+#: How argparse reads an `@file`: with the locale's encoding before Python
+#: 3.12, with the file system's from 3.12. Written any other way, a path that
+#: is not ASCII is not found.
+if sys.version_info >= (3, 12):
+    _ARGFILE_ENCODING = {"encoding": sys.getfilesystemencoding(),
+                         "errors": sys.getfilesystemencodeerrors()}
+else:
+    _ARGFILE_ENCODING = {"encoding": locale.getpreferredencoding(False)}
+
+
 def _node(item, root):
     """The item's node id, its file given from *root*, where every run starts."""
-    path = os.path.relpath(str(item.path), root).replace(os.sep, "/")
+    from invective.mutate import Refusal
+
+    try:
+        path = os.path.relpath(str(item.path), root)
+    except ValueError:
+        # Windows: the test is on another drive than the repository.
+        path = os.pardir
+    if path == os.pardir or path.startswith(os.pardir + os.sep):
+        # The worktree holds the repository and nothing else.
+        raise Refusal("%s is outside the repository at %s, so no run at "
+                      "the last commit has it" % (item.nodeid, root))
     _file, sep, rest = item.nodeid.partition("::")
-    return path + sep + rest
+    return path.replace(os.sep, "/") + sep + rest
 
 
 def pytest_terminal_summary(terminalreporter, config):
