@@ -111,6 +111,7 @@ class _Verdict:
             json.dump({"killer": self.killer}, fh)
 
 
+# First: a plugin registered after this one would otherwise be asked first.
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtestloop(session):
     config = session.config
@@ -151,10 +152,7 @@ def pytest_runtestloop(session):
                 report["tests"] = selection
                 reports.append(report)
     except mutate.Refusal as exc:
-        if tr is not None:
-            tr.write_line("refused: %s" % exc, red=True, bold=True)
-        else:
-            print("refused: %s" % exc)
+        say("refused: %s" % exc)
         pytest.exit("invective refused the run", returncode=2)
 
     config.stash[_REPORTS] = reports
