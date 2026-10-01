@@ -423,10 +423,12 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             got = run_tests(where, tests, timeout=budget)
             line = node.lineno                                  # type: ignore[attr-defined]
             text = lines[line - 1].strip()
-            if got.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED):
-                # The baseline proved this selection collects, so this is the
-                # harness and not the mutant. Scoring it as a kill would be
-                # arithmetic over a run that executed no test.
+            if (got.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED)
+                    and not got.killer):
+                # The baseline proved this selection collects, and no module
+                # failed to, so this is the harness and not the mutant.
+                # Scoring it as a kill would be arithmetic over a run that
+                # executed no test.
                 raise Refusal(
                     "%s:%d %s made pytest exit %d -- it collected nothing, so "
                     "this is the runner and not the mutation. Counting it as "
@@ -445,7 +447,12 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 # finding of its own.
                 kills.append({"kind": kind, "line": line, "change": what,
                               "killer": got.killer, "code": got.code})
-                if got.code in (ExitCode.INTERRUPTED, ExitCode.INTERNAL_ERROR):
+                # A module that would not import, under the mutant: pytest
+                # exits 2 for that when the selection names files, and 4 --
+                # "found no collectors" -- when it names node ids, as the
+                # plugin's does. The killer is the module that failed.
+                if got.code in (ExitCode.INTERRUPTED, ExitCode.INTERNAL_ERROR,
+                                ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED):
                     broken += 1
             if n % 10 == 0:
                 say("  ... %d/%d, %d survived" % (n, len(sites), len(survivors)))

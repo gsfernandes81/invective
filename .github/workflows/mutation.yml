@@ -54,8 +54,10 @@ jobs:
 
       # `-n 0`: the project's addopts turns xdist's workers on, and --mutate
       # refuses them. Survivors are a finding to read, not a failure: the job
-      # fails only when the run could not be trusted.
+      # fails only when the run could not be trusted. `shell: bash` is what
+      # turns on pipefail, without which `tee` would have the last word.
       - name: Mutate
+        shell: bash
         run: >-
           uv run --no-sync pytest -n 0 -p no:cacheprovider
           --mutate ${{ matrix.module }}

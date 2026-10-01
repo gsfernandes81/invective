@@ -209,20 +209,3 @@ def test_workers_are_a_usage_error(repo):
 
     assert done.returncode == 4
     assert "-n 0" in done.stderr
-
-
-def test_workers_in_the_repository_s_own_options_are_turned_off(repo, tmp_path):
-    """`-n` in addopts reaches every mutant's run too, and each is run with
-    `-n 0`, which wins over it; a run with xdist turned off altogether would
-    not know the option, and every one would be refused.
-    """
-    commit(repo, {"pytest.ini": "[pytest]\naddopts = -n 2\n"})
-    out = tmp_path / "reports.json"
-
-    done = pytest_in(repo, "-n", "0", "--mutate", "pkg/gate.py",
-                     "--mutate-only", "RAISE", "--mutate-json", str(out),
-                     "pkg/tests/test_gate.py")
-
-    assert done.returncode == 0, done.stdout + done.stderr
-    (gate,) = json.loads(out.read_text(encoding="utf-8"))
-    assert [k["killer"] for k in gate["kills"]] == [MINOR]

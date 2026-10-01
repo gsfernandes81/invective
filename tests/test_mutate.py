@@ -509,9 +509,19 @@ def test_progress_is_said_after_every_tenth_mutant(repo, monkeypatch, capsys):
     assert said == ["ran"] * 11 + ["... 10/12, 10 survived"] + ["ran"] * 2
 
 
-def test_a_mutant_that_breaks_the_import_is_a_blunter_kill(repo):
+@pytest.mark.parametrize("selection, code", [
+    (["pkg/tests/test_ready.py"], ExitCode.INTERRUPTED),
+    (["pkg/tests/test_ready.py::test_ready"], ExitCode.USAGE_ERROR),
+])
+def test_a_mutant_that_breaks_the_import_is_a_blunter_kill(repo, selection,
+                                                           code):
     """Killed, because the suite noticed; and counted apart, because what
     noticed was a module that would not import and not a test failing.
+
+    Named as a file, pytest calls that a collection error. Named by node id,
+    as the plugin names its selection, pytest finds no collectors and exits
+    as it does for a usage error, the code that otherwise means the harness
+    broke; the failed module it reports is what tells the two apart.
     """
     commit(repo, {
         "pkg/ready.py": ("READY = True\n"
@@ -524,12 +534,27 @@ def test_a_mutant_that_breaks_the_import_is_a_blunter_kill(repo):
     })
 
     report = mutate.mutate(repo, os.path.join(repo, "pkg", "ready.py"),
-                           ["pkg/tests/test_ready.py"], ["CONST", "NOT"], None)
+                           selection, ["CONST", "NOT"], None)
 
     assert report["killed"] == report["broken"] == 2
-    assert {k["code"] for k in report["kills"]} == {ExitCode.INTERRUPTED}
+    assert {k["code"] for k in report["kills"]} == {code}
     # A module that will not collect is named as the killer.
     assert {k["killer"] for k in report["kills"]} == {"pkg/tests/test_ready.py"}
+
+
+def test_workers_in_the_repository_s_own_options_are_turned_off(repo):
+    """`-n` in addopts reaches every mutant's run, and each is run with
+    `-n 0`, which wins over it; a run with xdist turned off altogether would
+    not know the option, and every run would be refused.
+    """
+    pytest.importorskip("xdist")
+    commit(repo, {"pytest.ini": "[pytest]\naddopts = -n 2\n"})
+
+    report = mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS,
+                           ["RAISE"], None)
+
+    assert [k["killer"] for k in report["kills"]] == [
+        "pkg/tests/test_gate.py::test_a_minor_is_refused"]
 
 
 def test_a_run_that_hangs_is_stopped_with_everything_it_started(tmp_path):
