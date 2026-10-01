@@ -220,10 +220,6 @@ def _write(path: str, text: str, when: int) -> None:
     line larger than the source it was built from. POSIX never shows it: text
     mode translates nothing there.
     """
-    if os.path.islink(path):
-        # Written through, the mutant would land in the file the link names,
-        # which can be the project's own.
-        os.unlink(path)
     with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write(text)
     os.utime(path, (when, when))
@@ -375,6 +371,15 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         path = os.path.join(where, src_rel)
         if not os.path.isfile(path):
             raise Refusal("%s is not in the tree the mutants are made in" % src_rel)
+        # **Where the writes land, links followed.** The copy keeps links as
+        # links, so a module reached through one -- the file itself or a
+        # directory on its path -- can be a file outside the copy, the
+        # project's own among them. A link that stays inside the copy is
+        # written through, as the tests that import it read through it.
+        real = os.path.realpath(path)
+        if not real.startswith(os.path.join(os.path.realpath(where), "")):
+            raise Refusal("%s reaches %s through a link, outside the copy the "
+                          "mutants are written in" % (src_rel, real))
         with open(path, encoding="utf-8") as fh:
             source = fh.read()
         lines = source.split("\n")

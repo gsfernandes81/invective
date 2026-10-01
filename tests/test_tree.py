@@ -54,24 +54,46 @@ def test_a_temporary_directory_inside_the_project_is_not_copied_into_itself(
 
 @pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
                     reason="a symbolic link without privileges")
-def test_a_mutant_of_a_linked_module_never_reaches_the_file_linked_to(
-        tmp_path, monkeypatch):
-    """The copy keeps links as links, and a mutant written through one would
-    land in the file it names, outside the copy."""
+def test_a_module_that_is_a_link_out_of_the_project_is_refused(tmp_path,
+                                                               monkeypatch):
+    """Written through, the mutant would land in the file the link names."""
     real = tmp_path / "elsewhere.py"
-    real.write_text("def f(n):\n    if n < 0:\n        raise ValueError\n"
-                    "    return n\n", encoding="utf-8")
+    real.write_text("def f(n):\n    if n < 0:\n        raise ValueError\n",
+                    encoding="utf-8")
     root = tmp_path / "project"
     write_tree(str(root), {"tests/test_f.py": "def test_f():\n    pass\n"})
     os.symlink(real, root / "f.py")
     monkeypatch.setattr(mutate, "run_tests",
                         lambda *a, **k: mutate.Verdict(True, 0, "", ""))
 
-    mutate.mutate(str(root), str(root / "f.py"), ["tests/test_f.py"], None,
-                  None)
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(str(root), str(root / "f.py"), ["tests/test_f.py"],
+                      None, None)
+    assert "through a link" in str(caught.value)
+    assert "n < 0" in real.read_text(encoding="utf-8")
 
-    assert "raise ValueError" in real.read_text(encoding="utf-8")
-    assert "<" in real.read_text(encoding="utf-8")
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
+                    reason="a symbolic link without privileges")
+def test_a_link_inside_the_project_is_written_through(tmp_path):
+    """The tests import the file the link names, so that is where the mutant
+    has to be for them to see it: here the refusal is checked, and its
+    removal killed."""
+    root = tmp_path / "project"
+    write_tree(str(root), {
+        "pkg/__init__.py": "",
+        "pkg/real.py": ("def f(n):\n    if n < 0:\n"
+                        "        raise ValueError\n    return n\n"),
+        "tests/test_f.py": ("import pytest\nfrom pkg import real\n\n"
+                            "def test_f():\n    with pytest.raises(ValueError):\n"
+                            "        real.f(-1)\n"),
+    })
+    os.symlink("real.py", root / "pkg" / "alias.py")
+
+    report = mutate.mutate(str(root), str(root / "pkg" / "alias.py"),
+                           ["tests/test_f.py"], ["RAISE"], None)
+
+    assert report["killed"] == report["mutants"] == 1
 
 
 def test_a_ref_needs_git_and_says_so_when_there_is_none(tmp_path, monkeypatch):
@@ -126,3 +148,27 @@ def test_a_copy_that_will_not_be_removed_does_not_replace_the_outcome(
     with pytest.raises(KeyError):
         with trees.working_tree(root):
             raise KeyError("the run's own outcome")
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
+                    reason="a symbolic link without privileges")
+def test_a_module_reached_through_a_linked_directory_is_refused(
+        tmp_path, monkeypatch):
+    """The copy keeps a directory link as a link, so the module's path in the
+    copy leads out of it, and a mutant written there would land in the file
+    the link reaches: in the project, or anywhere else."""
+    elsewhere = tmp_path / "elsewhere"
+    write_tree(str(elsewhere), {"gate.py": "def f(n):\n    if n < 0:\n"
+                                           "        raise ValueError\n"})
+    root = tmp_path / "project"
+    write_tree(str(root), {"tests/test_f.py": "def test_f():\n    pass\n"})
+    os.symlink(elsewhere, root / "pkg", target_is_directory=True)
+    monkeypatch.setattr(mutate, "run_tests",
+                        lambda *a, **k: mutate.Verdict(True, 0, "", ""))
+    before = (elsewhere / "gate.py").read_text(encoding="utf-8")
+
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(str(root), str(root / "pkg" / "gate.py"),
+                      ["tests/test_f.py"], None, None)
+    assert "through a link" in str(caught.value)
+    assert (elsewhere / "gate.py").read_text(encoding="utf-8") == before
