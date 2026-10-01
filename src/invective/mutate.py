@@ -40,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -247,6 +248,29 @@ def _write(path: str, text: str, when: int) -> None:
     os.utime(path, (when, when))
 
 
+#: Each run is started in a process group of its own, so that stopping it
+#: stops everything it started. A test suite can start processes of its own
+#: (this one starts pytest), and killing the run alone would leave those
+#: running, and theirs, for as long as they like.
+if os.name == "nt":
+    _OWN_GROUP = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+else:
+    _OWN_GROUP = {"start_new_session": True}
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    """Kill *proc* and every process it started, and collect what it said."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                       capture_output=True)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    proc.communicate()
+
+
 def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:
     """The selection, in *where*.
 
@@ -265,24 +289,32 @@ def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:
     """
     with tempfile.TemporaryDirectory(prefix="invective-verdict-") as box:
         verdict = os.path.join(box, "verdict.json")
+        # `-p no:xdist`: a repository that turns a worker pool on by default
+        # would start one per MUTANT, for a selection of a few files that a
+        # single process runs faster. `-p no:` of a plugin that is not
+        # installed is a no-op, so both of these are safe wherever the runner
+        # happens to lack the plugin.
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "pytest", "-x", "-rf", "-p", "no:randomly",
+             "-p", "no:xdist", "-p", pytest_invective.__name__,
+             "--no-header", *tests],
+            cwd=where, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env={**os.environ, pytest_invective.VERDICT: verdict},
+            **_OWN_GROUP)
         try:
-            # `-p no:xdist`: a repository that turns a worker pool on by
-            # default would start one per MUTANT, for a selection of a few
-            # files that a single process runs faster. `-p no:` of a plugin
-            # that is not installed is a no-op, so both of these are safe
-            # wherever the runner happens to lack the plugin.
-            done = subprocess.run(
-                [sys.executable, "-m", "pytest", "-x", "-rf", "-p", "no:randomly",
-                 "-p", "no:xdist", "-p", pytest_invective.__name__,
-                 "--no-header", *tests],
-                cwd=where, capture_output=True, text=True, timeout=timeout,
-                env={**os.environ, pytest_invective.VERDICT: verdict})
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            _stop(proc)
             # A mutant that hangs is a mutant the suite noticed, in the least
             # helpful way available. Counted as killed and said out loud,
             # because a timeout that is silently a pass would flatter the
             # score.
             return Verdict(False, TIMED_OUT, "TIMEOUT", "TIMEOUT")
+        except BaseException:
+            # Interrupted: the run is in a group of its own, so the ^C that
+            # stopped this process never reached it.
+            _stop(proc)
+            raise
         try:
             with open(verdict, encoding="utf-8") as fh:
                 killer = json.load(fh)["killer"]
@@ -290,8 +322,9 @@ def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:
             # A run that ended before its session did -- pytest could not
             # start, or a mutant broke the plugin itself -- names no test.
             killer = ""
-    out = _ANSI.sub("", done.stdout or "")
-    return Verdict(done.returncode == 0, done.returncode, out[-400:], killer)
+    # Both streams: pytest says why it could not start on stderr.
+    out = _ANSI.sub("", stdout + stderr)
+    return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer)
 
 
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,

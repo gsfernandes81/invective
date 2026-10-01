@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import time
 
 import pytest
 from pytest import ExitCode
@@ -239,15 +240,16 @@ def test_the_mutant_run_asks_for_the_failure_lines_and_its_own_plugin(
     """
     seen = {}
 
-    class Done:
+    class Spy:
         returncode = 0
-        stdout = ""
 
-    def spy(argv, **kwargs):
-        seen["argv"], seen["env"] = argv, kwargs["env"]
-        return Done()
+        def __init__(self, argv, **kwargs):
+            seen["argv"], seen["env"] = argv, kwargs["env"]
 
-    monkeypatch.setattr(mutate.subprocess, "run", spy)
+        def communicate(self, timeout=None):
+            return "", ""
+
+    monkeypatch.setattr(mutate.subprocess, "Popen", Spy)
     got = mutate.run_tests("/nowhere", ["t.py"], timeout=1)
     argv = seen["argv"]
     assert argv.count("-q") == 0, argv
@@ -530,14 +532,35 @@ def test_a_mutant_that_breaks_the_import_is_a_blunter_kill(repo):
     assert {k["killer"] for k in report["kills"]} == {"pkg/tests/test_ready.py"}
 
 
-def test_a_selection_that_hangs_is_stopped_and_counted_as_killed(tmp_path):
-    (tmp_path / "test_hang.py").write_text(
-        "import time\n\ndef test_hang():\n    time.sleep(60)\n",
-        encoding="utf-8")
+def test_a_run_that_hangs_is_stopped_with_everything_it_started(tmp_path):
+    """Counted as killed; and stopped whole, because a suite can start
+    processes of its own, and killing the run alone leaves them running.
 
-    got = mutate.run_tests(str(tmp_path), ["test_hang.py"], timeout=2)
+    The test below starts a process that writes a heartbeat, waits for the
+    first beat, and hangs. Once the run is stopped, the heartbeat must stop.
+    """
+    beat = tmp_path / "beat"
+    (tmp_path / "test_hang.py").write_text(
+        "import os, subprocess, sys, time\n"
+        "\n"
+        "BEAT = %r\n"
+        "\n"
+        "def test_hang():\n"
+        "    subprocess.Popen([sys.executable, '-c', 'import time\\n'\n"
+        "                      'while True:\\n'\n"
+        "                      '    open(%%r, \"a\").write(\".\")\\n'\n"
+        "                      '    time.sleep(0.05)' %% BEAT])\n"
+        "    while not os.path.exists(BEAT):\n"
+        "        time.sleep(0.05)\n"
+        "    time.sleep(60)\n" % str(beat), encoding="utf-8")
+
+    got = mutate.run_tests(str(tmp_path), ["test_hang.py"], timeout=3)
 
     assert got == mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT")
+    assert beat.exists(), "the test never got as far as starting the process"
+    before = beat.stat().st_size
+    time.sleep(0.5)
+    assert beat.stat().st_size == before, "a process the run started lives on"
 
 
 @pytest.mark.parametrize("argv, missing", [
