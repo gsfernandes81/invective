@@ -1,9 +1,11 @@
 # Handoff: speeding invective up without giving up its guarantees
 
 Findings from a design review (2026-10-01). Nothing here is implemented. The
-engine is still the git-worktree one on `main`; the move to plain copies of the
-working tree, and the `[tool.invective]` section in `pyproject.toml`, are work
-that has not landed yet.
+estimates were made against the git-worktree engine; `main` has since moved to
+copies of the working tree (`tree.py`) and a `[tool.invective]` table
+(`config.py`), and the section on that move below has been checked against
+them. The speedup options themselves (workers, coverage, killer-first, cache)
+are still all to do.
 
 ## Intent
 
@@ -98,40 +100,45 @@ fails in the silent direction invective exists to refuse.
 
 ## Moving from git worktrees to copies
 
-No earlier verdict flips. What changes:
+Landed on `main` (`tree.py`). No earlier verdict flips. What the move means
+for the options above, checked against that code:
 
-- "Measures the last commit" becomes "measures a snapshot of the working tree
-  taken at start". An uncommitted test now counts. The cost is drift: an edit
-  saved mid-run is not seen. Hash the target and the selection at the start,
-  and say at the end if they changed.
+- "Measures the last commit" became "measures the working tree as it stands",
+  with a commit still available. An uncommitted test now counts. The cost is
+  drift: an edit saved mid-run is not seen. Hash the target and the selection at
+  the start, and say at the end if they changed.
 - "Exactly one edit from the original" still holds: the copy is the original
-  and `_write` is still the per-mutant reset.
-- The copy is per worker, not per mutant. Never hardlink: rewriting the target
-  would write through to the checkout.
-- Always exclude `.git`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.tox`,
-  `.venv`, `venv` and `node_modules`. `__pycache__` and `.pytest_cache` are
-  excluded for correctness, not size: a copied `.pyc` whose mtime is in the
-  future and whose size matches a mutant's would run the original's bytecode,
-  and a copied `.pytest_cache` leaks `--lf` state into the runs.
-- A symlink inside the tree that points back at the checkout would make the
-  tests import the original and the mutant survive silently. Detect it and
-  refuse.
+  and the per-mutant write is still the reset.
+- The copy is per worker, not per mutant (relevant to option 1). Never
+  hardlink: rewriting the target would write through to the checkout.
+- Already skipped: `.git`, `.hg`, `.svn`, `.tox`, `.nox`, `__pycache__`,
+  `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `node_modules`, and any
+  directory holding a `pyvenv.cfg`. `__pycache__` and `.pytest_cache` matter for
+  correctness, not size: a copied `.pyc` whose mtime is in the future and whose
+  size matches a mutant's would run the original's bytecode, and a copied
+  `.pytest_cache` leaks `--lf` state into the runs.
+- **Symlinks are copied as symlinks** (`symlinks=True`). One inside the tree
+  that points back at the checkout (an absolute target, or `../` out of the
+  tree) makes the tests import the original and the mutant survive silently.
+  Detect it and refuse, or leave it to the editable-install check below.
 - An editable install points at the checkout. The plugin already runs inside
   every run; at session end it can check that the target's `__file__` is under
   the copy and refuse if not. A child interpreter started in another directory
-  is still a documented hole, as it is today.
+  is still a documented hole, as it was before.
 - On Windows: symlinks need a privilege, deep `node_modules` trees hit
-  `MAX_PATH`, and a killed run holding a file still breaks removal.
-- With git gone there is no `worktree prune`. A SIGKILLed run leaks its
-  copies, which may hold a copied `.env`. Write an owner-pid marker and sweep
-  dead copies at startup.
-- The refusal outside a git repository goes away.
+  `MAX_PATH`, and a killed run holding a file can still break removal.
+- A SIGKILLed run leaks its copy, which may hold a copied `.env`. Write an
+  owner-pid marker and sweep dead copies at startup.
 
-### Proposed `pyproject.toml` options
+### Gitignored files: two keys not yet there
+
+`[tool.invective]` has `exclude` (globs of anything to leave out) but nothing
+that follows `.gitignore`. Proposed, in the same flat table and with the same
+rule that an unknown or ill-typed key is a refusal:
 
 ```toml
-[tool.invective.copy]
-ignore-gitignored = false   # default: copy everything except the built-in excludes
+[tool.invective]
+ignore-gitignored = false   # default: copy everything except what is skipped above
 include-ignored   = [".env", "src/pkg/_version.py", "build/*.so"]   # repo-relative globs
 ```
 
@@ -139,12 +146,11 @@ include-ignored   = [".env", "src/pkg/_version.py", "build/*.so"]   # repo-relat
 `git ls-files --others --ignored --exclude-standard`, so it needs git and
 refuses outside a repository. Untracked files that are not ignored are still
 copied. `include-ignored` re-includes a subset of the ignored files and does
-nothing when `ignore-gitignored` is false. The built-in excludes cannot be
-overridden. The default is false because gitignored files are sometimes
-load-bearing (`.env`, a generated `_version.py`, in-place `.so` builds,
-fixture data); a file that was left out and was needed fails the baseline,
-which is a refusal and not a wrong score, and its message should name the
-option.
+nothing when `ignore-gitignored` is false; `exclude` still wins over it. The
+default is false because gitignored files are sometimes load-bearing (`.env`, a
+generated `_version.py`, in-place `.so` builds, fixture data). A file that was
+left out and was needed fails the baseline, which is a refusal and not a wrong
+score, and its message should name the option.
 
 ## Open items
 
