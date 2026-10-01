@@ -83,3 +83,7 @@ be trusted, and says why.
   any edit, every mutant would count as killed and the score would be 100%
   for nothing. The same goes for a selection that collects no tests.
 - **It runs pytest only**, one mutant at a time, in a fresh process each.
+
+## License
+
+GNU Affero General Public License, version 3 only. See `LICENSE`.
