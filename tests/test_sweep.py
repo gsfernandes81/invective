@@ -140,7 +140,9 @@ def test_the_driver_starts_the_engine_beside_it_with_the_stated_defaults(
     assert cmd[2:8] == ["--target", _p("pkg/gate.py"), "--tests",
                         _p("pkg/tests/test_gate.py"), "--only", "RAISE"]
     assert cmd[8:10] == ["--limit", "25"]
-    assert kwargs["cwd"] == repo
+    # The same directory, not the same text: git on Windows spells the
+    # repository's path with forward slashes.
+    assert os.path.samefile(kwargs["cwd"], repo)
 
 
 @pytest.mark.parametrize("said, rc, note", [
