@@ -15,7 +15,7 @@ tests you want to measure:
 
     uv add --dev git+https://github.com/gsfernandes81/invective
 
-It needs Python 3.11 or later, pytest, and `git` on the PATH.
+It needs Python 3.11 or later, pytest 8.2 or later, and `git` on the PATH.
 
 ## One module
 
@@ -37,7 +37,29 @@ repository's top level. `--only CMP,RAISE` limits the kinds of edit,
     5/6 killed (83.3%), 1 survived
 
 The JSON report also names, for every killed mutant, the first test that
-failed on it.
+failed on it. Each mutant's run reports that through invective's own pytest
+plugin, which it loads.
+
+## From pytest
+
+Installed, invective is also a pytest plugin. Give pytest the module to break
+with `--mutate`, and select tests the way you always do:
+
+    pytest --mutate src/pkg/gate.py tests/test_gate.py -k refus
+
+The mutants are run against exactly the tests pytest collected, so `-k`, `-m`,
+`--deselect` and node ids all narrow the selection. `--mutate` can be given
+more than once; `--mutate-only`, `--mutate-limit` and `--mutate-json` work as
+`--only`, `--limit` and `--json` do for `invective run`. The tests are not
+run as an ordinary session, so pytest's last line says "no tests ran"; the
+report is the section above it.
+
+pytest-xdist's workers have to be off for the outer run (`-n 0`): its
+controlling process collects nothing, and an empty selection is refused.
+Without `--mutate`, the plugin does nothing.
+
+The selection is collected from your checkout and run at the last commit, so
+a test that is not committed yet makes the run refuse.
 
 ## A whole source tree
 

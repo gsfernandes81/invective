@@ -48,6 +48,8 @@ from typing import NamedTuple
 
 from pytest import ExitCode
 
+import pytest_invective
+
 
 class Refusal(Exception):
     """Something that must be true before a single mutant is worth running."""
@@ -83,23 +85,8 @@ class Verdict(NamedTuple):
     killer: str
 
 
-#: pytest's short-summary line for a failure, as `-rf` prints it.
-#: **A node id can contain spaces**, so the id is bounded by its own brackets
-#: rather than by whitespace or by the ` - ` before pytest's message. A
-#: parametrised id carries the parameter's repr between `[` and `]` --
-#: `test_two_ports_are_refused[2380 and 2381]` -- so `\S+` cuts it at the
-#: first space and yields `...refused[2380`, which nothing can be looked up by
-#: and which reads exactly like a whole id. Splitting on ` - ` instead is no
-#: better: a parameter's repr can contain one, and then the cut lands inside
-#: the brackets.
-_FAILED = re.compile(r"^(?:FAILED|ERROR)\s+([^\s\[]+(?:\[[^\]]*\])?)", re.M)
-
-#: **Colour, which is why the line above cannot be matched raw.** pytest can
-#: emit SGR escapes here even though its stdout is a pipe rather than a
-#: terminal, so the summary line begins `\x1b[31mFAILED\x1b[0m` and `^FAILED`
-#: never matches -- and the node id itself is broken up by them
-#: (`::\x1b[1mtest_name`), so a looser pattern would capture a killer with
-#: escapes embedded in it. Every read of this output decolours first.
+#: pytest can colour its output even when stdout is a pipe, and the tail is
+#: read by a person.
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -267,38 +254,52 @@ def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:
     the worktree, so it reads the target repository's own pytest
     configuration, whose `addopts` may already carry one -- and a second
     STACKS into `-qq`, under which pytest prints neither a summary line nor a
-    single node id. Every verdict would still be correct, but the `tail`
-    would be empty of anything to read, and *which test killed the mutant*
-    would never reach stdout to be recorded.
+    single node id, and the `tail` a person reads after a refusal says
+    nothing. `-rf` is the other half: under plain `-q` the short summary is
+    suppressed too, so the `FAILED <nodeid>` lines have to be asked for.
 
-    `-rf` is the other half. Under plain `-q` the short summary is suppressed
-    too, so the `FAILED <nodeid>` lines the killer is read from have to be
-    asked for by name.
+    **The killer comes from the plugin, not from the printed output.** The
+    run loads `pytest_invective`, which writes the first failing node id to
+    the file `INVECTIVE_VERDICT` names, so a node id is never cut out of
+    text that colour, spaces and pytest's own separators can break up.
     """
-    try:
-        # `-p no:xdist`: a repository that turns a worker pool on by default
-        # would start one per MUTANT, for a selection of a few files that a
-        # single process runs faster. `-p no:` of a plugin that is not
-        # installed is a no-op, so both of these are safe wherever the
-        # runner happens to lack the plugin.
-        done = subprocess.run(
-            [sys.executable, "-m", "pytest", "-x", "-rf", "-p", "no:randomly",
-             "-p", "no:xdist", "--no-header", *tests],
-            cwd=where, capture_output=True, text=True,
-            timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # A mutant that hangs is a mutant the suite noticed, in the least
-        # helpful way available. Counted as killed and said out loud, because a
-        # timeout that is silently a pass would flatter the score.
-        return Verdict(False, TIMED_OUT, "TIMEOUT", "TIMEOUT")
+    with tempfile.TemporaryDirectory(prefix="invective-verdict-") as box:
+        verdict = os.path.join(box, "verdict.json")
+        try:
+            # `-p no:xdist`: a repository that turns a worker pool on by
+            # default would start one per MUTANT, for a selection of a few
+            # files that a single process runs faster. `-p no:` of a plugin
+            # that is not installed is a no-op, so both of these are safe
+            # wherever the runner happens to lack the plugin.
+            done = subprocess.run(
+                [sys.executable, "-m", "pytest", "-x", "-rf", "-p", "no:randomly",
+                 "-p", "no:xdist", "-p", pytest_invective.__name__,
+                 "--no-header", *tests],
+                cwd=where, capture_output=True, text=True, timeout=timeout,
+                env={**os.environ, pytest_invective.VERDICT: verdict})
+        except subprocess.TimeoutExpired:
+            # A mutant that hangs is a mutant the suite noticed, in the least
+            # helpful way available. Counted as killed and said out loud,
+            # because a timeout that is silently a pass would flatter the
+            # score.
+            return Verdict(False, TIMED_OUT, "TIMEOUT", "TIMEOUT")
+        try:
+            with open(verdict, encoding="utf-8") as fh:
+                killer = json.load(fh)["killer"]
+        except (OSError, ValueError, KeyError):
+            # A run that ended before its session did -- pytest could not
+            # start, or a mutant broke the plugin itself -- names no test.
+            killer = ""
     out = _ANSI.sub("", done.stdout or "")
-    found = _FAILED.search(out)
-    return Verdict(done.returncode == 0, done.returncode, out[-400:],
-                   found.group(1) if found else "")
+    return Verdict(done.returncode == 0, done.returncode, out[-400:], killer)
 
 
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
-           limit: int | None) -> dict:
+           limit: int | None, say=print) -> dict:
+    """Run every mutant of *target* against *tests*, and report on each.
+
+    *say* receives each line of progress as it happens.
+    """
     try:
         src_rel = os.path.relpath(os.path.abspath(target), root)
     except ValueError:
@@ -311,9 +312,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
 
     where = worktree(root)
     try:
-        print("worktree:  %s" % where)
-        print("target:    %s" % src_rel)
-        print("tests:     %s" % " ".join(tests))
+        say("worktree:  %s" % where)
+        say("target:    %s" % src_rel)
+        say("tests:     %s" % " ".join(tests))
 
         # **The module is read from the worktree, never from the checkout.**
         # The tests run at HEAD, so the module has to be HEAD's too: a copy
@@ -349,7 +350,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 "would be 'killed' for a reason that is not the mutation and "
                 "the score would read perfect. Fix the suite first.\n%s"
                 % first.tail)
-        print("baseline:  green in %.1fs" % base)
+        say("baseline:  green in %.1fs" % base)
 
         budget = max(30.0, base * 3)
         if limit:
@@ -357,7 +358,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # "the top of the file only".
             step = max(1, len(sites) // limit)
             sites = sites[::step][:limit]
-        print("mutants:   %d\n" % len(sites))
+        say("mutants:   %d\n" % len(sites))
 
         survivors, kills, killed, broken = [], [], 0, 0
         # **Every mutant gets its own whole second, or a verdict can belong to
@@ -392,7 +393,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             if got.ok:
                 survivors.append({"kind": kind, "line": line, "change": what,
                                   "source": text[:120]})
-                print("  SURVIVED  %s:%d  %-28s %s" % (src_rel, line, what, text[:60]))
+                say("  SURVIVED  %s:%d  %-28s %s" % (src_rel, line, what, text[:60]))
             else:
                 killed += 1
                 # **Which check is load-bearing, not merely that one was.** A
@@ -405,7 +406,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 if got.code in (ExitCode.INTERRUPTED, ExitCode.INTERNAL_ERROR):
                     broken += 1
             if n % 10 == 0:
-                print("  ... %d/%d, %d survived" % (n, len(sites), len(survivors)))
+                say("  ... %d/%d, %d survived" % (n, len(sites), len(survivors)))
 
         return {"target": src_rel, "tests": tests, "mutants": len(sites),
                 "killed": killed, "survivors": survivors, "kills": kills,
@@ -420,6 +421,23 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force", where],
                        capture_output=True, text=True)
         shutil.rmtree(where, ignore_errors=True)
+
+
+def summary(report: dict) -> list[str]:
+    """The closing lines of a report, as a person reads them.
+
+    The first is also what `invective sweep` reads a module's score from.
+    """
+    lines = ["%d/%d killed (%.1f%%), %d survived"
+             % (report["killed"], report["mutants"], report["score"],
+                len(report["survivors"]))]
+    if report["broken"]:
+        # Said out loud rather than folded into the score: these are mutants
+        # the runner could not collect past, and a file whose kills are mostly
+        # of this kind is not a well-tested file.
+        lines.append("           %d of the kills were collection or internal "
+                     "errors, not a test failing" % report["broken"])
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -445,15 +463,9 @@ def main(argv: list[str] | None = None) -> int:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
 
-    print("\n%d/%d killed (%.1f%%), %d survived"
-          % (report["killed"], report["mutants"], report["score"],
-             len(report["survivors"])))
-    if report["broken"]:
-        # Said out loud rather than folded into the score: these are mutants
-        # the runner could not collect past, and a file whose kills are mostly
-        # of this kind is not a well-tested file.
-        print("           %d of the kills were collection or internal errors, "
-              "not a test failing" % report["broken"])
+    print()
+    for line in summary(report):
+        print(line)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=1)

@@ -223,16 +223,16 @@ def test_the_report_says_which_test_killed_each_mutant(repo, monkeypatch):
     assert report["broken"] == 0
 
 
-def test_the_mutant_run_asks_for_the_failure_lines_and_does_not_double_quiet(
+def test_the_mutant_run_asks_for_the_failure_lines_and_its_own_plugin(
         monkeypatch):
-    """`-q` twice is silence, and silence is what the killer has to be read from.
+    """`-q` twice is silence, and the plugin is where the killer comes from.
 
     The run's working directory is the worktree, so it reads the target
     repository's pytest configuration, whose `addopts` may already carry `-q`.
     A second one on the command line STACKS into `-qq`, and pytest then prints
-    no summary line and no node id at all. `-rf` is the other half: under
-    plain `-q` the short summary is suppressed too, and the `FAILED` lines
-    have to be asked for by name.
+    no summary line and no node id at all, which leaves a person nothing to
+    read in the tail of a refused run. `-rf` is the other half: under plain
+    `-q` the short summary is suppressed too.
 
     Asserted on the argv rather than by running pytest: the claim is about
     what this function ASKS FOR.
@@ -244,69 +244,57 @@ def test_the_mutant_run_asks_for_the_failure_lines_and_does_not_double_quiet(
         stdout = ""
 
     def spy(argv, **kwargs):
-        seen["argv"] = argv
+        seen["argv"], seen["env"] = argv, kwargs["env"]
         return Done()
 
     monkeypatch.setattr(mutate.subprocess, "run", spy)
-    mutate.run_tests("/nowhere", ["t.py"], timeout=1)
+    got = mutate.run_tests("/nowhere", ["t.py"], timeout=1)
     argv = seen["argv"]
     assert argv.count("-q") == 0, argv
     assert "-rf" in argv, argv
+    assert argv[argv.index("pytest_invective") - 1] == "-p", argv
+    assert seen["env"]["INVECTIVE_VERDICT"].endswith("verdict.json")
+    # The stub wrote no verdict, so the run names no killer.
+    assert got.killer == ""
 
 
-def test_the_killer_is_read_through_pytest_s_colour(monkeypatch):
-    """`^FAILED` does not match a line that begins with an escape sequence.
+def test_the_killer_is_the_whole_id_whatever_pytest_prints_around_it(
+        tmp_path, monkeypatch):
+    """Read from the plugin, a node id cannot be cut by what surrounds it.
 
-    pytest can emit SGR colour on this output even when its stdout is a pipe
-    rather than a terminal, so the summary line arrives as
-    `\\x1b[31mFAILED\\x1b[0m ...` and the node id is broken up by escapes in
-    the middle (`::\\x1b[1mtest_name\\x1b[0m`). Matched raw, the killer comes
-    back empty and every kill is anonymous; matched loosely, it comes back
-    with escapes embedded and the id is unusable as an id.
-
-    The sample below is pytest's own bytes, not an approximation of them.
+    Printed, the id below is coloured (pytest colours a pipe when asked, here
+    by `PY_COLORS`), it holds spaces, and it holds a ` - ` of its own, which is
+    the separator pytest prints between an id and its message.
     """
-    coloured = (
-        "\x1b[36m\x1b[1m=========== short test summary info ============\x1b[0m\n"
-        "\x1b[31mFAILED\x1b[0m tests/test_x.py::"
-        "\x1b[1mtest_this_one_fails\x1b[0m - assert 1 == 2\n"
-        "\x1b[31m================ \x1b[31m\x1b[1m1 failed\x1b[0m\x1b[31m "
-        "in 0.05s\x1b[0m\x1b[31m ================\x1b[0m\n")
+    (tmp_path / "test_ports.py").write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.mark.parametrize('pair', ['2380 and 2381 - two ports'])\n"
+        "def test_two_ports_are_refused(pair):\n"
+        "    assert False, 'the two disagree'\n", encoding="utf-8")
+    monkeypatch.setenv("PY_COLORS", "1")
 
-    class Done:
-        returncode = 1
-        stdout = coloured
+    got = mutate.run_tests(str(tmp_path), ["test_ports.py"], timeout=60)
 
-    monkeypatch.setattr(mutate.subprocess, "run", lambda *a, **k: Done())
-    got = mutate.run_tests("/nowhere", ["t.py"], timeout=1)
-    assert got.killer == "tests/test_x.py::test_this_one_fails"
-    assert "\x1b" not in got.tail, "the tail is read by a person too"
-
-
-def test_a_parametrised_killer_survives_the_space_in_its_own_id(monkeypatch):
-    """A node id can contain spaces.
-
-    `FAILED <nodeid> - <message>` is separated by ` - `, but a parametrised id
-    carries the parameter's repr between its brackets -- so the id itself holds
-    spaces and taking it as `\\S+` cuts it at the first one. What comes back
-    then is `...refused[2380`: not something any `-k` or node-id lookup can
-    find, and indistinguishable from a whole id in the report.
-
-    **The parameter below contains a ` - ` of its own**, which is the case that
-    rules out the obvious repair. Splitting the line on the separator looks
-    right until a parameter carries one, and then the cut lands inside the
-    brackets instead. The id is bounded by its own `]`, so that is what the
-    pattern anchors on.
-    """
-    class Done:
-        returncode = 1
-        stdout = ("FAILED tests/test_ports.py::test_two_ports_are_refused"
-                  "[2380 and 2381 - two ports] - Refusal: the two disagree\n")
-
-    monkeypatch.setattr(mutate.subprocess, "run", lambda *a, **k: Done())
-    got = mutate.run_tests("/nowhere", ["t.py"], timeout=1)
-    assert got.killer == ("tests/test_ports.py::test_two_ports_are_refused"
+    assert got.code == ExitCode.TESTS_FAILED
+    assert got.killer == ("test_ports.py::test_two_ports_are_refused"
                           "[2380 and 2381 - two ports]")
+    assert "\x1b" not in got.tail, "the tail is read by a person"
+
+
+def test_a_run_that_starts_pytest_again_keeps_its_own_verdict(tmp_path):
+    """The variable is the run's alone: a pytest the suite starts does not
+    see it, so cannot write a verdict over this one's.
+    """
+    (tmp_path / "test_env.py").write_text(
+        "import os\n"
+        "\n"
+        "def test_the_verdict_file_is_not_handed_on():\n"
+        "    assert 'INVECTIVE_VERDICT' not in os.environ\n", encoding="utf-8")
+
+    got = mutate.run_tests(str(tmp_path), ["test_env.py"], timeout=60)
+
+    assert got.ok and got.killer == ""
 
 
 def test_two_mutants_of_a_line_cannot_share_a_cached_pyc(tmp_path):
@@ -538,6 +526,8 @@ def test_a_mutant_that_breaks_the_import_is_a_blunter_kill(repo):
 
     assert report["killed"] == report["broken"] == 2
     assert {k["code"] for k in report["kills"]} == {ExitCode.INTERRUPTED}
+    # A module that will not collect is named as the killer.
+    assert {k["killer"] for k in report["kills"]} == {"pkg/tests/test_ready.py"}
 
 
 def test_a_selection_that_hangs_is_stopped_and_counted_as_killed(tmp_path):

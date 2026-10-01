@@ -13,11 +13,23 @@ license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 # The engine runs `python -m pytest` with the interpreter it was started by,
-# so pytest has to be importable wherever invective is.
-dependencies = ["pytest>=8"]
+# so pytest has to be importable wherever invective is. 8.2 is the first that
+# reads arguments from an `@file`, which is how the plugin hands each run its
+# selection.
+dependencies = ["pytest>=8.2"]
 
 [project.scripts]
 invective = "invective.__main__:main"
+
+# Named as the module is, so that `-p pytest_invective` on a command line and
+# this entry point are one plugin to pytest, not two registrations of it.
+[project.entry-points.pytest11]
+pytest_invective = "pytest_invective"
+
+# The plugin is a package of its own, beside `invective` rather than inside
+# it: see `pytest_invective`'s docstring for why it must not import it.
+[tool.uv.build-backend]
+module-name = ["invective", "pytest_invective"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
