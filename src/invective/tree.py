@@ -77,13 +77,14 @@ def git_ref(root: str, ref: str):
     try:
         yield os.path.join(where, *prefix.split("/")) if prefix else where
     finally:
+        # invective: accept[equivalent: True -> False] git says nothing here a person needs
+        quietly = {"capture_output": True, "text": True}
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force",
-                        where], capture_output=True, text=True)
+                        where], **quietly)
         shutil.rmtree(where, ignore_errors=True)
         # When `remove` failed -- on Windows a file the stopped run held open
         # is enough -- the directory is gone now but git still lists it.
-        subprocess.run(["git", "-C", root, "worktree", "prune"],
-                       capture_output=True, text=True)
+        subprocess.run(["git", "-C", root, "worktree", "prune"], **quietly)
 
 
 def _git(root: str, *args: str) -> str:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -290,3 +292,32 @@ def test_options_that_change_how_tests_run_reach_every_mutant_s_run(
     assert done.returncode == 0, done.stdout + done.stderr
     (report,) = json.loads(out.read_text(encoding="utf-8"))
     assert report["killed"] == killed
+
+
+def _plugin_here():
+    """This checkout's plugin, loaded afresh: the one pytest loaded for this
+    run comes from wherever invective is installed, which in a run of
+    invective on itself is not the copy that holds the mutant."""
+    spec = importlib.util.spec_from_file_location(
+        "pytest_invective", os.path.join(SRC, "pytest_invective",
+                                         "__init__.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_options_forwarded_are_those_that_change_how_tests_run():
+    """Every `-p` the run was given, but for the plugins whose options each
+    mutant's run is given anyway, and a flag only when it was set."""
+    option = SimpleNamespace(
+        plugins=["myplugin", "no:terminal", "no:xdist", "pytest_invective"],
+        override_ini=["xfail_strict=true"], importmode="importlib")
+    given = {"pythonwarnings": ["error"], "runxfail": True,
+             "strict_markers": False}
+    config = SimpleNamespace(
+        option=option, getoption=lambda name, default=None: given.get(name,
+                                                                      default))
+
+    assert _plugin_here()._forwarded(config) == (
+        "-p", "myplugin", "-o", "xfail_strict=true", "-W", "error",
+        "--import-mode=importlib", "--runxfail")

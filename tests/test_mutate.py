@@ -332,7 +332,7 @@ def test_a_real_run_names_the_killer_and_the_line_nothing_checks(repo):
     report = mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS,
                            ["RAISE", "BOOL"], None)
 
-    assert report["target"] == GATE
+    assert report["target"] == GATE and report["tests"] == GATE_TESTS
     assert report["mutants"] == 2 and report["killed"] == 1
     assert report["broken"] == 0
     (kill,) = report["kills"]
@@ -830,3 +830,23 @@ def test_a_ref_given_to_the_command_is_the_tree_it_runs_on(repo, capsys):
                         "RAISE", "--ref", "HEAD", "--json", out]) == 0
     with open(out, encoding="utf-8") as fh:
         assert json.load(fh)["kills"][0]["line"] == 3
+
+
+def test_a_selected_test_the_tree_does_not_have_is_refused(tree):
+    """A selection collected somewhere else: one of its tests is not here."""
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(tree, os.path.join(tree, GATE), [], ["RAISE"], None,
+                      selection=["pkg/tests/test_gate.py::test_a_minor_is_refused",
+                                 "pkg/tests/test_gate.py::test_written_since"])
+    assert str(caught.value) == (
+        "1 of the tests selected are not in the tree the mutants are made in, "
+        "among them pkg/tests/test_gate.py::test_written_since")
+
+
+def test_a_refused_command_exits_2_and_says_why(tree, monkeypatch, capsys):
+    monkeypatch.chdir(tree)
+
+    assert mutate.main(["--target", "pkg/nowhere.py", "--tests",
+                        *GATE_TESTS]) == 2
+    assert "refused: pkg/nowhere.py is not in the tree" in (
+        capsys.readouterr().err.replace(os.sep, "/"))

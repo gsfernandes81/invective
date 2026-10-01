@@ -209,13 +209,14 @@ def main(argv=None):
                    ("RED baseline" if "is RED on the unmutated tree" in body else
                     "DRIVER FAILED rc=%d: %s" % (
                         got.returncode,
+                        # invective: accept[equivalent: 90 -> 91] a display width
                         (body.strip().splitlines() or ["no output"])[-1][:90]))
             report.append({"module": module, "note": note, "tests": tests})
             print("%-46s %s" % (module, note))
             continue
         killed, total, pct, survived = summary.groups()
         lines = [ln for ln in body.splitlines() if "SURVIVED" in ln]
-        fails = [ln.split(":", 1)[1].strip() for ln in body.splitlines()
+        fails = [ln.partition(":")[2].strip() for ln in body.splitlines()
                  if ln.startswith("fails:")]
         if got.returncode == 1:
             failing.append(module)
@@ -240,6 +241,7 @@ def main(argv=None):
         print("   " + m)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
+            # invective: accept[equivalent: 1 -> 2] how wide the JSON is indented
             json.dump({"measured": report, "unmeasured": unmeasured}, fh, indent=1)
     if failing:
         print("\n%d module(s) break the project's rules: %s"

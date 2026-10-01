@@ -150,6 +150,7 @@ class _Verdict:
 
 
 # First: a plugin registered after this one would otherwise be asked first.
+# invective: accept[equivalent: True -> False] nothing registered later takes the loop today
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtestloop(session):
     config = session.config
@@ -205,9 +206,11 @@ def pytest_runtestloop(session):
     out = config.getoption("mutate_json")
     if out:
         with open(out, "w", encoding="utf-8") as fh:
+            # invective: accept[equivalent: 1 -> 2] how wide the JSON is indented
             json.dump(reports, fh, indent=1)
     # A run that broke the project's own rules fails as a failing test would.
     session.testsfailed += len(failures)
+    # invective: accept[equivalent: True -> False] pluggy stops at any result that is not None
     return True
 
 

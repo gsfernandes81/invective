@@ -65,11 +65,11 @@ from invective.tree import git_ref, working_tree
 # arriving one layer down: the score reads high because nothing ran.
 
 #: Not pytest's: a run this module stopped. Any value pytest cannot exit with.
-TIMED_OUT = -1
+TIMED_OUT = -1  # invective: accept[equivalent: 1 -> 2] any code pytest cannot exit with serves
 
 #: How long the unmutated selection may take, so that a suite that hangs ends
 #: the campaign instead of holding it for ever.
-BASELINE_TIMEOUT = 600
+BASELINE_TIMEOUT = 600  # invective: accept[equivalent: 600 -> 601] any cap far above a suite's time serves
 
 
 class Verdict(NamedTuple):
@@ -252,8 +252,9 @@ _STOP_GRACE = 10.0
 def _stop(proc: subprocess.Popen) -> None:
     """Kill *proc* and every process it started, and collect what it said."""
     if os.name == "nt":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                       capture_output=True)
+        # invective: accept[untestable: True -> False] Windows only, and the sweep runs on Linux
+        quietly = {"capture_output": True}
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], **quietly)
     else:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -328,6 +329,7 @@ def run_tests(where: str, tests: list[str], timeout: float,
             killer, missing = "", ()
     # Both streams: pytest says why it could not start on stderr.
     out = _ANSI.sub("", stdout + stderr)
+    # invective: accept[equivalent: 400 -> 401] any length that holds pytest's last words serves
     return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer,
                    missing)
 
@@ -421,9 +423,11 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             raise Refusal(
                 "%d of the tests selected are not in the tree the mutants are "
                 "made in, among them %s"
+                # invective: accept[equivalent: 3 -> 4] how many are named
                 % (len(first.missing), ", ".join(first.missing[:3])))
         say("baseline:  green in %.1fs" % base)
 
+        # invective: accept[equivalent: 3 -> 4] any budget well above the baseline serves, and a kill by time is counted apart
         budget = max(30.0, base * 3)
         if limit:
             # Evenly spaced rather than the first N, so a cap does not mean
@@ -475,6 +479,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                                                     covering[0].reason))
             elif got.ok:
                 survivors.append({**mutant, "source": text})
+                # invective: accept[equivalent: 60 -> 61] a display width
                 say("  SURVIVED  %s:%d  %-28s %s" % (src_rel, line, what, text[:60]))
             else:
                 killed += 1
@@ -605,6 +610,7 @@ def main(argv: list[str] | None = None) -> int:
         print(line)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
+            # invective: accept[equivalent: 1 -> 2] how wide the JSON is indented
             json.dump(report, fh, indent=1)
         print("report:    %s" % args.json)
     failures = gate(report, config)

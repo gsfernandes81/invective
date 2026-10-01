@@ -32,8 +32,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The gate's checks are with the acceptances', and the link
+          # refusals with the copy's.
           - module: src/invective/mutate.py
-            tests: tests/test_mutate.py
+            tests: tests/test_mutate.py tests/test_accept.py tests/test_tree.py
           - module: src/invective/sweep.py
             tests: tests/test_sweep.py
           - module: src/invective/__main__.py
