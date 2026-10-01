@@ -209,3 +209,24 @@ def test_workers_are_a_usage_error(repo):
 
     assert done.returncode == 4
     assert "-n 0" in done.stderr
+
+
+def test_the_verdict_is_the_first_test_to_fail(tmp_path):
+    """The verdict's contract, whatever the run's other options: each
+    mutant's run is given `-x` and so stops at its first failure, and the
+    verdict must not lean on that."""
+    (tmp_path / "test_two.py").write_text(
+        "def test_first():\n    assert False\n\n"
+        "def test_second():\n    assert False\n", encoding="utf-8")
+    verdict = tmp_path / "verdict.json"
+
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n", "0",
+         "-p", "pytest_invective", "test_two.py"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": SRC,
+             "INVECTIVE_VERDICT": str(verdict)})
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert json.loads(verdict.read_text(encoding="utf-8")) == {
+        "killer": "test_two.py::test_first"}

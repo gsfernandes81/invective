@@ -68,6 +68,10 @@ class Refusal(Exception):
 #: Not pytest's: a run this module stopped. Any value pytest cannot exit with.
 TIMED_OUT = -1
 
+#: How long the unmutated selection may take, so that a suite that hangs ends
+#: the campaign instead of holding it for ever.
+BASELINE_TIMEOUT = 600
+
 
 class Verdict(NamedTuple):
     """What one run of the selection said.
@@ -378,8 +382,13 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                           % (src_rel, ",".join(only or sorted(OPERATORS))))
 
         started = time.time()
-        first = run_tests(where, tests, timeout=600)
+        first = run_tests(where, tests, timeout=BASELINE_TIMEOUT)
         base = time.time() - started
+        if first.code == TIMED_OUT:
+            raise Refusal(
+                "the selection took longer than %d s on the unmutated tree, "
+                "so there is no time to measure a mutant against"
+                % BASELINE_TIMEOUT)
         if first.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED):
             raise Refusal(
                 "the selection collected nothing on the unmutated tree "
@@ -436,7 +445,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     % (src_rel, line, what, got.code, got.tail))
             if got.ok:
                 survivors.append({"kind": kind, "line": line, "change": what,
-                                  "source": text[:120]})
+                                  "source": text})
                 say("  SURVIVED  %s:%d  %-28s %s" % (src_rel, line, what, text[:60]))
             else:
                 killed += 1
@@ -464,12 +473,15 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 # kill -- the suite did notice -- but a blunter one, and a
                 # campaign that cannot see the split cannot tell a
                 # well-guarded module from an unimportable one.
-                "broken": broken,
-                "score": round(100.0 * killed / len(sites), 1)}
+                "broken": broken}
     finally:
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force", where],
                        capture_output=True, text=True)
         shutil.rmtree(where, ignore_errors=True)
+        # When `remove` failed -- on Windows a file the stopped run held open
+        # is enough -- the directory is gone now but git still lists it.
+        subprocess.run(["git", "-C", root, "worktree", "prune"],
+                       capture_output=True, text=True)
 
 
 def summary(report: dict) -> list[str]:
@@ -478,8 +490,15 @@ def summary(report: dict) -> list[str]:
     The first is also what `invective sweep` reads a module's score from.
     """
     lines = ["%d/%d killed (%.1f%%), %d survived"
-             % (report["killed"], report["mutants"], report["score"],
+             % (report["killed"], report["mutants"],
+                100.0 * report["killed"] / report["mutants"],
                 len(report["survivors"]))]
+    timeouts = sum(k["code"] == TIMED_OUT for k in report["kills"])
+    if timeouts:
+        # Said apart, because a kill by time is the one a slow machine can
+        # give a mutant the suite would have let through.
+        lines.append("           %d of the kills were runs stopped at their "
+                     "time budget, not a test failing" % timeouts)
     if report["broken"]:
         # Said out loud rather than folded into the score: these are mutants
         # the runner could not collect past, and a file whose kills are mostly

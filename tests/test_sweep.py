@@ -222,14 +222,19 @@ def test_a_directory_that_is_not_there_is_refused(repo, capsys, argv):
 
 
 def test_a_report_the_engine_wrote_but_the_driver_cannot_read_is_said(
-        repo, monkeypatch, capsys):
-    """The score still comes from the printed summary; the killers do not."""
+        repo, monkeypatch, capsys, tmp_path):
+    """The score still comes from the printed summary; what only the report
+    holds is unknown, not none."""
     monkeypatch.setattr(sweep.subprocess, "run", _Engine(
         0, stdout="1/1 killed (100.0%), 0 survived\n"))
+    out = str(tmp_path / "sweep.json")
 
-    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR, "--json", out,
                 "--modules", _p("pkg/gate.py")])
 
+    with open(out, encoding="utf-8") as fh:
+        (entry,) = json.load(fh)["measured"]
+    assert (entry["score"], entry["kills"], entry["broken"]) == (100.0, None, None)
     assert "(could not read %s's own report)" % _p("pkg/gate.py") in (
         capsys.readouterr().out)
 

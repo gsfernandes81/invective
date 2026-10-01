@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import subprocess
 import time
 
 import pytest
@@ -331,7 +332,7 @@ def test_a_real_run_names_the_killer_and_the_line_nothing_checks(repo):
 
     assert report["target"] == GATE
     assert report["mutants"] == 2 and report["killed"] == 1
-    assert report["score"] == 50.0 and report["broken"] == 0
+    assert report["broken"] == 0
     (kill,) = report["kills"]
     assert kill["kind"] == "RAISE" and kill["line"] == 3
     assert kill["code"] == ExitCode.TESTS_FAILED
@@ -617,3 +618,66 @@ def test_an_interrupted_run_is_stopped_and_the_interrupt_goes_on(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         mutate.run_tests("/nowhere", ["t.py"], timeout=1)
     assert len(stopped) == 1
+
+
+def test_a_baseline_that_runs_out_of_time_is_refused_for_that(repo, monkeypatch):
+    """Not as a red baseline: nothing failed, and a person told it did would
+    go looking for a failing test."""
+    monkeypatch.setattr(mutate, "run_tests", lambda *a, **k: mutate.Verdict(
+        False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT"))
+
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"],
+                      None)
+    assert "took longer than %d s" % mutate.BASELINE_TIMEOUT in str(caught.value)
+    assert "RED" not in str(caught.value)
+
+
+def test_kills_by_time_are_said_apart_from_the_rest():
+    """A kill by time is the one a slow machine can give a mutant the suite
+    would have let through, so the closing lines count it on its own."""
+    report = {"killed": 3, "mutants": 4, "survivors": [{}], "broken": 1,
+              "kills": [{"code": mutate.TIMED_OUT}, {"code": mutate.TIMED_OUT},
+                        {"code": ExitCode.INTERRUPTED}]}
+
+    assert mutate.summary(report) == [
+        "3/4 killed (75.0%), 1 survived",
+        "           2 of the kills were runs stopped at their time budget, "
+        "not a test failing",
+        "           1 of the kills were collection or internal errors, "
+        "not a test failing"]
+
+
+def test_a_cleanup_that_fails_does_not_hide_git_s_reason(tree, monkeypatch):
+    """When git cannot make the worktree, its words are the refusal; a
+    directory that will not be removed must not replace them."""
+    git(tree, "init", "-q", "-b", "main")
+    real = mutate.shutil.rmtree
+
+    def rmtree(path, ignore_errors=False):
+        if not ignore_errors:
+            raise PermissionError(path)
+        real(path, ignore_errors=True)
+
+    monkeypatch.setattr(mutate.shutil, "rmtree", rmtree)
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None)
+    assert str(caught.value).startswith("git worktree add failed: fatal: ")
+
+
+def test_a_worktree_git_would_not_remove_is_not_left_listed(repo, monkeypatch):
+    """On Windows a file the stopped run held open is enough to make
+    `git worktree remove` fail; the repository must not keep listing it."""
+    real = mutate.subprocess.run
+
+    def run(argv, **kwargs):
+        if argv[:1] == ["git"] and "remove" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "locked")
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(mutate.subprocess, "run", run)
+    monkeypatch.setattr(mutate, "run_tests",
+                        lambda *a, **k: mutate.Verdict(True, 0, "", ""))
+    mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"], None)
+
+    assert len(git(repo, "worktree", "list").splitlines()) == 1

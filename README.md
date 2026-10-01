@@ -62,8 +62,10 @@ Without `--mutate`, the plugin does nothing.
 Only the selection reaches the mutants' runs. Options that change how tests
 run, such as `-p`, `-o`, `-W` or `--runxfail`, are not passed on: put them in
 the repository's pytest configuration, which every run reads. An option left
-behind either makes the run refuse, or leaves survivors it would have killed;
-it never adds a kill.
+behind usually makes the run refuse or leaves survivors it would have killed,
+but it can add a kill too: given `-o xfail_strict=false` on the command line
+over a configuration that sets it true, the mutants' runs are stricter than
+the run you asked for.
 
 The selection is collected from your checkout and run at the last commit. A
 test that is not committed yet makes the run refuse, and an uncommitted edit

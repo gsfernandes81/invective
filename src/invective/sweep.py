@@ -214,8 +214,10 @@ def main(argv=None):
         report.append({"module": module, "tests": tests, "killed": int(killed),
                        "mutants": int(total), "score": float(pct),
                        "survivors": lines,
-                       "kills": detail.get("kills", []),
-                       "broken": detail.get("broken", 0)})
+                       # From the engine's own report, and unknown -- not
+                       # none -- when that could not be read.
+                       "kills": detail.get("kills"),
+                       "broken": detail.get("broken")})
         print("%-46s %3s/%-3s %5s%%  %s survived"
               % (module, killed, total, pct, survived))
         for ln in lines:
