@@ -11,11 +11,11 @@ supposed to be about that file, and report every edit the suite let through. A
 surviving mutant is one of two things and both are worth knowing -- a check that
 is not load-bearing, or a line that does not matter.
 
-**It runs in a fresh git worktree of HEAD, never in the checkout.** A tool
-that rewrites source files in place hands a mutant to whoever else is reading
-the checkout, and leaves one behind if it is killed. The worktree is removed
-at the end, including after a refusal. It also means a test that is not
-committed yet is invisible to a run.
+**It runs in a copy of the project, never in the project.** A tool that
+rewrites source files in place hands a mutant to whoever else is reading them,
+and leaves one behind if it is killed. The copy is of the files as they stand
+when the run starts, uncommitted edits included, and is removed at the end,
+including after a refusal. `--ref` runs on a commit instead.
 
 **A red baseline is a refusal, not a starting point.** If the selection does not
 pass on the unmutated tree, every mutant is "killed" for a reason that has
@@ -40,7 +40,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -51,10 +50,10 @@ from typing import NamedTuple
 from pytest import ExitCode
 
 import pytest_invective
-
-
-class Refusal(Exception):
-    """Something that must be true before a single mutant is worth running."""
+from invective.accept import read as read_accepts
+from invective.config import Config, load as load_config
+from invective.errors import Refusal
+from invective.tree import git_ref, working_tree
 
 
 # --------------------------------------------------------------------------
@@ -89,6 +88,8 @@ class Verdict(NamedTuple):
     #: surviving mutant says a line is unguarded, and a killed one says which
     #: check is doing the guarding.
     killer: str
+    #: The node ids of the selection the run could not find.
+    missing: tuple[str, ...] = ()
 
 
 #: pytest can colour its output even when stdout is a pipe, and the tail is
@@ -205,35 +206,6 @@ class _ToPass(ast.NodeTransformer):
 # --------------------------------------------------------------------------
 
 
-def repo_root() -> str:
-    """The top level of the git repository the current directory is in.
-
-    A refusal outside one: every mutant lives in a worktree of HEAD, so
-    without a repository there is nowhere to run.
-    """
-    got = subprocess.run(["git", "rev-parse", "--show-toplevel"],
-                         capture_output=True, text=True)
-    if got.returncode != 0:
-        raise Refusal("not inside a git repository: mutants run in a "
-                      "worktree of HEAD, so there is nowhere to run them")
-    return got.stdout.strip()
-
-
-def worktree(root: str) -> str:
-    """A detached worktree of HEAD, so the checkout never holds a mutant.
-
-    What is being measured is the commit, and nothing else reading the
-    repository should be able to see the mutant while it exists.
-    """
-    where = tempfile.mkdtemp(prefix="invective-")
-    done = subprocess.run(["git", "-C", root, "worktree", "add", "--detach",
-                           where, "HEAD"], capture_output=True, text=True)
-    if done.returncode != 0:
-        shutil.rmtree(where, ignore_errors=True)
-        raise Refusal("git worktree add failed: %s" % (done.stderr or "").strip())
-    return where
-
-
 def _write(path: str, text: str, when: int) -> None:
     """Write *text*, then stamp the file's mtime at *when*.
 
@@ -248,6 +220,10 @@ def _write(path: str, text: str, when: int) -> None:
     line larger than the source it was built from. POSIX never shows it: text
     mode translates nothing there.
     """
+    if os.path.islink(path):
+        # Written through, the mutant would land in the file the link names,
+        # which can be the project's own.
+        os.unlink(path)
     with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write(text)
     os.utime(path, (when, when))
@@ -298,11 +274,15 @@ def _stop(proc: subprocess.Popen) -> None:
         proc.wait()
 
 
-def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:
-    """The selection, in *where*.
+def run_tests(where: str, tests: list[str], timeout: float,
+              selection: str | None = None, options: tuple[str, ...] = ()
+              ) -> Verdict:
+    """The selection, in *where*: *tests* as pytest arguments, and when
+    *selection* names a file of node ids, one a line, those tests and no
+    others. *options* come before invective's own.
 
     **No `-q` here, and that is load-bearing.** The run's working directory is
-    the worktree, so it reads the target repository's own pytest
+    the copy, so it reads the project's own pytest
     configuration, whose `addopts` may already carry one -- and a second
     STACKS into `-qq`, under which pytest prints neither a summary line nor a
     single node id, and the `tail` a person reads after a refusal says
@@ -316,16 +296,18 @@ def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:
     """
     with tempfile.TemporaryDirectory(prefix="invective-verdict-") as box:
         verdict = os.path.join(box, "verdict.json")
+        env = {**os.environ, pytest_invective.VERDICT: verdict}
+        if selection is not None:
+            env[pytest_invective.SELECTION] = selection
         # `-p no:randomly` keeps the order, and so `-x`'s first failure, the
         # same from run to run; `-p no:` of a plugin that is not installed is
         # a no-op.
         proc = subprocess.Popen(
-            [sys.executable, "-m", "pytest", "-x", "-rf", "-p", "no:randomly",
-             *_NO_WORKERS, "-p", pytest_invective.__name__,
+            [sys.executable, "-m", "pytest", *options, "-x", "-rf",
+             "-p", "no:randomly", *_NO_WORKERS, "-p", pytest_invective.__name__,
              "--no-header", *tests],
             cwd=where, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env={**os.environ, pytest_invective.VERDICT: verdict},
-            **_OWN_GROUP)
+            text=True, env=env, **_OWN_GROUP)
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -342,59 +324,74 @@ def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:
             raise
         try:
             with open(verdict, encoding="utf-8") as fh:
-                killer = json.load(fh)["killer"]
+                said = json.load(fh)
+            killer, missing = said["killer"], tuple(said["missing"])
         except (OSError, ValueError, KeyError):
             # A run that ended before its session did -- pytest could not
             # start, or a mutant broke the plugin itself -- names no test.
-            killer = ""
+            killer, missing = "", ()
     # Both streams: pytest says why it could not start on stderr.
     out = _ANSI.sub("", stdout + stderr)
-    return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer)
+    return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer,
+                   missing)
 
 
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
-           limit: int | None, say=print) -> dict:
+           limit: int | None, say=print, tree=None,
+           selection: list[str] | None = None,
+           options: tuple[str, ...] = ()) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
-    *say* receives each line of progress as it happens.
+    The mutants are written in *tree*, a context manager giving a directory
+    that stands for *root* (`tree.working_tree` or `tree.git_ref`); by
+    default a copy of *root* as it stands. *selection* is a list of node ids
+    to run instead of whatever *tests* collects, and *options* go to every
+    run's pytest. *say* receives each line of progress as it happens.
     """
     try:
         src_rel = os.path.relpath(os.path.abspath(target), root)
     except ValueError:
-        # Windows: the target is on another drive than the repository.
+        # Windows: the target is on another drive than the project.
         src_rel = os.pardir
     if src_rel == os.pardir or src_rel.startswith(os.pardir + os.sep):
-        # Joined to the worktree, this path leads out of it, and a mutant
-        # would be written over whatever file it lands on.
-        raise Refusal("%s is outside the repository at %s" % (target, root))
+        # Joined to the copy, this path leads out of it, and a mutant would
+        # be written over whatever file it lands on.
+        raise Refusal("%s is outside the project at %s" % (target, root))
 
-    where = worktree(root)
-    try:
-        say("worktree:  %s" % where)
+    with tempfile.TemporaryDirectory(prefix="invective-selection-") as box, \
+            (tree if tree is not None else working_tree(root)) as where:
+        listed = None
+        if selection is not None:
+            # One node id a line, in a file of invective's own: a selection
+            # of thousands is too long for a Windows command line.
+            listed = os.path.join(box, "selection.txt")
+            with open(listed, "w", encoding="utf-8") as fh:
+                fh.write("".join(node + "\n" for node in selection))
+        say("copy:      %s" % where)
         say("target:    %s" % src_rel)
-        say("tests:     %s" % " ".join(tests))
+        say("tests:     %s" % (" ".join(tests) if selection is None else
+                               "%d collected by pytest" % len(selection)))
 
-        # **The module is read from the worktree, never from the checkout.**
-        # The tests run at HEAD, so the module has to be HEAD's too: a copy
-        # with uncommitted edits would carry them into every mutant, and each
-        # run would differ from what the tests were written against by more
-        # than the one edit being measured.
         path = os.path.join(where, src_rel)
         if not os.path.isfile(path):
-            raise Refusal("%s is not in the last commit, and mutants are made "
-                          "from the last commit" % src_rel)
+            raise Refusal("%s is not in the tree the mutants are made in" % src_rel)
         with open(path, encoding="utf-8") as fh:
             source = fh.read()
         lines = source.split("\n")
-        tree = ast.parse(source)
-        sites = [(i, k, n, w) for i, (k, n, w) in enumerate(_sites(tree))
+        tree_ = ast.parse(source)
+        accepts = read_accepts(source, src_rel)
+        every = [(n.lineno, w) for _k, n, w in _sites(tree_)]   # type: ignore[attr-defined]
+        sites = [(i, k, n, w) for i, (k, n, w) in enumerate(_sites(tree_))
                  if not only or k in only]
         if not sites:
             raise Refusal("no mutation sites in %s for %s"
                           % (src_rel, ",".join(only or sorted(OPERATORS))))
 
+        def run(timeout):
+            return run_tests(where, tests, timeout, listed, options)
+
         started = time.time()
-        first = run_tests(where, tests, timeout=BASELINE_TIMEOUT)
+        first = run(BASELINE_TIMEOUT)
         base = time.time() - started
         if first.code == TIMED_OUT:
             raise Refusal(
@@ -413,6 +410,13 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 "would be 'killed' for a reason that is not the mutation and "
                 "the score would read perfect. Fix the suite first.\n%s"
                 % first.tail)
+        if first.missing:
+            # The selection was collected somewhere else -- a checkout that
+            # has moved on, or a commit the tests are not at.
+            raise Refusal(
+                "%d of the tests selected are not in the tree the mutants are "
+                "made in, among them %s"
+                % (len(first.missing), ", ".join(first.missing[:3])))
         say("baseline:  green in %.1fs" % base)
 
         budget = max(30.0, base * 3)
@@ -423,7 +427,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             sites = sites[::step][:limit]
         say("mutants:   %d\n" % len(sites))
 
-        survivors, kills, killed, broken = [], [], 0, 0
+        survivors, accepted, kills, killed, broken = [], [], [], 0, 0
+        stale = {}
         # **Every mutant gets its own whole second, or a verdict can belong to
         # the mutant before it.** CPython invalidates a cached `.pyc` on the
         # source's `(mtime, size)` -- and it stores that mtime as WHOLE
@@ -434,14 +439,14 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # bytecode, and the run reports on an edit it never loaded. Stamping a
         # strictly increasing mtime makes the pair differ every time, and the
         # first stamp is a second past the clock, which is never earlier than
-        # the worktree's own copy of the file. Only this file is stamped, so
-        # every other module keeps its cache and the cost is nothing. Each
-        # mutant is the whole file, so the next write replaces the last one
-        # and every run differs from HEAD by exactly one edit.
+        # the copy's own file. Only this file is stamped, so every other
+        # module keeps its cache and the cost is nothing. Each mutant is the
+        # whole file, so the next write replaces the last one and every run
+        # differs from the copy by exactly one edit.
         clock = int(time.time())
         for n, (idx, kind, node, what) in enumerate(sites, 1):
-            _write(path, ast.unparse(_apply(tree, idx)), clock + n)
-            got = run_tests(where, tests, timeout=budget)
+            _write(path, ast.unparse(_apply(tree_, idx)), clock + n)
+            got = run(budget)
             line = node.lineno                                  # type: ignore[attr-defined]
             text = lines[line - 1].strip()
             if (got.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED)
@@ -455,9 +460,16 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "this is the runner and not the mutation. Counting it as "
                     "a kill would score a run that never ran a test.\n%s"
                     % (src_rel, line, what, got.code, got.tail))
-            if got.ok:
-                survivors.append({"kind": kind, "line": line, "change": what,
-                                  "source": text})
+            covering = [a for a in accepts if a.covers(line, what)]
+            mutant = {"kind": kind, "line": line, "change": what}
+            if got.ok and covering:
+                accepted.append({**mutant, "source": text,
+                                 "reason": covering[0].reason,
+                                 "why": covering[0].why})
+                say("  accepted  %s:%d  %-28s %s" % (src_rel, line, what,
+                                                    covering[0].reason))
+            elif got.ok:
+                survivors.append({**mutant, "source": text})
                 say("  SURVIVED  %s:%d  %-28s %s" % (src_rel, line, what, text[:60]))
             else:
                 killed += 1
@@ -466,34 +478,40 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 # noticed; with one, it says what the line is FOR -- and a
                 # line whose only killer is a test about something else is a
                 # finding of its own.
-                kills.append({"kind": kind, "line": line, "change": what,
-                              "killer": got.killer, "code": got.code})
+                kills.append({**mutant, "killer": got.killer, "code": got.code})
                 # A module that would not import, under the mutant: pytest
                 # exits 2 for that when the selection names files, and 4 --
-                # "found no collectors" -- when it names node ids, as the
-                # plugin's does. The killer is the module that failed.
+                # "found no collectors" -- when it names node ids. The killer
+                # is the module that failed.
                 if got.code in (ExitCode.INTERRUPTED, ExitCode.INTERNAL_ERROR,
                                 ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED):
                     broken += 1
+                for a in covering:
+                    stale.setdefault(a, "%s is killed by %s"
+                                     % (what, got.killer or "a run that failed"))
             if n % 10 == 0:
                 say("  ... %d/%d, %d survived" % (n, len(sites), len(survivors)))
 
-        return {"target": src_rel, "tests": tests, "mutants": len(sites),
-                "killed": killed, "survivors": survivors, "kills": kills,
+        for a in accepts:
+            if not any(a.covers(line, what) for line, what in every):
+                stale.setdefault(a, "line %d has no mutant %s" % (
+                    a.line, a.change if a.change else "at all"))
+        stale_ = [{"line": a.at, "applies_to": a.line, "reason": a.reason,
+                   "change": a.change, "why": a.why, "problem": problem}
+                  for a, problem in sorted(stale.items())]
+        for entry in stale_:
+            say("  STALE     %s:%d  accept[%s]  %s" % (
+                src_rel, entry["line"], entry["reason"], entry["problem"]))
+
+        return {"target": src_rel, "tests": tests if selection is None else selection,
+                "mutants": len(sites), "killed": killed, "kills": kills,
+                "survivors": survivors, "accepted": accepted, "stale": stale_,
                 # Killed by a mutation the runner could not even import or
                 # collect past, rather than by a test failing on it. Still a
                 # kill -- the suite did notice -- but a blunter one, and a
                 # campaign that cannot see the split cannot tell a
                 # well-guarded module from an unimportable one.
                 "broken": broken}
-    finally:
-        subprocess.run(["git", "-C", root, "worktree", "remove", "--force", where],
-                       capture_output=True, text=True)
-        shutil.rmtree(where, ignore_errors=True)
-        # When `remove` failed -- on Windows a file the stopped run held open
-        # is enough -- the directory is gone now but git still lists it.
-        subprocess.run(["git", "-C", root, "worktree", "prune"],
-                       capture_output=True, text=True)
 
 
 def summary(report: dict) -> list[str]:
@@ -501,10 +519,16 @@ def summary(report: dict) -> list[str]:
 
     The first is also what `invective sweep` reads a module's score from.
     """
+    survived = len(report["survivors"]) + len(report["accepted"])
     lines = ["%d/%d killed (%.1f%%), %d survived"
              % (report["killed"], report["mutants"],
-                100.0 * report["killed"] / report["mutants"],
-                len(report["survivors"]))]
+                100.0 * report["killed"] / report["mutants"], survived)]
+    if report["accepted"]:
+        lines.append("           %d of the survivors are accepted in the "
+                     "source" % len(report["accepted"]))
+    if report["stale"]:
+        lines.append("           %d acceptance(s) are stale: what they claim "
+                     "is not so" % len(report["stale"]))
     timeouts = sum(k["code"] == TIMED_OUT for k in report["kills"])
     if timeouts:
         # Said apart, because a kill by time is the one a slow machine can
@@ -520,15 +544,38 @@ def summary(report: dict) -> list[str]:
     return lines
 
 
+def gate(report: dict, config: Config) -> list[str]:
+    """Why the run fails under *config*, a sentence each; none when it passes.
+
+    Survivors are a finding to read, and fail a run only when the project's
+    `[tool.invective]` says so: some are equivalent mutants, and only a
+    person can say which, in an acceptance beside the line.
+    """
+    failures = []
+    if config.fail_on_survivors and report["survivors"]:
+        failures.append("%d survivor(s) that no comment accepts"
+                        % len(report["survivors"]))
+    if config.fail_on_survivors and report["stale"]:
+        failures.append("%d stale acceptance(s)" % len(report["stale"]))
+    if (config.max_accepted is not None
+            and len(report["accepted"]) > config.max_accepted):
+        failures.append("%d accepted survivors, more than max-accepted = %d"
+                        % (len(report["accepted"]), config.max_accepted))
+    return failures
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="invective run", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", required=True, help="the module to break")
     ap.add_argument("--tests", required=True, nargs="+",
-                    help="pytest arguments, relative to the repo root")
+                    help="pytest arguments, relative to the current directory, "
+                         "the project's top level")
     ap.add_argument("--only", help="comma-separated: %s" % ",".join(sorted(OPERATORS)))
     ap.add_argument("--limit", type=int, help="cap the number of mutants")
     ap.add_argument("--json", help="write the report here as well")
+    ap.add_argument("--ref", help="run on this git commit, branch or tag "
+                                  "instead of the files as they stand")
     args = ap.parse_args(argv)
 
     only = [k.strip().upper() for k in args.only.split(",")] if args.only else None
@@ -537,8 +584,13 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             print("unknown operator(s): %s" % ", ".join(unknown), file=sys.stderr)
             return 2
+    root = os.getcwd()
     try:
-        report = mutate(repo_root(), args.target, args.tests, only, args.limit)
+        config = load_config(root)
+        tree = (git_ref(root, args.ref) if args.ref
+                else working_tree(root, config.exclude))
+        report = mutate(root, args.target, args.tests, only, args.limit,
+                        tree=tree)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
@@ -550,10 +602,12 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=1)
         print("report:    %s" % args.json)
-    # Survivors are a finding to read, not a build failure: some are equivalent
-    # mutants and no threshold here could tell them apart. Exit 0 unless the
-    # run itself could not be trusted.
-    return 0
+    failures = gate(report, config)
+    for failure in failures:
+        print("fails:     %s" % failure)
+    # 2 is a run that could not be trusted; 1 is one that ran and broke the
+    # project's own rules.
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

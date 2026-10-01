@@ -38,6 +38,13 @@ jobs:
             tests: tests/test_sweep.py
           - module: src/invective/__main__.py
             tests: tests/test_cli.py
+          - module: src/invective/accept.py
+            tests: tests/test_accept.py
+          - module: src/invective/config.py
+            tests: tests/test_accept.py
+          # The git tests are the engine's: a run on a ref.
+          - module: src/invective/tree.py
+            tests: tests/test_tree.py tests/test_mutate.py
           # Its tests start pytest rather than import it, so no sweep of
           # imports would pair them.
           - module: src/pytest_invective/__init__.py

@@ -10,8 +10,8 @@ coverage map the repository already maintains by writing tests that import what
 they test. A module with no such file is reported as unmeasured rather than
 skipped silently -- that distinction is the whole point.
 
-Run it from the repository's top level; `--src` and `--tests-dir` are
-relative to it.
+Run it from the project's top level; `--src` and `--tests-dir` are relative
+to it. It exits 1 when a module breaks the project's `[tool.invective]` rules.
 
     invective sweep --src src/pkg --tests-dir tests [--limit N] [--only OPS]
 """
@@ -23,7 +23,7 @@ import subprocess
 import sys
 import tempfile
 
-from invective.mutate import Refusal, repo_root
+from invective.errors import Refusal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -137,10 +137,12 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=25)
     ap.add_argument("--json", default=None)
     ap.add_argument("--modules", nargs="*")
+    ap.add_argument("--ref", help="run on this git commit, branch or tag "
+                                  "instead of the files as they stand")
     args = ap.parse_args(argv)
 
+    root = os.getcwd()
     try:
-        root = repo_root()
         # A directory that is not there walks as empty, and an empty sweep
         # prints "0 module(s) measured" -- which reads as a result, not as a
         # mistyped path.
@@ -151,7 +153,7 @@ def main(argv=None):
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
 
-    report, unmeasured = [], []
+    report, unmeasured, failing = [], [], []
     for module in (args.modules or modules(root, args.src, args.tests_dir)):
         tests = covering(root, module, args.src, args.tests_dir)
         if not tests:
@@ -166,6 +168,8 @@ def main(argv=None):
                "--target", module, "--tests", *tests, "--only", args.only]
         if args.limit:
             cmd += ["--limit", str(args.limit)]
+        if args.ref:
+            cmd += ["--ref", args.ref]
         # **The per-module report is asked for and read, not re-derived from
         # the printed summary.** The summary carries a score; the engine's
         # JSON carries which test killed each mutant, and that is the half
@@ -211,17 +215,24 @@ def main(argv=None):
             continue
         killed, total, pct, survived = summary.groups()
         lines = [ln for ln in body.splitlines() if "SURVIVED" in ln]
+        fails = [ln.split(":", 1)[1].strip() for ln in body.splitlines()
+                 if ln.startswith("fails:")]
+        if got.returncode == 1:
+            failing.append(module)
         report.append({"module": module, "tests": tests, "killed": int(killed),
                        "mutants": int(total), "score": float(pct),
                        "survivors": lines,
                        # From the engine's own report, and unknown -- not
                        # none -- when that could not be read.
                        "kills": detail.get("kills"),
-                       "broken": detail.get("broken")})
+                       "broken": detail.get("broken"),
+                       "fails": fails})
         print("%-46s %3s/%-3s %5s%%  %s survived"
               % (module, killed, total, pct, survived))
         for ln in lines:
             print("      " + ln.strip())
+        for fail in fails:
+            print("      fails: " + fail)
 
     print("\n%d module(s) measured; %d with no test file importing them:"
           % (len([r for r in report if "score" in r]), len(unmeasured)))
@@ -230,7 +241,10 @@ def main(argv=None):
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump({"measured": report, "unmeasured": unmeasured}, fh, indent=1)
-    return 0
+    if failing:
+        print("\n%d module(s) break the project's rules: %s"
+              % (len(failing), ", ".join(failing)))
+    return 1 if failing else 0
 
 
 if __name__ == "__main__":
