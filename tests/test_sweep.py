@@ -248,3 +248,27 @@ def test_the_command_says_which_argument_is_missing(capsys, argv, missing):
         sweep.main(argv)
     assert stopped.value.code == 2
     assert missing in capsys.readouterr().err
+
+
+def test_a_module_that_breaks_the_project_s_rules_fails_the_sweep(
+        repo, monkeypatch, capsys):
+    monkeypatch.setattr(sweep.subprocess, "run", _Engine(
+        1, stdout=("1/2 killed (50.0%), 1 survived\n"
+                   "fails:     1 survivor(s) that no comment accepts\n")))
+
+    assert sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                       "--modules", _p("pkg/gate.py")]) == 1
+    said = capsys.readouterr().out
+    assert "fails: 1 survivor(s) that no comment accepts" in said
+    assert "1 module(s) break the project's rules: %s" % _p("pkg/gate.py") in said
+
+
+def test_a_ref_given_to_the_sweep_reaches_the_engine(repo, monkeypatch):
+    engine = _Engine(0, stdout="1/1 killed (100.0%), 0 survived\n")
+    monkeypatch.setattr(sweep.subprocess, "run", engine)
+
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR, "--ref", "main",
+                "--modules", _p("pkg/gate.py")])
+
+    ((cmd, _kwargs),) = engine.commands
+    assert cmd[cmd.index("--ref") + 1] == "main"

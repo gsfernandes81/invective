@@ -5,32 +5,36 @@ time and runs the tests pytest collected against each edit, every one in a
 fresh pytest process of its own, then reports the edits no test noticed.
 Without `--mutate` the plugin does nothing.
 
-It also reports from inside each of those runs: when `INVECTIVE_VERDICT`
-names a file, the first test to fail is written there as the session ends.
-That is how the engine learns which test killed a mutant.
+It also works from inside each of those runs. When `INVECTIVE_SELECTION`
+names a file of node ids, one a line, the run collects their files and keeps
+those tests and no others. When `INVECTIVE_VERDICT` names a file, the first
+test to fail, and any selected test not found, are written there as the
+session ends. That is how the engine learns which test killed a mutant.
 
 **Nothing from `invective` is imported unless `--mutate` is given.** pytest
 before 8.4 loads plugins before a repository's own `pythonpath` setting takes
 effect, and every pytest loads them before any `conftest.py`, so a package
 imported here comes from wherever it is installed. In a run of invective
-against its own code, that is the checkout and not the worktree that holds
+against its own code, that is the checkout and not the copy that holds
 the mutant, and every mutant would survive.
 """
 
 from __future__ import annotations
 
 import json
-import locale
 import os
-import sys
-import tempfile
 
 import pytest
 
 #: The environment variable that names the file a run's verdict goes to.
 VERDICT = "INVECTIVE_VERDICT"
+#: The environment variable that names the file of node ids a run keeps.
+SELECTION = "INVECTIVE_SELECTION"
 
 _REPORTS = pytest.StashKey[list]()
+_FAILURES = pytest.StashKey[list]()
+_WANTED = pytest.StashKey[list]()
+_MISSING = pytest.StashKey[list]()
 
 
 def pytest_addoption(parser):
@@ -49,6 +53,39 @@ def pytest_addoption(parser):
     group.addoption(
         "--mutate-json", metavar="FILE",
         help="write the reports to FILE as well, as a JSON list")
+    group.addoption(
+        "--mutate-ref", metavar="REF",
+        help="make the mutants from this git commit, branch or tag instead of "
+             "the files as they stand")
+
+
+def pytest_load_initial_conftests(early_config, parser, args):
+    # Popped, not read, as the verdict's variable is below.
+    path = os.environ.pop(SELECTION, None)
+    if path is None:
+        return
+    with open(path, encoding="utf-8") as fh:
+        wanted = fh.read().splitlines()
+    early_config.stash[_WANTED] = wanted
+    # Their files, to collect; `pytest_collection_modifyitems` keeps the tests.
+    args.extend(dict.fromkeys(node.partition("::")[0] for node in wanted))
+
+
+def pytest_collection_modifyitems(config, items):
+    wanted = config.stash.get(_WANTED, None)
+    if wanted is None:
+        return
+    root = str(config.invocation_params.dir)
+    want = set(wanted)
+    keep, drop, found = [], [], set()
+    for item in items:
+        key = _key(item, root)
+        found.add(key)
+        (keep if key in want else drop).append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep
+    config.stash[_MISSING] = [node for node in wanted if node not in found]
 
 
 def pytest_configure(config):
@@ -99,7 +136,7 @@ class _Verdict:
     def _note(self, report):
         if report.failed and not self.killer:
             # As pytest's own summary prints it: relative to where the run
-            # started, which is the top of the worktree. Rewritten that way,
+            # started, which is the top of the copy. Rewritten that way,
             # the file's path has Windows separators on Windows, and a node
             # id spells its path with `/` everywhere.
             path, sep, rest = self.config.cwd_relative_nodeid(
@@ -108,7 +145,8 @@ class _Verdict:
 
     def pytest_sessionfinish(self):
         with open(self.path, "w", encoding="utf-8") as fh:
-            json.dump({"killer": self.killer}, fh)
+            json.dump({"killer": self.killer,
+                       "missing": self.config.stash.get(_MISSING, [])}, fh)
 
 
 # First: a plugin registered after this one would otherwise be asked first.
@@ -121,9 +159,13 @@ def pytest_runtestloop(session):
         return None
     from invective import mutate
 
+    from invective import config as settings
+    from invective import tree
+
     tr = config.pluginmanager.get_plugin("terminalreporter")
     say = tr.write_line if tr is not None else print
-    reports = []
+    root = str(config.invocation_params.dir)
+    reports, failures = [], []
     try:
         if session.testsfailed:
             # Even with --continue-on-collection-errors: the tests that did
@@ -136,65 +178,95 @@ def pytest_runtestloop(session):
             # would run every test it could find instead.
             raise mutate.Refusal("pytest collected no tests, so there is "
                                  "nothing to notice a mutant")
-        root = mutate.repo_root()
+        rules = settings.load(root)
         selection = [_node(item, root) for item in session.items]
-        with tempfile.TemporaryDirectory(prefix="invective-") as box:
-            # One node id a line, read by pytest's own `@file`: a selection
-            # of thousands is too long for a Windows command line.
-            listed = os.path.join(box, "selection.txt")
-            with open(listed, "w", **_ARGFILE_ENCODING) as fh:
-                fh.write("".join(node + "\n" for node in selection))
-            for target in targets:
-                report = mutate.mutate(root, target, ["@" + listed],
-                                       _only(config),
-                                       config.getoption("mutate_limit"),
-                                       say=say)
-                report["tests"] = selection
-                reports.append(report)
+        ref = config.getoption("mutate_ref")
+        for target in targets:
+            report = mutate.mutate(
+                root, target, [], _only(config),
+                config.getoption("mutate_limit"), say=say,
+                tree=(tree.git_ref(root, ref) if ref
+                      else tree.working_tree(root, rules.exclude)),
+                selection=selection, options=_forwarded(config))
+            reports.append(report)
+            failures.extend("%s: %s" % (report["target"], failure)
+                            for failure in mutate.gate(report, rules))
     except mutate.Refusal as exc:
         say("refused: %s" % exc)
         pytest.exit("invective refused the run", returncode=2)
 
     config.stash[_REPORTS] = reports
+    config.stash[_FAILURES] = failures
     if tr is None:
         # `pytest_terminal_summary` belongs to the terminal plugin, and
         # without it the score would never be shown.
-        from invective.mutate import summary
-        for report in reports:
-            for line in summary(report):
-                print(line)
+        for line in _closing(reports, failures):
+            print(line)
     out = config.getoption("mutate_json")
     if out:
         with open(out, "w", encoding="utf-8") as fh:
             json.dump(reports, fh, indent=1)
+    # A run that broke the project's own rules fails as a failing test would.
+    session.testsfailed += len(failures)
     return True
 
 
-#: How argparse reads an `@file`: with the locale's encoding before Python
-#: 3.12, with the file system's from 3.12. Written any other way, a path that
-#: is not ASCII is not found.
-if sys.version_info >= (3, 12):
-    _ARGFILE_ENCODING = {"encoding": sys.getfilesystemencoding(),
-                         "errors": sys.getfilesystemencodeerrors()}
-else:
-    _ARGFILE_ENCODING = {"encoding": locale.getpreferredencoding(False)}
+_ENGINE_S = frozenset({"terminal", "xdist", "xdist.plugin", __name__})
 
 
-def _node(item, root):
+#: The options of the run that change how its tests behave, which each
+#: mutant's run is given too. Anything else stays behind: `--pdb` would stop
+#: a run for good, `--lf` would drop tests, and `-q` would leave a refusal
+#: nothing to quote.
+def _forwarded(config):
+    forwarded = []
+    for plugin in config.option.plugins or ():
+        # The plugins whose options every run is given (`-rf`, `--no-header`,
+        # `-n 0`) or that report its verdict stay as the engine sets them.
+        if plugin.removeprefix("no:") not in _ENGINE_S:
+            forwarded += ["-p", plugin]
+    for override in config.option.override_ini or ():
+        forwarded += ["-o", override]
+    for warning in config.getoption("pythonwarnings", None) or ():
+        forwarded += ["-W", warning]
+    forwarded.append("--import-mode=%s" % config.option.importmode)
+    for flag, dest in (("--runxfail", "runxfail"),
+                       ("--strict-markers", "strict_markers"),
+                       ("--doctest-modules", "doctestmodules")):
+        if config.getoption(dest, False):
+            forwarded.append(flag)
+    return tuple(forwarded)
+
+
+def _key(item, root):
     """The item's node id, its file given from *root*, where every run starts."""
-    from invective.mutate import Refusal
-
     try:
         path = os.path.relpath(str(item.path), root)
     except ValueError:
-        # Windows: the test is on another drive than the repository.
+        # Windows: the test is on another drive than the project.
         path = os.pardir
-    if path == os.pardir or path.startswith(os.pardir + os.sep):
-        # The worktree holds the repository and nothing else.
-        raise Refusal("%s is outside the repository at %s, so no run at "
-                      "the last commit has it" % (item.nodeid, root))
     _file, sep, rest = item.nodeid.partition("::")
     return path.replace(os.sep, "/") + sep + rest
+
+
+def _node(item, root):
+    """`_key`, for a test that has to be in the copy every run starts in."""
+    from invective.mutate import Refusal
+
+    node = _key(item, root)
+    if node == os.pardir or node.startswith(os.pardir + "/"):
+        raise Refusal("%s is outside the project at %s, so no copy of it "
+                      "has it" % (item.nodeid, root))
+    return node
+
+
+def _closing(reports, failures):
+    from invective.mutate import summary
+
+    for report in reports:
+        yield from summary(report)
+    for failure in failures:
+        yield "fails:     %s" % failure
 
 
 def pytest_terminal_summary(terminalreporter, config):
@@ -207,3 +279,5 @@ def pytest_terminal_summary(terminalreporter, config):
         terminalreporter.section("invective: %s" % report["target"])
         for line in summary(report):
             terminalreporter.write_line(line)
+    for failure in config.stash.get(_FAILURES, []):
+        terminalreporter.write_line("fails:     %s" % failure)

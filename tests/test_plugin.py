@@ -78,7 +78,7 @@ def test_a_selection_of_nothing_is_refused_and_runs_nothing(repo):
 
     assert done.returncode == 2
     assert "refused: pytest collected no tests" in done.stdout
-    assert "worktree:" not in done.stdout
+    assert "copy:" not in done.stdout
 
 
 def test_a_red_baseline_is_refused(repo):
@@ -100,7 +100,7 @@ def test_a_collection_error_stops_the_run_before_any_mutant(repo, carry_on):
 
     assert done.returncode == 2
     assert "refused: 1 error(s) during collection" in done.stdout
-    assert "worktree:" not in done.stdout
+    assert "copy:" not in done.stdout
 
 
 def test_node_ids_are_given_from_the_top_of_the_repository(repo, tmp_path):
@@ -140,7 +140,7 @@ def test_a_test_whose_path_is_not_ascii_is_found(repo, tmp_path):
         "pkg/tests/test_größe.py::test_a_minor_is_refused"]
 
 
-def test_a_test_outside_the_repository_is_refused(repo, tmp_path):
+def test_a_test_outside_the_project_is_refused(repo, tmp_path):
     """No run at the last commit has it."""
     outside = tmp_path / "outside" / "test_outside.py"
     outside.parent.mkdir()
@@ -149,8 +149,8 @@ def test_a_test_outside_the_repository_is_refused(repo, tmp_path):
     done = pytest_in(repo, "--mutate", "pkg/gate.py", str(outside))
 
     assert done.returncode == 2
-    assert "is outside the repository" in done.stdout
-    assert "worktree:" not in done.stdout
+    assert "is outside the project" in done.stdout
+    assert "copy:" not in done.stdout
 
 
 def test_mutate_inside_a_mutant_s_own_run_is_a_usage_error(repo, tmp_path):
@@ -183,7 +183,7 @@ def test_collect_only_lists_the_tests_and_mutates_nothing(repo):
 
     assert done.returncode == 0, done.stdout + done.stderr
     assert "test_a_minor_is_refused" in done.stdout
-    assert "worktree:" not in done.stdout
+    assert "copy:" not in done.stdout
 
 
 def test_without_mutate_the_plugin_leaves_the_run_alone(repo):
@@ -229,4 +229,64 @@ def test_the_verdict_is_the_first_test_to_fail(tmp_path):
 
     assert done.returncode == 1, done.stdout + done.stderr
     assert json.loads(verdict.read_text(encoding="utf-8")) == {
-        "killer": "test_two.py::test_first"}
+        "killer": "test_two.py::test_first", "missing": []}
+
+
+def test_a_run_that_breaks_the_project_s_rules_fails_as_a_test_would(repo):
+    write_tree(repo, {"pyproject.toml":
+                      "[tool.invective]\nfail-on-survivors = true\n"})
+
+    done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only", "BOOL",
+                     "pkg/tests/test_gate.py")
+
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert ("fails:     %s: 1 survivor(s) that no comment accepts"
+            % _p("pkg/gate.py")) in done.stdout
+
+
+def test_a_ref_that_lacks_a_selected_test_is_refused(repo):
+    """The selection is collected from the files as they stand; at a ref, a
+    test added since is not there to run."""
+    with open(os.path.join(repo, "pkg", "tests", "test_gate.py"),
+              encoding="utf-8") as fh:
+        source = fh.read()
+    write_tree(repo, {"pkg/tests/test_gate.py":
+                      source + "\ndef test_added_since():\n    pass\n"})
+
+    done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-ref", "HEAD",
+                     "pkg/tests/test_gate.py")
+
+    assert done.returncode == 2
+    assert "1 of the tests selected are not in the tree" in done.stdout
+    assert "test_added_since" in done.stdout
+
+
+@pytest.mark.parametrize("options, killed", [
+    ([], 0),
+    (["-W", "error::UserWarning"], 1),
+    (["-o", "filterwarnings=error::UserWarning"], 1),
+])
+def test_options_that_change_how_tests_run_reach_every_mutant_s_run(
+        repo, tmp_path, options, killed):
+    """Only a warning turned into an error can tell `<` from `<=` here."""
+    commit(repo, {
+        "pkg/warn.py": ("import warnings\n"
+                        "\n"
+                        "def f(n):\n"
+                        "    if n < 0:\n"
+                        "        warnings.warn('negative', UserWarning)\n"
+                        "    return n\n"),
+        "pkg/tests/test_warn.py": ("from pkg import warn\n"
+                                   "\n"
+                                   "def test_zero():\n"
+                                   "    assert warn.f(0) == 0\n"),
+    })
+    out = tmp_path / "reports.json"
+
+    done = pytest_in(repo, *options, "--mutate", "pkg/warn.py",
+                     "--mutate-only", "CMP", "--mutate-json", str(out),
+                     "pkg/tests/test_warn.py")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    (report,) = json.loads(out.read_text(encoding="utf-8"))
+    assert report["killed"] == killed

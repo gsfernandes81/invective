@@ -15,19 +15,21 @@ tests you want to measure:
 
     uv add --dev git+https://github.com/gsfernandes81/invective
 
-It needs pytest 8.2 or later and `git` on the PATH, and supports every
-Python that has not reached its end of life: 3.11 to 3.14 today.
+It needs pytest 8.2 or later, and supports every Python that has not reached
+its end of life: 3.11 to 3.14 today. It does not need git, except to run on a
+commit with `--ref`.
 
 ## One module
 
+Run it from the project's top level:
+
     invective run --target src/pkg/gate.py --tests tests/test_gate.py
 
-`--tests` takes anything pytest accepts as a selection, relative to the
-repository's top level. `--only CMP,RAISE` limits the kinds of edit,
-`--limit 40` caps how many are tried (evenly spaced through the file), and
-`--json report.json` writes the full report.
+`--tests` takes anything pytest accepts as a selection. `--only CMP,RAISE`
+limits the kinds of edit, `--limit 40` caps how many are tried (evenly spaced
+through the file), and `--json report.json` writes the full report.
 
-    worktree:  /tmp/invective-k2m1x9
+    copy:      /tmp/invective-k2m1x9
     target:    src/pkg/gate.py
     tests:     tests/test_gate.py
     baseline:  green in 0.4s
@@ -41,6 +43,17 @@ The JSON report also names, for every killed mutant, the first test that
 failed on it. Each mutant's run reports that through invective's own pytest
 plugin, which it loads.
 
+## What is measured
+
+The mutants are written in a copy of the project made as the run starts, so
+your files never hold one, and nothing is left behind if the run is killed.
+The copy is of the files as they stand: uncommitted edits and new files are
+measured. It leaves out version control, caches and virtual environments;
+`exclude` in `[tool.invective]` leaves out anything else, such as large data.
+
+To measure a commit instead, give `--ref` (`--mutate-ref` from pytest) a
+commit, branch or tag. That is the one use invective makes of git.
+
 ## From pytest
 
 Installed, invective is also a pytest plugin. Give pytest the module to break
@@ -50,32 +63,26 @@ with `--mutate`, and select tests the way you always do:
 
 The mutants are run against exactly the tests pytest collected, so `-k`, `-m`,
 `--deselect` and node ids all narrow the selection. `--mutate` can be given
-more than once; `--mutate-only`, `--mutate-limit` and `--mutate-json` work as
-`--only`, `--limit` and `--json` do for `invective run`. The tests are not
-run as an ordinary session, so pytest's last line says "no tests ran"; the
-report is the section above it.
+more than once; `--mutate-only`, `--mutate-limit`, `--mutate-json` and
+`--mutate-ref` work as `--only`, `--limit`, `--json` and `--ref` do for
+`invective run`. The tests are not run as an ordinary session, so pytest's
+last line says "no tests ran"; the report is the section above it.
 
 pytest-xdist's workers have to be off for the outer run (`-n 0`): its
 controlling process collects nothing, and an empty selection is refused.
 Without `--mutate`, the plugin does nothing.
 
-Only the selection reaches the mutants' runs. Options that change how tests
-run, such as `-p`, `-o`, `-W` or `--runxfail`, are not passed on: put them in
-the repository's pytest configuration, which every run reads. An option left
-behind usually makes the run refuse or leaves survivors it would have killed,
-but it can add a kill too: given `-o xfail_strict=false` on the command line
-over a configuration that sets it true, the mutants' runs are stricter than
-the run you asked for.
-
-The selection is collected from your checkout and run at the last commit. A
-test that is not committed yet makes the run refuse, and an uncommitted edit
-to a test is not in the run at all.
+These options reach every mutant's run as you gave them: `-p`, `-o`, `-W`,
+`--import-mode`, `--runxfail`, `--strict-markers` and `--doctest-modules`.
+Others do not: `--pdb` would stop a run for good, `--lf` would drop tests,
+and `-q` would leave a refusal nothing to quote. Your pytest configuration is
+in the copy, so every run reads it.
 
 ## A whole source tree
 
     invective sweep --src src/pkg --tests-dir tests
 
-Run it from the repository's top level. Each module under `--src` is mutated
+Run it from the project's top level. Each module under `--src` is mutated
 against the `test_*.py` files in `--tests-dir` that import it, or that are
 named after it. A module no test file imports is listed as **unmeasured**:
 it has no score, which is different from a perfect one.
@@ -100,17 +107,39 @@ Strings are never edited.
 A survivor is a question: does anything depend on this line being as it is?
 There are three sound answers. Write the test that checks it, and say what
 failure that test guards against. Delete the line, if nothing depends on it.
-Or record why neither applies, as with an edit that cannot change behaviour.
+Or accept it in the source, saying why neither applies:
 
-invective exits 0 when there are survivors. It exits 2 when the run could not
-be trusted, and says why.
+    tail = out[-400:]  # invective: accept[equivalent: 400 -> 401] any length serves
+
+    # invective: accept[untestable] Windows only, and the sweep runs on Linux
+    subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True)
+
+The reason is `equivalent`, `untestable` or `out_of_scope`, the same as
+pytest-gremlins' pardons, and the text after it is required. A change after
+the reason, as the report names it, accepts that one mutant of the line;
+without one, every mutant of the line is accepted, including any a later edit
+adds. A comment above a line applies to it, and several can stand there.
+
+An accepted mutant is still run. If it is killed, or if no mutant of the line
+is the one named, the acceptance is **stale**: what it claims is not so.
+
+## Failing a run on survivors
+
+invective exits 0 when there are survivors, unless the project says otherwise
+in its `pyproject.toml`:
+
+    [tool.invective]
+    fail-on-survivors = true   # a survivor no comment accepts, or a stale
+                               # acceptance, fails the run
+    max-accepted = 10          # so do more accepted survivors than this
+    exclude = ["var/*"]        # left out of the copy
+
+A run that breaks these rules exits 1 (`pytest --mutate` fails as a failing
+test would). A run that could not be trusted exits 2, and says why. An unknown
+key in `[tool.invective]` is refused, so a misspelt one is not read as absent.
 
 ## What it will not do
 
-- **It measures the last commit.** Every mutant is written into a temporary
-  git worktree of `HEAD`, so the checkout is never edited and nothing is left
-  behind if the run is killed. A test you have not committed is not in that
-  worktree, and a mutant it would catch goes on surviving until you commit.
 - **It refuses a failing selection.** If the chosen tests do not pass before
   any edit, every mutant would count as killed and the score would be 100%
   for nothing. The same goes for a selection that collects no tests.

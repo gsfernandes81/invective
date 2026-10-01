@@ -12,6 +12,8 @@ import pytest
 from pytest import ExitCode
 
 from invective import mutate
+from invective import tree as trees
+from invective.tree import git_ref, working_tree
 
 from conftest import commit, git, write_tree
 
@@ -141,7 +143,7 @@ def test_a_red_baseline_is_a_refusal_and_not_a_perfect_score(repo, monkeypatch):
     """
     runs = []
 
-    def red(where, tests, timeout):
+    def red(where, tests, timeout, *rest):
         runs.append(where)
         return mutate.Verdict(False, ExitCode.TESTS_FAILED, "1 failed, 0 passed",
                               "pkg/tests/test_x.py::test_y")
@@ -166,7 +168,7 @@ def test_a_run_that_collected_nothing_is_never_a_kill(repo, monkeypatch):
     """
     args = (repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"], 2)
 
-    def collects_nothing(where, tests, timeout):
+    def collects_nothing(where, tests, timeout, *rest):
         return mutate.Verdict(False, ExitCode.NO_TESTS_COLLECTED,
                               "no tests ran", "")
 
@@ -179,7 +181,7 @@ def test_a_run_that_collected_nothing_is_never_a_kill(repo, monkeypatch):
     # be coming from the mutant's own run.
     seen = []
 
-    def green_then_nothing(where, tests, timeout):
+    def green_then_nothing(where, tests, timeout, *rest):
         seen.append(1)
         if len(seen) == 1:
             return mutate.Verdict(True, 0, "1 passed", "")
@@ -202,7 +204,7 @@ def test_the_report_says_which_test_killed_each_mutant(repo, monkeypatch):
     """
     calls = []
 
-    def green_then_killed(where, tests, timeout):
+    def green_then_killed(where, tests, timeout, *rest):
         calls.append(1)
         if len(calls) == 1:
             return mutate.Verdict(True, 0, "1 passed", "")
@@ -342,13 +344,23 @@ def test_a_real_run_names_the_killer_and_the_line_nothing_checks(repo):
     assert survivor["source"] == "if member and age >= 65:"
 
 
-def test_a_run_leaves_the_checkout_and_its_worktrees_as_they_were(repo, capsys):
-    """No mutant in the checkout, and no worktree left registered or on disk."""
-    mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"], None)
+def test_a_run_leaves_the_project_as_it_was_and_its_copy_gone(tree, capsys):
+    """Every mutant is written in the copy; none reaches the project, and the
+    copy is removed at the end."""
+    def snapshot():
+        found = {}
+        for dirpath, _dirs, files in os.walk(tree):
+            for name in files:
+                full = os.path.join(dirpath, name)
+                with open(full, "rb") as fh:
+                    found[os.path.relpath(full, tree)] = fh.read()
+        return found
 
-    assert git(repo, "status", "--porcelain") == ""
-    assert len(git(repo, "worktree", "list").splitlines()) == 1
-    where = capsys.readouterr().out.split("worktree:", 1)[1].split()[0]
+    before = snapshot()
+    mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None)
+
+    assert snapshot() == before
+    where = capsys.readouterr().out.split("copy:", 1)[1].split()[0]
     assert "invective-" in where and not os.path.exists(where)
 
 
@@ -378,7 +390,7 @@ def test_a_module_with_nothing_to_break_is_refused(repo):
 
 
 def test_the_command_writes_the_report_it_printed(repo, tmp_path, capsys):
-    """`main` end to end inside a repository, with the root asked of git."""
+    """`main` end to end, its project the current directory."""
     out = str(tmp_path / "report.json")
 
     assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
@@ -390,17 +402,21 @@ def test_the_command_writes_the_report_it_printed(repo, tmp_path, capsys):
     assert report["target"] == GATE and report["killed"] == 1
 
 
-def test_outside_a_repository_is_refused_before_anything_runs(
-        tmp_path, monkeypatch, capsys):
-    """Without a repository there is no HEAD to make a worktree of."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
-    ran = []
-    monkeypatch.setattr(mutate, "run_tests", lambda *a, **k: ran.append(a))
+def test_a_run_needs_no_git_and_no_repository(tree, monkeypatch, capsys):
+    """Without `--ref`, nothing asks git anything: the tree here is no
+    repository, and a call to git would fail the test."""
+    monkeypatch.chdir(tree)
+    real = mutate.subprocess.run
 
-    assert mutate.main(["--target", "m.py", "--tests", "t.py"]) == 2
-    assert "not inside a git repository" in capsys.readouterr().err
-    assert not ran
+    def run(argv, **kwargs):
+        assert argv[0] != "git", argv
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(mutate.subprocess, "run", run)
+
+    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
+                        "--only", "RAISE"]) == 0
+    assert "1/1 killed (100.0%)" in capsys.readouterr().out
 
 
 def test_an_operator_that_does_not_exist_is_refused_by_name(repo, capsys):
@@ -410,59 +426,77 @@ def test_an_operator_that_does_not_exist_is_refused_by_name(repo, capsys):
     assert "RISE" in capsys.readouterr().err
 
 
-def test_the_module_is_mutated_as_committed_not_as_edited(repo):
-    """The tests run at HEAD, so the module has to be HEAD's too.
-
-    The checkout's copy below has lost its refusal, uncommitted. Read from
-    the checkout, there would be no `raise` to break and the run would be
-    refused; read from HEAD, the refusal is there and its test kills it.
+def test_the_module_is_mutated_as_it_stands_not_as_committed(repo):
+    """Uncommitted edits are in the run: the line given for the refusal's
+    mutant is where the edited file has it, one below where it was committed.
     """
     gate = os.path.join(repo, GATE)
     with open(gate, encoding="utf-8") as fh:
-        edited = fh.read().replace("raise ValueError('under age')",
-                                   "return 'refused'")
+        edited = "# an uncommitted line\n" + fh.read()
     write_tree(repo, {"pkg/gate.py": edited})
 
     report = mutate.mutate(repo, gate, GATE_TESTS, ["RAISE"], None)
 
     assert report["killed"] == report["mutants"] == 1
-    assert report["kills"][0]["line"] == 3
+    assert report["kills"][0]["line"] == 4
     with open(gate, encoding="utf-8") as fh:
-        assert fh.read() == edited, "the checkout is not the run's to touch"
+        assert fh.read() == edited, "the project is not the run's to touch"
 
 
-def test_a_module_not_in_the_last_commit_is_refused(repo, monkeypatch):
-    write_tree(repo, {"pkg/fresh.py": "def f():\n    raise ValueError\n"})
+def test_a_module_left_out_of_the_copy_is_refused(tree, monkeypatch):
     monkeypatch.setattr(mutate, "run_tests",
                         lambda *a, **k: pytest.fail("ran the selection"))
 
     with pytest.raises(mutate.Refusal) as caught:
-        mutate.mutate(repo, os.path.join(repo, "pkg", "fresh.py"), GATE_TESTS,
-                      None, None)
-    assert "not in the last commit" in str(caught.value)
+        mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None,
+                      tree=working_tree(tree, ("pkg/gate.py",)))
+    assert "not in the tree the mutants are made in" in str(caught.value)
 
 
-def test_a_module_outside_the_repository_is_refused(repo, tmp_path,
-                                                    monkeypatch):
-    """Joined to the worktree, `../x.py` names a file that is not in it."""
+def test_a_module_outside_the_project_is_refused(tree, tmp_path,
+                                                 monkeypatch):
+    """Joined to the copy, `../x.py` names a file that is not in it."""
     outside = tmp_path / "elsewhere.py"
     outside.write_text("def f():\n    raise ValueError\n", encoding="utf-8")
-    monkeypatch.setattr(mutate, "worktree",
-                        lambda root: pytest.fail("made a worktree"))
+    monkeypatch.setattr(mutate, "working_tree",
+                        lambda *a: pytest.fail("made a copy"))
 
     with pytest.raises(mutate.Refusal) as caught:
-        mutate.mutate(repo, str(outside), GATE_TESTS, None, None)
-    assert "outside the repository" in str(caught.value)
+        mutate.mutate(tree, str(outside), GATE_TESTS, None, None)
+    assert "outside the project" in str(caught.value)
 
 
-def test_a_repository_with_no_commit_is_refused_with_git_s_reason(tree):
+def test_a_ref_in_a_repository_with_no_commit_is_refused_with_git_s_reason(
+        tree):
     """There is no HEAD to make a worktree of, and git's words say so."""
     git(tree, "init", "-q", "-b", "main")
 
     with pytest.raises(mutate.Refusal) as caught:
-        mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None)
-    assert str(caught.value).startswith("git worktree add failed: fatal: ")
+        mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None,
+                      tree=git_ref(tree, "HEAD"))
+    assert str(caught.value).startswith("git worktree failed: fatal: ")
     assert "HEAD" in str(caught.value)
+
+
+def test_a_ref_is_mutated_as_committed_not_as_it_stands(repo):
+    """The other way round from a run on the files as they stand."""
+    gate = os.path.join(repo, GATE)
+    with open(gate, encoding="utf-8") as fh:
+        edited = "# an uncommitted line\n" + fh.read()
+    write_tree(repo, {"pkg/gate.py": edited})
+
+    report = mutate.mutate(repo, gate, GATE_TESTS, ["RAISE"], None,
+                           tree=git_ref(repo, "HEAD"))
+
+    assert report["kills"][0]["line"] == 3
+    assert len(git(repo, "worktree", "list").splitlines()) == 1
+
+
+def test_a_ref_from_below_the_top_of_the_repository_is_that_directory(repo):
+    """A project can be a directory inside a repository; the copy of the ref
+    stands for that directory, not for the repository's top."""
+    with git_ref(os.path.join(repo, "pkg"), "HEAD") as where:
+        assert sorted(os.listdir(where))[:2] == ["__init__.py", "gate.py"]
 
 
 def test_every_write_of_the_module_gets_a_second_of_its_own(repo, monkeypatch):
@@ -496,7 +530,7 @@ def test_progress_is_said_after_every_tenth_mutant(repo, monkeypatch, capsys):
     commit(repo, {"pkg/many.py": "X = [%s]\n" % ", ".join(
         str(n) for n in range(12))})
 
-    def run(where, tests, timeout):
+    def run(where, tests, timeout, *rest):
         print("ran")
         return mutate.Verdict(True, 0, "", "")
 
@@ -637,6 +671,7 @@ def test_kills_by_time_are_said_apart_from_the_rest():
     """A kill by time is the one a slow machine can give a mutant the suite
     would have let through, so the closing lines count it on its own."""
     report = {"killed": 3, "mutants": 4, "survivors": [{}], "broken": 1,
+              "accepted": [], "stale": [],
               "kills": [{"code": mutate.TIMED_OUT}, {"code": mutate.TIMED_OUT},
                         {"code": ExitCode.INTERRUPTED}]}
 
@@ -652,20 +687,22 @@ def test_a_cleanup_that_fails_does_not_hide_git_s_reason(tree, monkeypatch):
     """When git cannot make the worktree, its words are the refusal; a
     directory that will not be removed must not replace them."""
     git(tree, "init", "-q", "-b", "main")
-    real = mutate.shutil.rmtree
+    real = trees.shutil.rmtree
 
     def rmtree(path, ignore_errors=False):
         if not ignore_errors:
             raise PermissionError(path)
         real(path, ignore_errors=True)
 
-    monkeypatch.setattr(mutate.shutil, "rmtree", rmtree)
+    monkeypatch.setattr(trees.shutil, "rmtree", rmtree)
     with pytest.raises(mutate.Refusal) as caught:
-        mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None)
-    assert str(caught.value).startswith("git worktree add failed: fatal: ")
+        with git_ref(tree, "HEAD"):
+            pass
+    assert str(caught.value).startswith("git worktree failed: fatal: ")
 
 
-def test_a_worktree_git_would_not_remove_is_not_left_listed(repo, monkeypatch):
+def test_a_ref_s_worktree_git_would_not_remove_is_not_left_listed(repo,
+                                                                 monkeypatch):
     """On Windows a file the stopped run held open is enough to make
     `git worktree remove` fail; the repository must not keep listing it."""
     real = mutate.subprocess.run
@@ -678,7 +715,8 @@ def test_a_worktree_git_would_not_remove_is_not_left_listed(repo, monkeypatch):
     monkeypatch.setattr(mutate.subprocess, "run", run)
     monkeypatch.setattr(mutate, "run_tests",
                         lambda *a, **k: mutate.Verdict(True, 0, "", ""))
-    mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"], None)
+    mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"], None,
+                  tree=git_ref(repo, "HEAD"))
 
     assert len(git(repo, "worktree", "list").splitlines()) == 1
 
@@ -708,3 +746,87 @@ def test_a_process_that_left_the_run_s_group_does_not_hold_invective(
 
     assert got.code == mutate.TIMED_OUT
     assert time.monotonic() - started < 15, "waited on the escaped process"
+
+
+ACCEPTING = (
+    "def admit(age, member):\n"
+    "    if age < 18:  # invective: accept[equivalent: 18 -> 19] a year apart\n"
+    "        raise ValueError('under age')  # invective: accept[equivalent] why\n"
+    "    # invective: accept[untestable] nothing here checks seniors\n"
+    "    if member and age >= 65:\n"
+    "        return 'senior'\n"
+    "    x = 1  # invective: accept[equivalent: 1 -> 3] no such mutant\n"
+    "    # invective: accept[equivalent] above a blank line\n"
+    "\n"
+    "    return 'adult'\n")
+
+
+def test_each_acceptance_is_judged_against_what_the_mutants_did(tree,
+                                                                monkeypatch):
+    """A stand-in run kills what the real tests would: the refusal's removal
+    and the boundary moved to 18, and nothing else."""
+    write_tree(tree, {"pkg/gate.py": ACCEPTING})
+
+    def run(where, tests, timeout, *rest):
+        with open(os.path.join(where, GATE), encoding="utf-8") as fh:
+            text = fh.read()
+        killed = "raise ValueError" not in text or "age <= 18" in text
+        return mutate.Verdict(not killed, 1 if killed else 0, "",
+                              "pkg/tests/test_gate.py::t" if killed else "")
+
+    monkeypatch.setattr(mutate, "run_tests", run)
+    report = mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None,
+                           None)
+
+    # Accepted by name, and the boundary beside it killed as it should be.
+    by_line = {(a["line"], a["change"]) for a in report["accepted"]}
+    assert (2, "18 -> 19") in by_line and (2, "Lt -> LtE") not in by_line
+    assert by_line == {(2, "18 -> 19"), (5, "And -> Or"), (5, "GtE -> Gt"),
+                       (5, "65 -> 66")}
+    assert {a["reason"] for a in report["accepted"] if a["line"] == 5} == {
+        "untestable"}
+    assert report["survivors"] == [
+        {"kind": "CONST", "line": 7, "change": "1 -> 2", "source": "x = 1  "
+         "# invective: accept[equivalent: 1 -> 3] no such mutant"}]
+    assert [(s["line"], s["problem"]) for s in report["stale"]] == [
+        (3, "raise ... -> pass is killed by pkg/tests/test_gate.py::t"),
+        (7, "line 7 has no mutant 1 -> 3"),
+        (8, "line 9 has no mutant at all")]
+    assert mutate.summary(report)[1:3] == [
+        "           4 of the survivors are accepted in the source",
+        "           3 acceptance(s) are stale: what they claim is not so"]
+
+
+def test_the_command_fails_a_run_that_breaks_the_project_s_rules(tree,
+                                                                 monkeypatch,
+                                                                 capsys):
+    """With `fail-on-survivors`, a survivor no comment accepts fails the run
+    with 1, and accepting it in the source passes it."""
+    monkeypatch.chdir(tree)
+    write_tree(tree, {"pyproject.toml":
+                      "[tool.invective]\nfail-on-survivors = true\n"})
+    argv = ["--target", GATE, "--tests", *GATE_TESTS, "--only", "BOOL"]
+
+    assert mutate.main(argv) == 1
+    assert "fails:     1 survivor(s) that no comment accepts" in (
+        capsys.readouterr().out)
+
+    with open(os.path.join(tree, GATE), encoding="utf-8") as fh:
+        source = fh.read()
+    write_tree(tree, {"pkg/gate.py": source.replace(
+        "    if member and", "    # invective: accept[untestable] no senior "
+        "test\n    if member and")})
+    assert mutate.main(argv) == 0
+
+
+def test_a_ref_given_to_the_command_is_the_tree_it_runs_on(repo, capsys):
+    gate = os.path.join(repo, GATE)
+    with open(gate, encoding="utf-8") as fh:
+        source = fh.read()
+    write_tree(repo, {"pkg/gate.py": "# an uncommitted line\n" + source})
+    out = os.path.join(repo, "..", "report.json")
+
+    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS, "--only",
+                        "RAISE", "--ref", "HEAD", "--json", out]) == 0
+    with open(out, encoding="utf-8") as fh:
+        assert json.load(fh)["kills"][0]["line"] == 3
