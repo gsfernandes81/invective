@@ -1,0 +1,39 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is here because the engine writes and stamps source files,
+        # and line endings and file times are where the two platforms differ.
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          # The line whose bundled build backend `pyproject.toml` bounds.
+          version: '0.10.11'
+
+      - name: Install
+        run: uv sync --locked --python ${{ matrix.python }}
+
+      - name: Test
+        run: uv run pytest
