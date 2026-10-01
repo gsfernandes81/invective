@@ -597,3 +597,23 @@ def test_the_command_says_which_argument_is_missing(capsys, argv, missing):
         mutate.main(argv)
     assert stopped.value.code == 2
     assert missing in capsys.readouterr().err
+
+
+def test_an_interrupted_run_is_stopped_and_the_interrupt_goes_on(monkeypatch):
+    """The run is in a process group of its own, so the ^C that interrupts
+    invective never reaches it: invective has to stop it, and then stop."""
+    stopped = []
+
+    class Interrupted:
+        def __init__(self, argv, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(mutate.subprocess, "Popen", Interrupted)
+    monkeypatch.setattr(mutate, "_stop", stopped.append)
+
+    with pytest.raises(KeyboardInterrupt):
+        mutate.run_tests("/nowhere", ["t.py"], timeout=1)
+    assert len(stopped) == 1
