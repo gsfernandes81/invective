@@ -13,7 +13,7 @@ no test depends on: either a check is missing, or the line does not matter.
 It is not on PyPI. Install it from this repository into the project whose
 tests you want to measure:
 
-    uv add --dev git+ssh://git@github.com/gsfernandes81/invective
+    uv add --dev git+https://github.com/gsfernandes81/invective
 
 It needs Python 3.11 or later, pytest, and `git` on the PATH.
 
