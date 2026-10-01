@@ -31,6 +31,15 @@ pytest_invective = "pytest_invective"
 [tool.uv.build-backend]
 module-name = ["invective", "pytest_invective"]
 
+# For invective's own suite: pytest-xdist runs it on workers, and the plugin
+# and the engine both have to cope with a repository that does.
+[dependency-groups]
+dev = ["pytest-xdist>=3.8.0"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # `src` goes on the path in `tests/conftest.py`, not with `pythonpath` here.
+# Workers by default: nearly every check here starts a process, and they wait
+# side by side. invective's own runs of a mutant are `-n 0`, and `--mutate`
+# here has to be given `-n 0` too.
+addopts = "-n auto"

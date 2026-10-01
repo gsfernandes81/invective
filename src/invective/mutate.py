@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import ast
 import copy
+import importlib.util
 import json
 import os
 import re
@@ -248,6 +249,16 @@ def _write(path: str, text: str, when: int) -> None:
     os.utime(path, (when, when))
 
 
+#: No pytest-xdist workers: a repository that turns a pool on would start
+#: one per MUTANT, for a selection a single process runs faster. Where xdist
+#: is installed, `-n 0` says so and also wins over an `-n` in the
+#: repository's own `addopts`, which `-p no:xdist` would leave as an option
+#: nothing knows. Where it is not, `-n` is no option at all.
+if importlib.util.find_spec("xdist") is not None:
+    _NO_WORKERS = ["-n", "0"]
+else:
+    _NO_WORKERS = ["-p", "no:xdist"]
+
 #: Each run is started in a process group of its own, so that stopping it
 #: stops everything it started. A test suite can start processes of its own
 #: (this one starts pytest), and killing the run alone would leave those
@@ -289,14 +300,12 @@ def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:
     """
     with tempfile.TemporaryDirectory(prefix="invective-verdict-") as box:
         verdict = os.path.join(box, "verdict.json")
-        # `-p no:xdist`: a repository that turns a worker pool on by default
-        # would start one per MUTANT, for a selection of a few files that a
-        # single process runs faster. `-p no:` of a plugin that is not
-        # installed is a no-op, so both of these are safe wherever the runner
-        # happens to lack the plugin.
+        # `-p no:randomly` keeps the order, and so `-x`'s first failure, the
+        # same from run to run; `-p no:` of a plugin that is not installed is
+        # a no-op.
         proc = subprocess.Popen(
             [sys.executable, "-m", "pytest", "-x", "-rf", "-p", "no:randomly",
-             "-p", "no:xdist", "-p", pytest_invective.__name__,
+             *_NO_WORKERS, "-p", pytest_invective.__name__,
              "--no-header", *tests],
             cwd=where, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env={**os.environ, pytest_invective.VERDICT: verdict},

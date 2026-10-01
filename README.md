@@ -15,7 +15,8 @@ tests you want to measure:
 
     uv add --dev git+https://github.com/gsfernandes81/invective
 
-It needs Python 3.11 or later, pytest 8.2 or later, and `git` on the PATH.
+It needs pytest 8.2 or later and `git` on the PATH, and supports every
+Python that has not reached its end of life: 3.11 to 3.14 today.
 
 ## One module
 
@@ -112,6 +113,17 @@ be trusted, and says why.
   any edit, every mutant would count as killed and the score would be 100%
   for nothing. The same goes for a selection that collects no tests.
 - **It runs pytest only**, one mutant at a time, in a fresh process each.
+
+## Developing invective
+
+    uv sync
+    uv run pytest
+
+The suite runs on pytest-xdist's workers by default. CI runs it on every
+supported Python on Linux and Windows, and runs invective on its own code
+(the `mutation` workflow), one module per job. To do that for one module here:
+
+    uv run pytest -n 0 --mutate src/invective/mutate.py tests/test_mutate.py
 
 ## License
 

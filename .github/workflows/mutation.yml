@@ -1,0 +1,81 @@
+name: mutation
+
+# invective on its own code: every module broken one edit at a time, every
+# kind of edit, against the tests that cover it, through `pytest --mutate`.
+# One Python on Linux, because a verdict comes from the code and its tests and
+# nothing in invective differs by version or platform in what is mutated; one
+# job per module, so the modules run at once.
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'tests/**', 'pyproject.toml', 'uv.lock',
+            '.github/workflows/mutation.yml']
+  pull_request:
+    paths: ['src/**', 'tests/**', 'pyproject.toml', 'uv.lock',
+            '.github/workflows/mutation.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  module:
+    name: ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: src/invective/mutate.py
+            tests: tests/test_mutate.py
+          - module: src/invective/sweep.py
+            tests: tests/test_sweep.py
+          - module: src/invective/__main__.py
+            tests: tests/test_cli.py
+          # Its tests start pytest rather than import it, so no sweep of
+          # imports would pair them.
+          - module: src/pytest_invective/__init__.py
+            tests: tests/test_plugin.py
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: '0.10.11'
+
+      - name: Install
+        run: uv sync --locked --python 3.14
+
+      # `-n 0`: the project's addopts turns xdist's workers on, and --mutate
+      # refuses them. Survivors are a finding to read, not a failure: the job
+      # fails only when the run could not be trusted.
+      - name: Mutate
+        run: >-
+          uv run --no-sync pytest -n 0 -p no:cacheprovider
+          --mutate ${{ matrix.module }}
+          --mutate-only CMP,BOOL,NOT,CONST,RAISE
+          --mutate-json mutants.json ${{ matrix.tests }}
+          | tee mutate.log
+
+      - name: Survivors
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.module }}"
+            echo '```'
+            grep -E "SURVIVED|killed \(|refused:" mutate.log || echo "(no report)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-${{ strategy.job-index }}
+          path: mutants.json
+          if-no-files-found: ignore
