@@ -1,0 +1,25 @@
+# The 0.10 bound is the backend line `uv==0.10.11` bundles, so a build with
+# that uv needs nothing downloaded.
+[build-system]
+requires = ["uv_build>=0.10,<0.11"]
+build-backend = "uv_build"
+
+[project]
+name = "invective"
+version = "0.1.0"
+description = "Mutation testing for a pytest suite: break one line at a time and report every edit the tests let through"
+readme = "README.md"
+requires-python = ">=3.11"
+# The engine runs `python -m pytest` with the interpreter it was started by,
+# so pytest has to be importable wherever invective is.
+dependencies = ["pytest>=8"]
+
+[project.scripts]
+invective = "invective.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The checkout's own `src`, ahead of any installed copy. A run of invective
+# against itself tests a worktree, and the worktree's `src` is the one that
+# holds the mutant.
+pythonpath = ["src"]
