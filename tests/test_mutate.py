@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 
 import pytest
@@ -334,6 +335,44 @@ def test_a_run_leaves_the_checkout_and_its_worktrees_as_they_were(repo, capsys):
     assert len(git(repo, "worktree", "list").splitlines()) == 1
     where = capsys.readouterr().out.split("worktree:", 1)[1].split()[0]
     assert "invective-" in where and not os.path.exists(where)
+
+
+@pytest.mark.parametrize("selection, code", [
+    (["pkg/tests/test_gate.py", "-k", "no_test_has_this_name"],
+     mutate.NO_TESTS_COLLECTED),
+    (["pkg/tests/test_gate.py::test_that_is_not_there"], mutate.USAGE_ERROR),
+])
+def test_pytest_s_own_empty_selection_is_refused(repo, selection, code):
+    """The same refusal as the stubbed one above, from pytest itself.
+
+    The stub hands back this module's constants, so it would go on passing if
+    a constant stopped being the code pytest really exits with.
+    """
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(repo, os.path.join(repo, GATE), selection, ["RAISE"], None)
+    assert "collected nothing" in str(caught.value)
+    assert "pytest exited %d" % code in str(caught.value)
+
+
+def test_a_module_with_nothing_to_break_is_refused(repo):
+    """An empty `__init__.py` has no score; it is not a module that scored 0."""
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(repo, os.path.join(repo, "pkg", "__init__.py"),
+                      GATE_TESTS, None, None)
+    assert "no mutation sites" in str(caught.value)
+
+
+def test_the_command_writes_the_report_it_printed(repo, tmp_path, capsys):
+    """`main` end to end inside a repository, with the root asked of git."""
+    out = str(tmp_path / "report.json")
+
+    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
+                        "--only", "raise", "--json", out]) == 0
+
+    assert "1/1 killed (100.0%), 0 survived" in capsys.readouterr().out
+    with open(out, encoding="utf-8") as fh:
+        report = json.load(fh)
+    assert report["target"] == GATE and report["killed"] == 1
 
 
 def test_outside_a_repository_is_refused_before_anything_runs(

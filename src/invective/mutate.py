@@ -222,11 +222,10 @@ def repo_root() -> str:
     """
     got = subprocess.run(["git", "rev-parse", "--show-toplevel"],
                          capture_output=True, text=True)
-    root = got.stdout.strip()
-    if got.returncode != 0 or not root:
+    if got.returncode != 0:
         raise Refusal("not inside a git repository: mutants run in a "
                       "worktree of HEAD, so there is nowhere to run them")
-    return root
+    return got.stdout.strip()
 
 
 def worktree(root: str) -> str:

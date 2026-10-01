@@ -30,12 +30,21 @@ FILES = {
         "        raise ValueError('nothing given')\n"
         "    return x\n"),
     "pkg/tests_extra/aid.py": "def aid():\n    return 1\n",
+    # Neither of these two is a module to mutate.
+    "pkg/notes.txt": "not python\n",
+    "pkg/sub/test_inline.py": "def test_inline():\n    pass\n",
     "pkg/tests/conftest.py": (
         "import os\n"
         "import sys\n"
         "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..',"
         " 'loose'))\n"),
-    "pkg/tests/helpers.py": "def helper():\n    raise RuntimeError('harness')\n",
+    # Imports `gate` and `tool`, and is still not a test file.
+    "pkg/tests/helpers.py": (
+        "import tool\n"
+        "from pkg import gate\n"
+        "\n"
+        "def helper():\n"
+        "    raise RuntimeError('harness')\n"),
     "pkg/tests/test_gate.py": (
         "import pytest\n"
         "from pkg import gate\n"

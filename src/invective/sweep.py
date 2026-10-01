@@ -197,8 +197,12 @@ def main(argv=None):
             # last thing the engine actually said, which turns "0
             # module(s) measured" from a shrug into a thing somebody
             # chases.
+            # **The engine's own sentence, not the word.** A bare `"red" in
+            # body` is true of "occurred", "required" and "ignored", so a
+            # traceback from a driver that could not start was labelled a red
+            # baseline.
             note = "no mutation sites" if "no mutation sites" in body else \
-                   ("RED baseline" if "RED" in body or "red" in body else
+                   ("RED baseline" if "is RED on the unmutated tree" in body else
                     "DRIVER FAILED rc=%d: %s" % (
                         got.returncode,
                         (body.strip().splitlines() or ["no output"])[-1][:90]))

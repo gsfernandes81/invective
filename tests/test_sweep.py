@@ -98,6 +98,78 @@ def test_the_file_named_after_a_module_covers_it_without_importing_it(tree):
         _p("pkg/tests/test_idle.py")]
 
 
+def test_a_harness_file_that_imports_a_module_does_not_cover_it(tree):
+    """`helpers.py` imports both modules and holds no tests to run."""
+    assert sweep.covering(tree, _p("pkg/gate.py"), SOURCES, TESTS_DIR) == [
+        _p("pkg/tests/test_gate.py")]
+    assert sweep.covering(tree, _p("loose/tool.py"), SOURCES, TESTS_DIR) == [
+        _p("pkg/tests/test_tool.py")]
+
+
+class _Engine:
+    """Stands in for the engine's process; `git` is still really run."""
+
+    def __init__(self, returncode=2, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+        self.commands = []
+        self._real = sweep.subprocess.run
+
+    def __call__(self, cmd, **kwargs):
+        if cmd[0] == "git":
+            return self._real(cmd, **kwargs)
+        self.commands.append((cmd, kwargs))
+        return self
+
+
+def test_the_driver_starts_the_engine_beside_it_with_the_stated_defaults(
+        repo, monkeypatch):
+    """A path to the engine that names nothing fails quietly: every module
+    comes back without a score and the footer says none were measured.
+
+    The defaults are the ones the README states.
+    """
+    engine = _Engine(stderr="refused: no mutation sites in x for RAISE")
+    monkeypatch.setattr(sweep.subprocess, "run", engine)
+
+    assert sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                       "--modules", _p("pkg/gate.py")]) == 0
+
+    ((cmd, kwargs),) = engine.commands
+    assert cmd[0] == sweep.sys.executable
+    assert os.path.isfile(cmd[1]) and os.path.basename(cmd[1]) == "mutate.py"
+    assert cmd[2:8] == ["--target", _p("pkg/gate.py"), "--tests",
+                        _p("pkg/tests/test_gate.py"), "--only", "RAISE"]
+    assert cmd[8:10] == ["--limit", "25"]
+    assert kwargs["cwd"] == repo
+
+
+@pytest.mark.parametrize("said, rc, note", [
+    ("refused: no mutation sites in pkg/gate.py for RAISE", 2,
+     "no mutation sites"),
+    ("refused: the selection is RED on the unmutated tree, so every mutant",
+     2, "RED baseline"),
+    ("Traceback (most recent call last):\n  ...\n"
+     "During handling of the above exception, another exception occurred:\n"
+     "ModuleNotFoundError: No module named 'pytest'", 1,
+     "DRIVER FAILED rc=1: ModuleNotFoundError: No module named 'pytest'"),
+    ("", 3, "DRIVER FAILED rc=3: no output"),
+])
+def test_a_module_with_no_score_says_why(repo, monkeypatch, tmp_path, said,
+                                         rc, note):
+    """An engine that could not start must not read as an answer about the
+    module. The traceback says "occurred", which holds the letters "red".
+    """
+    monkeypatch.setattr(sweep.subprocess, "run", _Engine(rc, stderr=said))
+    out = str(tmp_path / "sweep.json")
+
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR, "--json", out,
+                "--modules", _p("pkg/gate.py")])
+
+    with open(out, encoding="utf-8") as fh:
+        (entry,) = json.load(fh)["measured"]
+    assert entry["note"] == note and "score" not in entry
+
+
 def test_a_real_sweep_separates_unmeasured_from_killed_and_survived(
         repo, tmp_path, capsys):
     """The whole path with nothing stubbed: the driver starts the engine.
