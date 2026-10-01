@@ -46,25 +46,23 @@ import tempfile
 import time
 from typing import NamedTuple
 
+from pytest import ExitCode
+
 
 class Refusal(Exception):
     """Something that must be true before a single mutant is worth running."""
 
 
 # --------------------------------------------------------------------------
-# pytest's own exit codes, spelled out because *every non-zero code is not a
-# kill*. A mutant is killed when a TEST FAILED on it. A run that could not be
-# assembled -- a usage error, a selection that collected nothing -- is a
-# broken harness, and scoring it as a kill is the same vacuous arithmetic the
-# red-baseline refusal exists to prevent, arriving one layer down: the score
-# reads high because nothing ran.
+# pytest's own exit codes are read by name (`ExitCode`), because *every
+# non-zero code is not a kill*. A mutant is killed when a TEST FAILED on it. A
+# run that could not be assembled -- a usage error, a selection that
+# collected nothing -- is a broken harness, and scoring it as a kill is the
+# same vacuous arithmetic the red-baseline refusal exists to prevent,
+# arriving one layer down: the score reads high because nothing ran.
 
-TESTS_FAILED = 1
-INTERRUPTED = 2           # collection error, or -x stopping the session
-INTERNAL_ERROR = 3
-USAGE_ERROR = 4
-NO_TESTS_COLLECTED = 5
-TIMED_OUT = -1            # not pytest's; this module's own
+#: Not pytest's: a run this module stopped. Any value pytest cannot exit with.
+TIMED_OUT = -1
 
 
 class Verdict(NamedTuple):
@@ -301,16 +299,15 @@ def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:
 
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
            limit: int | None) -> dict:
-    src_rel = os.path.relpath(os.path.abspath(target), root)
-    with open(os.path.join(root, src_rel), encoding="utf-8") as fh:
-        source = fh.read()
-    lines = source.split("\n")
-    tree = ast.parse(source)
-    sites = [(i, k, n, w) for i, (k, n, w) in enumerate(_sites(tree))
-             if not only or k in only]
-    if not sites:
-        raise Refusal("no mutation sites in %s for %s"
-                      % (src_rel, ",".join(only or sorted(OPERATORS))))
+    try:
+        src_rel = os.path.relpath(os.path.abspath(target), root)
+    except ValueError:
+        # Windows: the target is on another drive than the repository.
+        src_rel = os.pardir
+    if src_rel == os.pardir or src_rel.startswith(os.pardir + os.sep):
+        # Joined to the worktree, this path leads out of it, and a mutant
+        # would be written over whatever file it lands on.
+        raise Refusal("%s is outside the repository at %s" % (target, root))
 
     where = worktree(root)
     try:
@@ -318,10 +315,29 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         print("target:    %s" % src_rel)
         print("tests:     %s" % " ".join(tests))
 
+        # **The module is read from the worktree, never from the checkout.**
+        # The tests run at HEAD, so the module has to be HEAD's too: a copy
+        # with uncommitted edits would carry them into every mutant, and each
+        # run would differ from what the tests were written against by more
+        # than the one edit being measured.
+        path = os.path.join(where, src_rel)
+        if not os.path.isfile(path):
+            raise Refusal("%s is not in the last commit, and mutants are made "
+                          "from the last commit" % src_rel)
+        with open(path, encoding="utf-8") as fh:
+            source = fh.read()
+        lines = source.split("\n")
+        tree = ast.parse(source)
+        sites = [(i, k, n, w) for i, (k, n, w) in enumerate(_sites(tree))
+                 if not only or k in only]
+        if not sites:
+            raise Refusal("no mutation sites in %s for %s"
+                          % (src_rel, ",".join(only or sorted(OPERATORS))))
+
         started = time.time()
         first = run_tests(where, tests, timeout=600)
         base = time.time() - started
-        if first.code in (USAGE_ERROR, NO_TESTS_COLLECTED):
+        if first.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED):
             raise Refusal(
                 "the selection collected nothing on the unmutated tree "
                 "(pytest exited %d), so there is no suite here to notice a "
@@ -344,25 +360,27 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         print("mutants:   %d\n" % len(sites))
 
         survivors, kills, killed, broken = [], [], 0, 0
-        path = os.path.join(where, src_rel)
         # **Every mutant gets its own whole second, or a verdict can belong to
         # the mutant before it.** CPython invalidates a cached `.pyc` on the
         # source's `(mtime, size)` -- and it stores that mtime as WHOLE
         # SECONDS. Two mutants of the same line are routinely the same length
-        # (`<` for `>` exactly so), and two writes of this file can land
+        # (`==` for `!=` exactly so), and two writes of this file can land
         # inside one second when the selection is quick. Identical second,
         # identical size: the interpreter reuses the PREVIOUS mutant's
         # bytecode, and the run reports on an edit it never loaded. Stamping a
-        # strictly increasing mtime makes the pair differ every time. Only
-        # this file is stamped, so every other module keeps its cache and the
-        # cost is nothing.
+        # strictly increasing mtime makes the pair differ every time, and the
+        # first stamp is a second past the clock, which is never earlier than
+        # the worktree's own copy of the file. Only this file is stamped, so
+        # every other module keeps its cache and the cost is nothing. Each
+        # mutant is the whole file, so the next write replaces the last one
+        # and every run differs from HEAD by exactly one edit.
         clock = int(time.time())
         for n, (idx, kind, node, what) in enumerate(sites, 1):
-            _write(path, ast.unparse(_apply(tree, idx)), clock + 2 * n)
+            _write(path, ast.unparse(_apply(tree, idx)), clock + n)
             got = run_tests(where, tests, timeout=budget)
-            line = getattr(node, "lineno", 0)
-            text = lines[line - 1].strip() if 0 < line <= len(lines) else ""
-            if got.code in (USAGE_ERROR, NO_TESTS_COLLECTED):
+            line = node.lineno                                  # type: ignore[attr-defined]
+            text = lines[line - 1].strip()
+            if got.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED):
                 # The baseline proved this selection collects, so this is the
                 # harness and not the mutant. Scoring it as a kill would be
                 # arithmetic over a run that executed no test.
@@ -384,13 +402,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 # finding of its own.
                 kills.append({"kind": kind, "line": line, "change": what,
                               "killer": got.killer, "code": got.code})
-                if got.code in (INTERRUPTED, INTERNAL_ERROR):
+                if got.code in (ExitCode.INTERRUPTED, ExitCode.INTERNAL_ERROR):
                     broken += 1
             if n % 10 == 0:
                 print("  ... %d/%d, %d survived" % (n, len(sites), len(survivors)))
-            # Put the file back before the next mutant, so every run differs
-            # from HEAD by exactly one edit.
-            _write(path, source, clock + 2 * n + 1)
 
         return {"target": src_rel, "tests": tests, "mutants": len(sites),
                 "killed": killed, "survivors": survivors, "kills": kills,
@@ -400,7 +415,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 # campaign that cannot see the split cannot tell a
                 # well-guarded module from an unimportable one.
                 "broken": broken,
-                "score": round(100.0 * killed / len(sites), 1) if sites else 0.0}
+                "score": round(100.0 * killed / len(sites), 1)}
     finally:
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force", where],
                        capture_output=True, text=True)

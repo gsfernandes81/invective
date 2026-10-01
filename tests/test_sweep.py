@@ -219,3 +219,27 @@ def test_a_directory_that_is_not_there_is_refused(repo, capsys, argv):
     result."""
     assert sweep.main(argv) == 2
     assert "is not a directory" in capsys.readouterr().err
+
+
+def test_a_report_the_engine_wrote_but_the_driver_cannot_read_is_said(
+        repo, monkeypatch, capsys):
+    """The score still comes from the printed summary; the killers do not."""
+    monkeypatch.setattr(sweep.subprocess, "run", _Engine(
+        0, stdout="1/1 killed (100.0%), 0 survived\n"))
+
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                "--modules", _p("pkg/gate.py")])
+
+    assert "(could not read %s's own report)" % _p("pkg/gate.py") in (
+        capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("argv, missing", [
+    (["--tests-dir", TESTS_DIR], "--src"),
+    (["--src", "pkg"], "--tests-dir"),
+])
+def test_the_command_says_which_argument_is_missing(capsys, argv, missing):
+    with pytest.raises(SystemExit) as stopped:
+        sweep.main(argv)
+    assert stopped.value.code == 2
+    assert missing in capsys.readouterr().err

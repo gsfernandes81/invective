@@ -7,10 +7,11 @@ import json
 import os
 
 import pytest
+from pytest import ExitCode
 
 from invective import mutate
 
-from conftest import git
+from conftest import commit, git, write_tree
 
 SAMPLE = '''
 def refuse(n, flag, other):
@@ -88,6 +89,29 @@ def test_one_mutant_changes_exactly_one_thing():
     assert len(seen) == len(mutate._sites(tree)), "two sites collided"
 
 
+@pytest.mark.parametrize("source, kind, change, mutant", [
+    ("x = a < b", "CMP", "Lt -> LtE", "x = a <= b"),
+    ("x = a is not b", "CMP", "IsNot -> Is", "x = a is b"),
+    ("x = a and b", "BOOL", "And -> Or", "x = a or b"),
+    ("x = not a", "NOT", "not X -> X", "x = a"),
+    ("x = True", "CONST", "True -> False", "x = False"),
+    ("x = False", "CONST", "False -> True", "x = True"),
+    ("x = 3", "CONST", "3 -> 4", "x = 4"),
+    ("raise E", "RAISE", "raise ... -> pass", "pass"),
+])
+def test_a_mutant_is_the_change_its_description_names(source, kind, change,
+                                                      mutant):
+    """The description is what a person reads; the mutant is what ran.
+
+    Each source holds exactly one site, so a site that went missing, or one
+    that turned into another kind, shows up as well as a wrong rewrite.
+    """
+    tree = ast.parse(source)
+
+    assert [(k, w) for k, _n, w in mutate._sites(tree)] == [(kind, change)]
+    assert ast.unparse(mutate._apply(tree, 0)) == mutant
+
+
 def test_the_raise_operator_really_removes_the_refusal():
     """The operator class that catches a deleted refusal, driven end to end."""
     tree = ast.parse(SAMPLE)
@@ -117,7 +141,7 @@ def test_a_red_baseline_is_a_refusal_and_not_a_perfect_score(repo, monkeypatch):
 
     def red(where, tests, timeout):
         runs.append(where)
-        return mutate.Verdict(False, mutate.TESTS_FAILED, "1 failed, 0 passed",
+        return mutate.Verdict(False, ExitCode.TESTS_FAILED, "1 failed, 0 passed",
                               "pkg/tests/test_x.py::test_y")
 
     monkeypatch.setattr(mutate, "run_tests", red)
@@ -141,7 +165,7 @@ def test_a_run_that_collected_nothing_is_never_a_kill(repo, monkeypatch):
     args = (repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"], 2)
 
     def collects_nothing(where, tests, timeout):
-        return mutate.Verdict(False, mutate.NO_TESTS_COLLECTED,
+        return mutate.Verdict(False, ExitCode.NO_TESTS_COLLECTED,
                               "no tests ran", "")
 
     monkeypatch.setattr(mutate, "run_tests", collects_nothing)
@@ -157,7 +181,7 @@ def test_a_run_that_collected_nothing_is_never_a_kill(repo, monkeypatch):
         seen.append(1)
         if len(seen) == 1:
             return mutate.Verdict(True, 0, "1 passed", "")
-        return mutate.Verdict(False, mutate.NO_TESTS_COLLECTED,
+        return mutate.Verdict(False, ExitCode.NO_TESTS_COLLECTED,
                               "no tests ran", "")
 
     monkeypatch.setattr(mutate, "run_tests", green_then_nothing)
@@ -180,7 +204,7 @@ def test_the_report_says_which_test_killed_each_mutant(repo, monkeypatch):
         calls.append(1)
         if len(calls) == 1:
             return mutate.Verdict(True, 0, "1 passed", "")
-        return mutate.Verdict(False, mutate.TESTS_FAILED, "1 failed",
+        return mutate.Verdict(False, ExitCode.TESTS_FAILED, "1 failed",
                               "pkg/tests/test_gate.py::test_%d" % len(calls))
 
     monkeypatch.setattr(mutate, "run_tests", green_then_killed)
@@ -194,7 +218,7 @@ def test_the_report_says_which_test_killed_each_mutant(repo, monkeypatch):
     assert [k["killer"] for k in report["kills"]] == [
         "pkg/tests/test_gate.py::test_2", "pkg/tests/test_gate.py::test_3"]
     for kill in report["kills"]:
-        assert kill["code"] == mutate.TESTS_FAILED
+        assert kill["code"] == ExitCode.TESTS_FAILED
     # A test failing is not the same kill as a module that would not import.
     assert report["broken"] == 0
 
@@ -320,7 +344,7 @@ def test_a_real_run_names_the_killer_and_the_line_nothing_checks(repo):
     assert report["score"] == 50.0 and report["broken"] == 0
     (kill,) = report["kills"]
     assert kill["kind"] == "RAISE" and kill["line"] == 3
-    assert kill["code"] == mutate.TESTS_FAILED
+    assert kill["code"] == ExitCode.TESTS_FAILED
     assert kill["killer"] == "pkg/tests/test_gate.py::test_a_minor_is_refused"
     (survivor,) = report["survivors"]
     assert survivor["kind"] == "BOOL" and survivor["line"] == 4
@@ -339,8 +363,8 @@ def test_a_run_leaves_the_checkout_and_its_worktrees_as_they_were(repo, capsys):
 
 @pytest.mark.parametrize("selection, code", [
     (["pkg/tests/test_gate.py", "-k", "no_test_has_this_name"],
-     mutate.NO_TESTS_COLLECTED),
-    (["pkg/tests/test_gate.py::test_that_is_not_there"], mutate.USAGE_ERROR),
+     ExitCode.NO_TESTS_COLLECTED),
+    (["pkg/tests/test_gate.py::test_that_is_not_there"], ExitCode.USAGE_ERROR),
 ])
 def test_pytest_s_own_empty_selection_is_refused(repo, selection, code):
     """The same refusal as the stubbed one above, from pytest itself.
@@ -393,3 +417,145 @@ def test_an_operator_that_does_not_exist_is_refused_by_name(repo, capsys):
     assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
                         "--only", "CMP,RISE"]) == 2
     assert "RISE" in capsys.readouterr().err
+
+
+def test_the_module_is_mutated_as_committed_not_as_edited(repo):
+    """The tests run at HEAD, so the module has to be HEAD's too.
+
+    The checkout's copy below has lost its refusal, uncommitted. Read from
+    the checkout, there would be no `raise` to break and the run would be
+    refused; read from HEAD, the refusal is there and its test kills it.
+    """
+    gate = os.path.join(repo, GATE)
+    with open(gate, encoding="utf-8") as fh:
+        edited = fh.read().replace("raise ValueError('under age')",
+                                   "return 'refused'")
+    write_tree(repo, {"pkg/gate.py": edited})
+
+    report = mutate.mutate(repo, gate, GATE_TESTS, ["RAISE"], None)
+
+    assert report["killed"] == report["mutants"] == 1
+    assert report["kills"][0]["line"] == 3
+    with open(gate, encoding="utf-8") as fh:
+        assert fh.read() == edited, "the checkout is not the run's to touch"
+
+
+def test_a_module_not_in_the_last_commit_is_refused(repo, monkeypatch):
+    write_tree(repo, {"pkg/fresh.py": "def f():\n    raise ValueError\n"})
+    monkeypatch.setattr(mutate, "run_tests",
+                        lambda *a, **k: pytest.fail("ran the selection"))
+
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(repo, os.path.join(repo, "pkg", "fresh.py"), GATE_TESTS,
+                      None, None)
+    assert "not in the last commit" in str(caught.value)
+
+
+def test_a_module_outside_the_repository_is_refused(repo, tmp_path,
+                                                    monkeypatch):
+    """Joined to the worktree, `../x.py` names a file that is not in it."""
+    outside = tmp_path / "elsewhere.py"
+    outside.write_text("def f():\n    raise ValueError\n", encoding="utf-8")
+    monkeypatch.setattr(mutate, "worktree",
+                        lambda root: pytest.fail("made a worktree"))
+
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(repo, str(outside), GATE_TESTS, None, None)
+    assert "outside the repository" in str(caught.value)
+
+
+def test_a_repository_with_no_commit_is_refused_with_git_s_reason(tree):
+    """There is no HEAD to make a worktree of, and git's words say so."""
+    git(tree, "init", "-q", "-b", "main")
+
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None)
+    assert str(caught.value).startswith("git worktree add failed: fatal: ")
+    assert "HEAD" in str(caught.value)
+
+
+def test_every_write_of_the_module_gets_a_second_of_its_own(repo, monkeypatch):
+    """The stale-bytecode verdict again, this time across the whole loop.
+
+    CPython keys a cached `.pyc` on the source's mtime in whole seconds and
+    its size, so every write must land in a later second than the one before
+    it, and the first in a later second than the worktree's own copy.
+    """
+    seen = []
+    real = mutate._write
+
+    def write(path, text, when):
+        if not seen:
+            seen.append(int(os.stat(path).st_mtime))
+        seen.append(when)
+        real(path, text, when)
+
+    monkeypatch.setattr(mutate, "_write", write)
+    monkeypatch.setattr(mutate, "run_tests",
+                        lambda *a, **k: mutate.Verdict(True, 0, "", ""))
+
+    report = mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, None,
+                           None)
+
+    assert len(seen) == report["mutants"] + 1 == 7
+    assert all(a < b for a, b in zip(seen, seen[1:])), seen
+
+
+def test_progress_is_said_after_every_tenth_mutant(repo, monkeypatch, capsys):
+    commit(repo, {"pkg/many.py": "X = [%s]\n" % ", ".join(
+        str(n) for n in range(12))})
+
+    def run(where, tests, timeout):
+        print("ran")
+        return mutate.Verdict(True, 0, "", "")
+
+    monkeypatch.setattr(mutate, "run_tests", run)
+    mutate.mutate(repo, os.path.join(repo, "pkg", "many.py"), GATE_TESTS,
+                  ["CONST"], None)
+
+    said = [ln.strip() for ln in capsys.readouterr().out.splitlines()
+            if ln.strip() == "ran" or ln.startswith("  ...")]
+    # the baseline, ten mutants, the line, then the last two
+    assert said == ["ran"] * 11 + ["... 10/12, 10 survived"] + ["ran"] * 2
+
+
+def test_a_mutant_that_breaks_the_import_is_a_blunter_kill(repo):
+    """Killed, because the suite noticed; and counted apart, because what
+    noticed was a module that would not import and not a test failing.
+    """
+    commit(repo, {
+        "pkg/ready.py": ("READY = True\n"
+                         "if not READY:\n"
+                         "    raise RuntimeError('not ready')\n"),
+        "pkg/tests/test_ready.py": ("from pkg import ready\n"
+                                    "\n"
+                                    "def test_ready():\n"
+                                    "    assert ready.READY\n"),
+    })
+
+    report = mutate.mutate(repo, os.path.join(repo, "pkg", "ready.py"),
+                           ["pkg/tests/test_ready.py"], ["CONST", "NOT"], None)
+
+    assert report["killed"] == report["broken"] == 2
+    assert {k["code"] for k in report["kills"]} == {ExitCode.INTERRUPTED}
+
+
+def test_a_selection_that_hangs_is_stopped_and_counted_as_killed(tmp_path):
+    (tmp_path / "test_hang.py").write_text(
+        "import time\n\ndef test_hang():\n    time.sleep(60)\n",
+        encoding="utf-8")
+
+    got = mutate.run_tests(str(tmp_path), ["test_hang.py"], timeout=2)
+
+    assert got == mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT")
+
+
+@pytest.mark.parametrize("argv, missing", [
+    (["--tests", "t.py"], "--target"),
+    (["--target", "m.py"], "--tests"),
+])
+def test_the_command_says_which_argument_is_missing(capsys, argv, missing):
+    with pytest.raises(SystemExit) as stopped:
+        mutate.main(argv)
+    assert stopped.value.code == 2
+    assert missing in capsys.readouterr().err

@@ -91,6 +91,15 @@ def git(root, *args):
     return done.stdout
 
 
+def commit(root, files=None):
+    """Write *files* into the repository at *root*, and commit everything."""
+    write_tree(root, files or {})
+    git(root, "add", "-A")
+    git(root, "-c", "user.name=fixture", "-c",
+        "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+        "commit", "-q", "-m", "fixture")
+
+
 @pytest.fixture
 def tree(tmp_path):
     """The fixture files on disk, with no repository around them."""
@@ -103,9 +112,6 @@ def tree(tmp_path):
 def repo(tree, monkeypatch):
     """The fixture files committed to a repository, and the cwd inside it."""
     git(tree, "init", "-q", "-b", "main")
-    git(tree, "add", "-A")
-    git(tree, "-c", "user.name=fixture", "-c",
-        "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
-        "commit", "-q", "-m", "fixture")
+    commit(tree)
     monkeypatch.chdir(tree)
     return tree
