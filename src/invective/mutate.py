@@ -273,6 +273,10 @@ else:
     _OWN_GROUP = {"start_new_session": True}
 
 
+#: How long a stopped run's output is waited for once its group is killed.
+_STOP_GRACE = 10.0
+
+
 def _stop(proc: subprocess.Popen) -> None:
     """Kill *proc* and every process it started, and collect what it said."""
     if os.name == "nt":
@@ -283,7 +287,15 @@ def _stop(proc: subprocess.Popen) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    proc.communicate()
+    try:
+        proc.communicate(timeout=_STOP_GRACE)
+    except subprocess.TimeoutExpired:
+        # Something the run started left its group and still holds the
+        # output open: waiting for the end of it would be waiting for ever.
+        proc.kill()
+        proc.stdout.close()
+        proc.stderr.close()
+        proc.wait()
 
 
 def run_tests(where: str, tests: list[str], timeout: float) -> Verdict:

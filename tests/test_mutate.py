@@ -681,3 +681,30 @@ def test_a_worktree_git_would_not_remove_is_not_left_listed(repo, monkeypatch):
     mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"], None)
 
     assert len(git(repo, "worktree", "list").splitlines()) == 1
+
+
+@pytest.mark.skipif(not hasattr(os, "setsid"), reason="a POSIX session")
+def test_a_process_that_left_the_run_s_group_does_not_hold_invective(
+        tmp_path, monkeypatch):
+    """A process that starts a session of its own escapes the kill, and if
+    it holds the run's output open, waiting for that output never ends.
+
+    It holds it only when pytest is not capturing output, which is what the
+    `-s` below is for; under capture it inherits a file of pytest's instead.
+    """
+    monkeypatch.setattr(mutate, "_STOP_GRACE", 0.5)
+    (tmp_path / "pytest.ini").write_text("[pytest]\naddopts = -s\n",
+                                         encoding="utf-8")
+    (tmp_path / "test_escape.py").write_text(
+        "import os, subprocess, sys, time\n"
+        "\n"
+        "def test_escape():\n"
+        "    subprocess.Popen([sys.executable, '-c', 'import time; "
+        "time.sleep(30)'], start_new_session=True)\n"
+        "    time.sleep(60)\n", encoding="utf-8")
+
+    started = time.monotonic()
+    got = mutate.run_tests(str(tmp_path), ["test_escape.py"], timeout=2)
+
+    assert got.code == mutate.TIMED_OUT
+    assert time.monotonic() - started < 15, "waited on the escaped process"
