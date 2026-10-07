@@ -1,0 +1,140 @@
+name: release
+
+# Tags a commit on `main` `v<version>`, `[project].version` read from
+# `pyproject.toml`, once `checks` has passed on it, and publishes its wheel
+# and sdist as a GitHub release. A version that is already tagged is left
+# alone, so a commit that did not bump the version releases nothing, and a tag
+# is never moved. Every step can be rerun: a tag already on this commit and a
+# release already made are carried on from, not refused.
+
+on:
+  # Only `main`'s copy of this file answers `workflow_run`, after any run of
+  # `checks`, whatever started it; the job keeps the green pushes to `main`.
+  # `checks` cancels a run a later push supersedes, and a cancelled run tags
+  # nothing: the later push's run tags the later commit. `mutation` is not
+  # waited for, since it fails only on a run it cannot trust and may not run
+  # at all for a commit its paths leave out.
+  workflow_run:
+    workflows: [checks]
+    types: [completed]
+  # By hand, for the tip of `main` when this workflow's own run failed or was
+  # cancelled. A commit whose `checks` run was cancelled, because a second
+  # push to `main` came before it finished, has no green run and is never
+  # tagged: its version is not released, and the next bump is.
+  workflow_dispatch:
+
+# Two merges in quick succession tag in turn rather than at once. A third
+# that queues behind them replaces the one still waiting, which is then
+# for the manual run above.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# `actions: read` is what lets the manual run find `checks`' runs.
+permissions:
+  contents: write
+  actions: read
+
+defaults:
+  run:
+    # Named, so that a pipe fails the step when its first command does.
+    shell: bash
+
+jobs:
+  release:
+    if: >-
+      (github.event_name == 'workflow_run'
+       && github.event.workflow_run.conclusion == 'success'
+       && github.event.workflow_run.event == 'push'
+       && github.event.workflow_run.head_branch == 'main')
+      || (github.event_name == 'workflow_dispatch'
+          && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      # The commit `checks` ran on. `github.sha` in a `workflow_run` is the
+      # tip of `main` when this run started, which may be a later commit.
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: '0.10.11'
+
+      # The `workflow_run` path had this from its event; by hand it is
+      # looked up, with the same three conditions.
+      - name: Check the commit is green
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          green=$(gh run list --workflow checks --branch main --event push \
+            --commit "$SHA" --status success --json databaseId --jq length)
+          if [ "$green" = 0 ]; then
+            echo "::error::no successful push run of checks on main for $SHA"
+            exit 1
+          fi
+
+      - name: Read the version
+        id: version
+        run: |
+          version=$(uv version --short)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      # The tags made here are lightweight, so the remote's plain
+      # `refs/tags/<tag>` line is the commit. An annotated tag someone made by
+      # hand shows its tag object there instead, which is not `$SHA`, and so
+      # is left alone like any tag on another commit.
+      - name: Find the tag
+        id: tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          at=$(git ls-remote --tags origin "refs/tags/$TAG" \
+            | awk -v ref="refs/tags/$TAG" '$2 == ref {print $1}')
+          if [ -z "$at" ]; then
+            echo "state=absent" >> "$GITHUB_OUTPUT"
+          elif [ "$at" = "$SHA" ]; then
+            echo "$TAG is already on $SHA: carrying on with its release"
+            echo "state=here" >> "$GITHUB_OUTPUT"
+          else
+            echo "$TAG is already tagged at $at, nothing to do"
+            echo "state=elsewhere" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Before the tag, so that a build that fails leaves no tag behind.
+      - name: Build
+        if: steps.tag.outputs.state != 'elsewhere'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          uv build
+          test -f "dist/invective-$VERSION-py3-none-any.whl"
+          test -f "dist/invective-$VERSION.tar.gz"
+
+      # git refuses the push if the tag appeared since it was looked for;
+      # nothing here forces. A tag pushed with the workflow's token starts no
+      # other workflow, and none listens for tags. A tag ruleset or tag
+      # protection rule on the repository (there is none) would refuse this
+      # token's push: the job goes red with nothing tagged, and the push then
+      # needs an actor the rule exempts, a deploy key or an app's token.
+      - name: Tag
+        if: steps.tag.outputs.state == 'absent'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: git push origin "$SHA:refs/tags/$TAG"
+
+      # `--clobber` makes a rerun replace the assets rather than fail on them.
+      - name: Release
+        if: steps.tag.outputs.state != 'elsewhere'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --title "$TAG" \
+                 --generate-notes
+          gh release upload "$TAG" dist/* --clobber
