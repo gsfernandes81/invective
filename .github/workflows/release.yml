@@ -18,14 +18,16 @@ on:
     workflows: [checks]
     types: [completed]
   # By hand, for the tip of `main` when this workflow's own run failed or was
-  # cancelled. A commit whose `checks` run was cancelled, because a second
-  # push to `main` came before it finished, has no green run and is never
-  # tagged: its version is not released, and the next bump is.
+  # cancelled; it acts on the tip of `main` only. A commit whose `checks` run
+  # was cancelled, because a second push to `main` came before it finished,
+  # has no green run, so it is released by re-running that run of `checks`.
+  # Left alone, its version goes out with the next green commit, unless that
+  # one bumps the version again.
   workflow_dispatch:
 
 # Two merges in quick succession tag in turn rather than at once. A third
-# that queues behind them replaces the one still waiting, which is then
-# for the manual run above.
+# that queues behind them replaces the one still waiting; the commit of the
+# replaced run is released by re-running its `checks`, as above.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -128,13 +130,18 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: git push origin "$SHA:refs/tags/$TAG"
 
-      # `--clobber` makes a rerun replace the assets rather than fail on them.
+      # A new release is created with its assets, which `gh` makes a draft,
+      # uploads to and only then publishes, so a failed upload leaves no
+      # public release without a wheel; a rerun finds the draft and uploads to
+      # it. `--clobber` makes a rerun replace assets rather than fail on them.
       - name: Release
         if: steps.tag.outputs.state != 'elsewhere'
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release view "$TAG" > /dev/null 2>&1 \
-            || gh release create "$TAG" --verify-tag --title "$TAG" \
-                 --generate-notes
-          gh release upload "$TAG" dist/* --clobber
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" \
+              --generate-notes dist/*
+          fi
