@@ -672,6 +672,17 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         path = os.path.join(where, src_rel)
         if not os.path.isfile(path):
             raise Refusal("%s is not in the tree the mutants are made in" % src_rel)
+        # A settings file named for every run, which the tree lacks (ignored
+        # by git, excluded, or not in the ref), fails each run in pytest's
+        # config load: a baseline that reads as red when no test failed.
+        if "-c" in options:
+            ini = options[options.index("-c") + 1]
+            if not os.path.isfile(os.path.join(where, ini)):
+                raise Refusal(
+                    "pytest read its settings from %s, which the tree the "
+                    "mutants are made in does not hold (excluded, ignored by "
+                    "git, or not in the ref), so no run in there can go by "
+                    "the settings this one did" % ini)
         # **Where the writes land, links followed.** The copy keeps links as
         # links, so a module reached through one -- the file itself or a
         # directory on its path -- can be a file outside the copy, the

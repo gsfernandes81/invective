@@ -1271,6 +1271,34 @@ def test_a_baseline_that_runs_out_of_time_is_refused_for_that(repo, monkeypatch)
     assert "RED" not in str(caught.value)
 
 
+@pytest.mark.parametrize("ini, held", [
+    (os.path.join("pkg", "tests", "pytest.ini"), False),
+    ("pyproject.toml", True)])
+def test_a_forwarded_settings_file_the_tree_lacks_is_refused_for_that(
+        repo, monkeypatch, ini, held):
+    """`-c` names a file every run loads, so one the tree does not hold
+    fails each run before a test is collected: refused as itself, with no
+    run made, and not as a red baseline. One the tree holds is handed on."""
+    runs = []
+
+    def timed_out(where, tests, timeout, selection, options, target):
+        runs.append(options)
+        return mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT")
+
+    monkeypatch.setattr(mutate, "run_tests", timed_out)
+
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"],
+                      None, options=("-c", ini))
+    if held:
+        assert runs == [("-c", ini)]
+        assert "took longer than" in str(caught.value)
+    else:
+        assert runs == []
+        assert ("pytest read its settings from %s, which the tree" % ini
+                in str(caught.value))
+
+
 def test_kills_by_time_are_said_apart_from_the_rest():
     """A kill by time is the one a slow machine can give a mutant the suite
     would have let through, so the closing lines count it on its own."""

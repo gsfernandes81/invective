@@ -692,6 +692,20 @@ def test_a_ref_that_lacks_a_selected_test_is_refused(repo):
     assert "test_added_since" in done.stdout
 
 
+def test_a_settings_file_the_tree_lacks_is_refused_for_that(repo):
+    """An uncommitted `pytest.ini`, which this pytest read and the ref does
+    not hold: every run would die loading it, and a refusal that called that
+    a red baseline would send a person to fix tests that pass."""
+    write_tree(repo, {"pkg/tests/pytest.ini": "[pytest]\nxfail_strict = true\n"})
+
+    done = pytest_in(repo, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
+                     "--mutate-ref", "HEAD", "pkg/tests")
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert _p("pkg/tests/pytest.ini") in done.stdout
+    assert "is RED on the unmutated tree" not in done.stdout
+
+
 @pytest.mark.parametrize("options, killed", [
     ([], 0),
     (["-W", "error::UserWarning"], 1),
