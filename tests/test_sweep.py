@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from invective import sweep
+from invective import mutate, sweep
 
 from conftest import write_tree
 
@@ -247,6 +247,41 @@ def test_a_real_sweep_separates_unmeasured_from_killed_and_survived(
     assert "3 module(s) measured; 2 with no test file importing them" in said
 
 
+def test_the_sweep_s_json_carries_the_engine_s_own_report(repo, tmp_path):
+    """A consumer that reads the sweep's file gets the survivors, accepted
+    mutants and stale acceptances as the engine reports them, and not the
+    printed line of each, which cannot be taken apart again.
+
+    `tool.py` is given one of each: a survivor nothing accepts (the `<`),
+    an accepted one (the `raise`), and an acceptance of a mutant its line
+    does not have.
+    """
+    write_tree(repo, {"loose/tool.py": (
+        "def tool(n):\n"
+        "    if n < 0:\n"
+        "        raise ValueError('negative')  # invective: accept[equivalent]"
+        " no test asks\n"
+        "    return n  # invective: accept[equivalent: 1 -> 3] no such mutant\n"
+    )})
+    out = str(tmp_path / "sweep.json")
+
+    assert sweep.main(["--src", "loose", "--tests-dir", TESTS_DIR,
+                       "--only", "RAISE,CMP", "--json", out]) == 0
+
+    with open(out, encoding="utf-8") as fh:
+        (entry,) = json.load(fh)["measured"]
+    tool = _p("loose/tool.py")
+    direct = mutate.mutate(repo, os.path.join(repo, tool), entry["tests"],
+                           ["RAISE", "CMP"], 25, say=lambda line: None)
+    # Each list is there to be non-empty: equal empty lists would pass for a
+    # report that carried nothing.
+    assert direct["survivors"] and direct["accepted"] and direct["stale"]
+    got = entry["report"]
+    assert got["target"] == entry["module"] == tool
+    for kind in ("survivors", "accepted", "stale"):
+        assert got[kind] == direct[kind]
+
+
 @pytest.mark.parametrize("argv", [
     ["--src", "pkgg", "--tests-dir", TESTS_DIR],
     ["--src", "pkg", "--tests-dir", "pkg/test"],
@@ -272,6 +307,7 @@ def test_a_report_the_engine_wrote_but_the_driver_cannot_read_is_said(
     with open(out, encoding="utf-8") as fh:
         (entry,) = json.load(fh)["measured"]
     assert (entry["score"], entry["kills"], entry["broken"]) == (100.0, None, None)
+    assert entry["report"] is None
     assert "(could not read %s's own report)" % _p("pkg/gate.py") in (
         capsys.readouterr().out)
 

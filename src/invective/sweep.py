@@ -231,8 +231,17 @@ def main(argv=None):
         report.append({"module": module, "tests": tests, "killed": int(killed),
                        "mutants": int(total), "score": float(pct),
                        "survivors": lines,
-                       # From the engine's own report, and unknown -- not
-                       # none -- when that could not be read.
+                       # **The engine's report, whole**, which is what
+                       # `invective run --json` writes for this module:
+                       # survivors, accepted and stale entries as data (the
+                       # `survivors` above are the printed lines, and that
+                       # name was taken), and whatever the engine adds to its
+                       # entries later, with nothing here to teach. Unknown
+                       # -- not none -- when it could not be read, `detail`
+                       # being `{}` then. `kills` and `broken` are the same
+                       # report's, kept for the consumer that reads them
+                       # here; `report` is the one to read.
+                       "report": detail or None,
                        "kills": detail.get("kills"),
                        "broken": detail.get("broken"),
                        "fails": fails})
