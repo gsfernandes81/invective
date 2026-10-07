@@ -409,7 +409,9 @@ def _elsewhere(tmp_path, copy, target, *on_path, extra=()):
 
 
 def _file(tmp_path, rel):
-    return os.path.normcase(os.path.realpath(tmp_path / _p(rel)))
+    # As the filesystem spells it, which is how the verdict names a file:
+    # `normcase` would lowercase it on Windows.
+    return os.path.realpath(tmp_path / _p(rel))
 
 
 def test_the_verdict_names_the_target_when_it_was_loaded_elsewhere(tmp_path):
