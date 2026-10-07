@@ -193,9 +193,12 @@ def _loaded_elsewhere(copy, target):
     directories above it that hold an `__init__.py` are its package, so
     `src/pkg/sub/mod.py` is `pkg.sub.mod` with the anchored path
     `pkg/sub/mod.py`, and `pkg/__init__.py` is `pkg`. A loose file, with no
-    `__init__.py` beside it, is its bare stem and has no anchored path. A
-    namespace package has no `__init__.py` to be known by, so a target in
-    one is a loose file here and is not checked.
+    `__init__.py` beside it, is its bare stem and has no anchored path. The
+    walk up stops at the first directory with no `__init__.py`, so a target
+    in a namespace package, at the top or inside a regular package, is a
+    loose file here, and one in a regular package below a namespace package
+    is named from that package down. Neither is the name the tests import
+    it by, so as a rule nothing is under it and the target is not checked.
 
     **The name decides whenever it can.** `sys.modules` is keyed by import
     name, so the module under the target's name is one lookup: under the
