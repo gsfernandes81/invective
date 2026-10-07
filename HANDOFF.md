@@ -226,6 +226,17 @@ score, and its message should name the option.
   - *Measure* the gate's cost (one start per distinct killer, about 0.25 to
     1.5 s each) on a real project; a heavy `conftest.py` is where it shows.
 
+- **Resuming an interrupted run is part of option 4** (owner, 2026-10-07).
+  Issue #1's "Resume an interrupted run" item was deferred from the work on
+  that issue to be built here. A long sweep killed partway through should
+  skip the mutants whose verdicts it already has. Record each verdict as it
+  lands, not at the end, so a killed run keeps what it measured. The cache's
+  key rules apply unchanged: never resume across a changed target, selection,
+  config or interpreter, and never resume a timeout. It may be the first
+  slice of option 4 to land. Done, per the issue, when a run killed partway
+  through and started again skips the mutants it already has, and a change to
+  the source or the tests invalidates them.
+
 ## Open items
 
 - Measure 1 first, on a real project; it is the largest and the cheapest.
