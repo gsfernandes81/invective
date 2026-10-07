@@ -287,23 +287,29 @@ def _loaded_elsewhere(copy, target):
         file = getattr(module, "__file__", None)
         if not isinstance(file, str) or not file.endswith(".py"):
             return None
-        file = os.path.normcase(os.path.realpath(os.path.join(copy, file)))
-        return None if _in_the_library(file) else file
+        # Resolved but spelt as the filesystem spells it, since this is the
+        # path the refusal names; only the comparisons below go through
+        # `normcase`, which on Windows lowercases the whole path.
+        file = os.path.realpath(os.path.join(copy, file))
+        return None if _in_the_library(os.path.normcase(file)) else file
 
     def decide():
         file = found(name)
-        if file is not None and (
-                name not in _LOADED_BEFORE
-                or (anchored and file.endswith(os.sep + anchored))):
-            return "" if file.startswith(inside) else file
+        if file is not None:
+            key = os.path.normcase(file)
+            if (name not in _LOADED_BEFORE
+                    or (anchored and key.endswith(os.sep + anchored))):
+                return "" if key.startswith(inside) else file
         if anchored:
             for n in range(1, len(names)):
                 suffix = ".".join(names[n:])
                 if suffix in _LOADED_BEFORE:
                     continue
                 file = found(suffix)
-                if (file is not None and not file.startswith(inside)
-                        and file.endswith(os.sep + anchored)):
+                if file is None:
+                    continue
+                key = os.path.normcase(file)
+                if not key.startswith(inside) and key.endswith(os.sep + anchored):
                     return file
         return ""
 
