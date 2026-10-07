@@ -6,12 +6,15 @@ import json
 import os
 import signal
 import subprocess
+import sys
+import time
 
 import pytest
 
 from invective import mutate, sweep
 
-from conftest import WORKSPACE, write_tree
+from conftest import (FILES, SLOW_TEST, SRC, WORKSPACE, stop_group,
+                      wait_for, write_tree)
 
 SOURCES = ["pkg", "loose"]
 TESTS_DIR = "pkg/tests"
@@ -449,6 +452,48 @@ def test_a_terminated_sweep_terminates_the_engine_it_started(repo, monkeypatch):
 
     assert engine.calls == ["terminate", "wait"]
     assert died == [signal.SIGTERM]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows never delivers SIGTERM")
+def test_a_sweep_sent_sigterm_stops_its_engine_and_dies_by_the_signal(
+        tmp_path):
+    """The whole path, with the signal really delivered: the handler is
+    installed, the engine is told and waited for, its run's group is gone
+    and its copy removed, and only then does the sweep exit by the signal."""
+    # A project of its own: the fixture's tests would kill the mutant before
+    # the slow one ran.
+    root = str(tmp_path / "proj")
+    pid_file = str(tmp_path / "run.pid")
+    files = {rel: text for rel, text in FILES.items()
+             if rel not in ("pkg/tests/test_gate.py", "pkg/tests/helpers.py")}
+    write_tree(root, {**files, "pyproject.toml": "[project]\nname = 'x'\n",
+                      "pkg/tests/test_slow.py": SLOW_TEST % pid_file})
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-m", "invective", "sweep", "--src", "pkg",
+         "--tests-dir", "pkg/tests", "--only", "RAISE",
+         "--modules", "pkg/gate.py"],
+        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "PYTHONPATH": SRC})
+    run = None
+    try:
+        run = int(wait_for(pid_file))
+        sent = time.monotonic()
+        os.kill(proc.pid, signal.SIGTERM)
+
+        assert proc.wait(timeout=60) == -signal.SIGTERM
+        # The engine was told at once. Left to the escalation, which waits
+        # out the whole grace first, the sweep would still end the same way.
+        assert time.monotonic() - sent < sweep._GRACE
+        with pytest.raises(ProcessLookupError):
+            os.killpg(run, 0)
+        assert [n for n in os.listdir(tmp_path)
+                if n.startswith("invective-")] == []
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        if run is not None:
+            stop_group(run)
+        proc.communicate()
 
 
 def test_an_engine_that_outlasts_its_grace_is_told_again_and_then_killed(
