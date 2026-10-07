@@ -239,8 +239,11 @@ def test_without_mutate_the_plugin_leaves_the_run_alone(repo):
     assert done.returncode == 0, done.stdout + done.stderr
     assert "2 passed" in done.stdout
     # pytest's header lists the installed plugins, in an order that is the
-    # site directory's and not alphabetical, so the whole line goes.
+    # site directory's and not alphabetical, so the whole line goes. The
+    # fixture's path goes too, from the `rootdir:` line: a temporary
+    # directory under one named for invective would say it.
     said = re.sub(r"(?m)^plugins: .*$", "", done.stdout)
+    said = said.replace(repo, "")
     assert "invective" not in said
 
 
