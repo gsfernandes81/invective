@@ -766,7 +766,8 @@ def rewrite_tests(args: list[str], cwd: str, root: str) -> list[str]:
     return out
 
 
-def main(argv: list[str] | None = None) -> int:
+def parser() -> argparse.ArgumentParser:
+    """`invective run`'s command line, apart from `main` so a test can read it."""
     ap = argparse.ArgumentParser(prog="invective run", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", required=True, help="the module to break")
@@ -778,6 +779,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", help="write the report here as well")
     ap.add_argument("--ref", help="run on this git commit, branch or tag "
                                   "instead of the files as they stand")
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = parser()
     args = ap.parse_args(argv)
 
     only = [k.strip().upper() for k in args.only.split(",")] if args.only else None

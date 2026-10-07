@@ -1067,3 +1067,17 @@ def test_the_value_after_an_expression_or_plugin_option_is_left_as_typed(
         test_gate, "-k", "tests", "-m", "tests", "-p", "tests", "-m=tests",
         "--deselect=%s::x" % test_gate, "--rootdir=%s" % os.path.dirname(tree),
         "-q", "tests/test_none.py::x"]
+
+
+def test_the_run_command_line_is_one_a_test_can_parse():
+    """`parser()` is `main`'s own parser, built apart from it so a check of
+    the documented commands can parse them without running anything."""
+    args = mutate.parser().parse_args(
+        ["--target", "pkg/gate.py", "--tests", "tests/test_gate.py",
+         "tests/test_idle.py", "--only", "RAISE", "--limit", "3",
+         "--json", "out.json", "--ref", "main"])
+
+    assert (args.target, args.tests, args.only, args.limit, args.json,
+            args.ref) == ("pkg/gate.py",
+                          ["tests/test_gate.py", "tests/test_idle.py"],
+                          "RAISE", 3, "out.json", "main")

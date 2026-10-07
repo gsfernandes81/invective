@@ -330,6 +330,28 @@ def test_the_command_says_which_argument_is_missing(capsys, argv, missing):
     assert missing in capsys.readouterr().err
 
 
+def test_the_sweep_command_line_is_one_a_test_can_parse():
+    """`parser()` is `main`'s own parser, built apart from it so a check of
+    the documented commands can parse them without running anything."""
+    args = sweep.parser().parse_args(
+        ["--src", "pkg", "loose", "--tests-dir", TESTS_DIR,
+         "--modules", "pkg/gate.py", "loose/idle.py"])
+
+    assert (args.src, args.tests_dir, args.modules) == (
+        ["pkg", "loose"], TESTS_DIR, ["pkg/gate.py", "loose/idle.py"])
+
+
+def test_the_help_says_what_modules_does(capsys):
+    with pytest.raises(SystemExit) as stopped:
+        sweep.main(["--help"])
+    assert stopped.value.code == 0
+    # argparse wraps the help to the terminal's width.
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--modules" in out
+    assert "sweep only these module files" in out
+    assert "instead of discovering them under --src" in out
+
+
 def test_a_module_that_breaks_the_project_s_rules_fails_the_sweep(
         repo, monkeypatch, capsys):
     monkeypatch.setattr(sweep.subprocess, "run", _Engine(

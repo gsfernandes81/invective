@@ -140,7 +140,8 @@ def _from_root(given, root):
         raise Refusal("%s is outside the project at %s" % (given, root)) from None
 
 
-def main(argv=None):
+def parser():
+    """The sweep's command line, apart from `main` so a test can read it."""
     ap = argparse.ArgumentParser(prog="invective sweep", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--src", required=True, nargs="+",
@@ -154,9 +155,17 @@ def main(argv=None):
     # than taking the first N, so a cap does not mean "the top of the file".
     ap.add_argument("--limit", type=int, default=25)
     ap.add_argument("--json", default=None)
-    ap.add_argument("--modules", nargs="*")
+    ap.add_argument("--modules", nargs="*",
+                    help="sweep only these module files, relative to the "
+                         "current directory, instead of discovering them "
+                         "under --src")
     ap.add_argument("--ref", help="run on this git commit, branch or tag "
                                   "instead of the files as they stand")
+    return ap
+
+
+def main(argv=None):
+    ap = parser()
     args = ap.parse_args(argv)
 
     root = project_root()
