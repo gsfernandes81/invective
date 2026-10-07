@@ -163,6 +163,10 @@ def _sites(tree: ast.AST) -> list[tuple[str, ast.AST, str]]:
     return found
 
 
+#: 3.14's t-string interpolation, `None` before it.
+_INTERPOLATION = getattr(ast, "Interpolation", None)
+
+
 def _apply(tree: ast.AST, index: int) -> ast.AST:
     """A copy of *tree* with site *index* broken, and nothing else touched.
 
@@ -208,10 +212,6 @@ def _apply(tree: ast.AST, index: int) -> ast.AST:
                     and any(m is edited for m in ast.walk(outer.value))):
                 outer.str = ast.unparse(outer.value)
     return ast.fix_missing_locations(clone)
-
-
-#: 3.14's t-string interpolation, `None` before it.
-_INTERPOLATION = getattr(ast, "Interpolation", None)
 
 
 def _dump(tree: ast.AST) -> str:
@@ -279,6 +279,7 @@ def _report_lines(text: str) -> list[str]:
     """
     parts = _LINE_END.split(text)[::2]
     return parts[:-1] if parts and parts[-1] == "" else parts
+
 
 #: The kinds whose replacement is an expression. Parentheses make one safe
 #: whatever its parent's precedence, which the bare text is not always: the
@@ -597,7 +598,7 @@ def run_tests(where: str, tests: list[str], timeout: float,
             with open(verdict, encoding="utf-8") as fh:
                 said = json.load(fh)
             killer, missing = said["killer"], tuple(said["missing"])
-            # `.get`: a verdict an older plugin wrote has no such field.
+            # `.get`: the field may be absent from the verdict of a run cut short.
             elsewhere = said.get("elsewhere", "")
         except (OSError, ValueError, KeyError):
             # A run that ended before its session did -- pytest could not
