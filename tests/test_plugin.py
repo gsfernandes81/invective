@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -359,6 +359,159 @@ def test_a_target_a_plugin_in_addopts_loaded_from_elsewhere_is_still_named(
                    "pytest.ini": "[pytest]\naddopts = -p early\n"},
         "src/pkg/gate.py", str(tmp_path / "other" / "src"),
     ) == _file(tmp_path, "other/src/pkg/gate.py")
+
+
+def test_a_package_s_own_init_loaded_from_elsewhere_is_refused(tmp_path):
+    """The target is `src/pkg/__init__.py`, which is `pkg` itself and not a
+    module inside it. The tests import `pkg` from the other tree's `src`, on
+    the path as an editable install's `.pth` line would put it, and the run
+    is refused naming that tree's file."""
+    package = {"src/pkg/__init__.py": ("def admit(age):\n"
+                                       "    if age < 18:\n"
+                                       "        raise ValueError(age)\n"
+                                       "    return True\n")}
+    write_tree(tmp_path / "other", package)
+    project = os.path.realpath(tmp_path / "project")
+    write_tree(project, {**package, "pyproject.toml": "",
+                         "tests/test_pkg.py": (
+                             "import pytest\n"
+                             "from pkg import admit\n"
+                             "\n"
+                             "def test_a_minor():\n"
+                             "    with pytest.raises(ValueError):\n"
+                             "        admit(17)\n")})
+
+    done = pytest_in(project, "--mutate", "src/pkg/__init__.py",
+                     "tests/test_pkg.py",
+                     env={"PYTHONPATH": os.pathsep.join(
+                         [SRC, str(tmp_path / "other" / "src")])})
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "refused: " in done.stdout
+    assert " was imported from %s, not from the copy" % _file(
+        tmp_path, "other/src/pkg/__init__.py") in done.stdout
+
+
+#: The target's package as the copy holds it in the cases below, which call
+#: `_loaded_elsewhere` in this process with modules made up for them.
+NESTED = {"src/pkg/__init__.py": "", "src/pkg/sub/__init__.py": "",
+          "src/pkg/sub/mod.py": "def f():\n    return 1\n"}
+MOD = "src/pkg/sub/mod.py"
+#: The other tree's copy of the target.
+OTHER_MOD = "other/src/pkg/sub/mod.py"
+#: A module of the other tree under a name the target could have, but not
+#: at the target's layout, `pkg/sub/mod.py`.
+NOT_AT_LAYOUT = "other/lib/sub/mod.py"
+
+#: The names those modules are put under, emptied first, so that nothing
+#: this process holds answers for them.
+NAMES = ("pkg", "pkg.sub", "pkg.sub.mod", "sub", "sub.mod", "mod")
+
+
+def _decide(tmp_path, monkeypatch, target, loaded, before=(), copy=NESTED):
+    """`_loaded_elsewhere` of this checkout's plugin for a copy at `copy/`
+    holding *copy*, with `other/` beside it holding the same package, and
+    with *loaded* in `sys.modules`: name -> the module's `__file__`, given
+    from *tmp_path* unless it is None (a module with no `__file__`). The
+    plugin takes *before* for the modules loaded ahead of it."""
+    plugin = _plugin_here()
+    monkeypatch.setattr(plugin, "_LOADED_BEFORE", frozenset(before))
+    write_tree(tmp_path / "copy", copy)
+    write_tree(tmp_path / "other", {**NESTED, "lib/sub/mod.py": ""})
+    for name in NAMES:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    for name, file in loaded.items():
+        module = ModuleType(name)
+        if file is not None:
+            module.__file__ = str(tmp_path / _p(file))
+        monkeypatch.setitem(sys.modules, name, module)
+    return plugin._loaded_elsewhere(str(tmp_path / "copy"), target)
+
+
+def test_the_name_loaded_from_another_tree_is_that_tree_s_file(
+        tmp_path, monkeypatch):
+    """The name is `pkg.sub.mod`, the outermost package first."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": OTHER_MOD}) \
+        == _file(tmp_path, OTHER_MOD)
+
+
+@pytest.mark.parametrize("file", [OTHER_MOD + "c", None],
+                         ids=["pyc", "no-file"])
+def test_a_module_with_no_source_file_is_never_the_one_named(
+        tmp_path, monkeypatch, file):
+    """A `.pyc`, or a module with no `__file__`, is not a file a mutant
+    could be in."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": file}) == ""
+
+
+def test_a_relative_file_is_read_from_the_top_of_the_copy(
+        tmp_path, monkeypatch):
+    """A relative `sys.path` entry gives a relative `__file__`, relative to
+    where the run started, which is the top of the copy: the copy's own
+    file, whatever this process's directory, here the other tree."""
+    write_tree(tmp_path / "other", NESTED)
+    monkeypatch.chdir(tmp_path / "other")
+    plugin = _plugin_here()
+    monkeypatch.setattr(plugin, "_LOADED_BEFORE", frozenset())
+    write_tree(tmp_path / "copy", NESTED)
+    module = ModuleType("pkg.sub.mod")
+    module.__file__ = _p(MOD)
+    monkeypatch.setitem(sys.modules, "pkg.sub.mod", module)
+
+    assert plugin._loaded_elsewhere(str(tmp_path / "copy"), MOD) == ""
+
+
+@pytest.mark.parametrize("loaded, named", [
+    ({"sub.mod": OTHER_MOD}, OTHER_MOD),
+    ({"mod": OTHER_MOD}, OTHER_MOD),
+    ({"sub.mod": NOT_AT_LAYOUT}, None),
+    ({"sub.mod": "copy/" + MOD}, None),
+], ids=["sub.mod", "mod", "not-at-layout", "in-the-copy"])
+def test_under_a_shorter_name_only_the_target_s_layout_elsewhere_is_named(
+        tmp_path, monkeypatch, loaded, named):
+    """With nothing under `pkg.sub.mod`, each shorter name is looked up,
+    `sub.mod` then `mod`, and its module is the target only at
+    `.../pkg/sub/mod.py` outside the copy."""
+    assert _decide(tmp_path, monkeypatch, MOD, loaded) == (
+        _file(tmp_path, named) if named else "")
+
+
+def test_a_shorter_name_loaded_before_the_plugin_is_let_be(
+        tmp_path, monkeypatch):
+    """Even at the target's layout: only the target's own name has the
+    exception for what a plugin in `addopts` loaded."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"sub.mod": OTHER_MOD},
+                   before={"sub.mod"}) == ""
+
+
+@pytest.mark.parametrize("file, named", [
+    (OTHER_MOD, OTHER_MOD),
+    (NOT_AT_LAYOUT, None),
+], ids=["at-layout", "not-at-layout"])
+def test_the_name_loaded_before_the_plugin_is_named_only_at_its_layout(
+        tmp_path, monkeypatch, file, named):
+    """What the harness had loaded under the target's name is let be, but
+    for the target's own layout outside the copy, which is what a plugin in
+    `addopts` that imports the target loaded."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": file},
+                   before={"pkg.sub.mod"}) == (
+        _file(tmp_path, named) if named else "")
+
+
+def test_the_top_of_the_copy_is_never_part_of_the_name(tmp_path, monkeypatch):
+    """The run starts at the top of the copy, so that directory is on
+    `sys.path` and nothing above it is, an `__init__.py` there or not."""
+    assert _decide(tmp_path, monkeypatch, "pkg/sub/mod.py",
+                   {"pkg.sub.mod": OTHER_MOD},
+                   copy={"__init__.py": "", "pkg/__init__.py": "",
+                         "pkg/sub/__init__.py": "", "pkg/sub/mod.py": ""}) \
+        == _file(tmp_path, OTHER_MOD)
+
+
+def test_a_package_s_init_is_the_package(tmp_path, monkeypatch):
+    assert _decide(tmp_path, monkeypatch, "src/pkg/__init__.py",
+                   {"pkg": "other/src/pkg/__init__.py"}) \
+        == _file(tmp_path, "other/src/pkg/__init__.py")
 
 
 def test_a_run_that_breaks_the_project_s_rules_fails_as_a_test_would(repo):
