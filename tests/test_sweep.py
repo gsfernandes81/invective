@@ -157,6 +157,32 @@ def test_a_file_named_after_a_module_elsewhere_is_another_module_s(tmp_path):
         os.path.join("tests", "api", "test_models.py")]
 
 
+def test_a_loose_module_is_covered_by_its_bare_stem_only_where_its_name_is(
+        tmp_path):
+    """A loose module's tests import it by its bare stem, and a bare stem in a
+    subdirectory is as likely that directory's own helper or an attribute of
+    something else. A module in a package is imported by its dotted path,
+    which counts anywhere."""
+    root = str(tmp_path / "proj")
+    write_tree(root, {
+        "scripts/config.py": "X = 1\n",
+        "tools/helpers.py": "X = 2\n",
+        "pkg/__init__.py": "",
+        "pkg/app.py": "X = 3\n",
+        "tests/web/helpers.py": "X = 4\n",
+        "tests/web/test_app.py": "from pkg import app\n\napp.config.debug\n",
+        "tests/web/test_page.py": "import helpers\n",
+        "tests/test_config.py": "import config\n",
+    })
+    sources = ["scripts", "tools", "pkg"]
+
+    assert sweep.covering(root, "scripts/config.py", sources, "tests") == [
+        os.path.join("tests", "test_config.py")]
+    assert sweep.covering(root, "tools/helpers.py", sources, "tests") == []
+    assert sweep.covering(root, "pkg/app.py", sources, "tests") == [
+        os.path.join("tests", "web", "test_app.py")]
+
+
 def test_a_file_under_pycache_in_the_tests_directory_is_not_coverage(tree):
     """Bytecode and stale copies are not what the project wrote."""
     write_tree(tree, {"pkg/tests/__pycache__/test_cached.py": "from pkg import idle\n"})

@@ -91,7 +91,11 @@ def covering(root, module, sources, tests_dir):
     directory that mirrors the module's own under *sources*
     (`src/app/api/models.py` and `tests/api/test_models.py`); anywhere else a
     test file covers a module only by importing it, since `test_models.py`
-    in another directory is another module's.
+    in another directory is another module's. A loose module, one outside
+    any package, is imported by its bare stem, and that covers it at the
+    same two places only: a bare stem in another directory is as likely that
+    directory's own helper. A dotted import is specific enough to count
+    anywhere.
 
     **Matched on the import, never on the bare stem.** Matching on whether
     the module's name appears anywhere in a test file selects dozens of
@@ -142,9 +146,11 @@ def covering(root, module, sources, tests_dir):
             path = os.path.join(dirpath, f)
             with open(path, encoding="utf-8", errors="replace") as fh:
                 body = fh.read()
-            by_name = f == named and os.path.relpath(dirpath, tests_abs) in (
-                os.curdir, mirror)
-            if by_name or any(re.search(pat, body, re.M) for pat in wanted):
+            near = os.path.relpath(dirpath, tests_abs) in (os.curdir, mirror)
+            by_name = f == named and near
+            by_import = (dotted or near) and any(
+                re.search(pat, body, re.M) for pat in wanted)
+            if by_name or by_import:
                 hits.append(os.path.normpath(os.path.join(
                     tests_dir, os.path.relpath(path, tests_abs))))
     return hits
