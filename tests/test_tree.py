@@ -279,11 +279,57 @@ def test_the_copy_is_marked_with_its_owner_before_it_is_filled(tmp_path,
     assert seen == [{"pid": os.getpid(), "root": root}]
 
 
-def test_a_ref_s_copy_is_marked_with_its_owner_too(repo):
-    """A worktree is a copy like any other, marked once git has filled it."""
-    with trees.git_ref(repo, "HEAD") as where:
-        with open(os.path.join(where, trees.MARKER), encoding="utf-8") as fh:
-            assert json.load(fh)["pid"] == os.getpid()
+def test_a_ref_s_copy_is_marked_with_its_owner_too(repo, tmp_path):
+    """A worktree is a copy like any other, marked at the top of the
+    directory it is checked out into."""
+    with trees.git_ref(repo, "HEAD"):
+        (box,) = _marked(tmp_path)
+        with open(tmp_path / box / trees.MARKER, encoding="utf-8") as fh:
+            assert json.load(fh) == {"pid": os.getpid(), "root": repo}
+
+
+def test_a_ref_s_copy_is_marked_before_git_fills_it(repo, monkeypatch):
+    """The checkout of a large tree takes seconds, and a kill of the whole
+    process group during it, git included, must leave a directory the next
+    reaper knows for a copy."""
+    real = trees._git
+    seen = []
+
+    def checking_the_marker(root, *args):
+        if args[:2] == ("worktree", "add"):
+            seen.append(os.path.isfile(os.path.join(
+                os.path.dirname(args[3]), trees.MARKER)))
+        return real(root, *args)
+
+    monkeypatch.setattr(trees, "_git", checking_the_marker)
+    with trees.git_ref(repo, "HEAD"):
+        pass
+    assert seen == [True]
+
+
+def test_a_copy_killed_while_it_is_removed_is_left_under_a_name_the_reaper_removes(
+        tmp_path, monkeypatch):
+    """Removing a large tree takes seconds and may delete the marker first,
+    and a kill then would leave an unmarked directory no reaper touches. The
+    copy is renamed before the removal, as the reaper renames its own."""
+    root = str(tmp_path / "project")
+    write_tree(root, {"pkg/a.py": "x = 1\n"})
+    real = trees.shutil.rmtree
+    removed = []
+    # The removal is never done: what is left is the most a kill during it
+    # could leave.
+    monkeypatch.setattr(trees.shutil, "rmtree",
+                        lambda path, ignore_errors=False: removed.append(path))
+
+    with trees.working_tree(root):
+        pass
+
+    left = removed[-1]
+    assert os.path.basename(left).startswith("invective-dead-")
+    assert os.path.isfile(os.path.join(left, "pkg", "a.py"))
+    monkeypatch.setattr(trees.shutil, "rmtree", real)
+    trees.reap()
+    assert _marked(tmp_path) == []
 
 
 def test_a_marker_at_the_project_s_top_is_not_copied_over_the_copy_s(tmp_path):
@@ -300,14 +346,16 @@ def test_a_marker_at_the_project_s_top_is_not_copied_over_the_copy_s(tmp_path):
 
 def test_a_ref_stopped_during_the_checkout_leaves_no_copy_and_no_worktree(
         repo, tmp_path, monkeypatch):
-    """A SIGTERM or ^C that lands while git is filling the worktree comes
-    before the marker, so the directory is one no reaper would touch, and git
-    keeps the entry: both are removed on the way out."""
+    """A SIGTERM or ^C that lands while git is filling the worktree leaves
+    its entry locked, which `prune` never drops: the directory and the entry
+    are both removed on the way out."""
     real = trees._git
 
     def stopped_after_the_add(root, *args):
         out = real(root, *args)
         if args[:2] == ("worktree", "add"):
+            # As git leaves it when the stop lands before it has finished.
+            git(repo, "worktree", "lock", args[3])
             raise mutate._Terminated(signal.SIGTERM)
         return out
 
@@ -320,8 +368,8 @@ def test_a_ref_stopped_during_the_checkout_leaves_no_copy_and_no_worktree(
     listed = [line for line in git(repo, "worktree", "list",
                                    "--porcelain").splitlines()
               if line.startswith("worktree ")]
-    assert not [line for line in listed
-                if os.path.basename(line).startswith("invective-")]
+    # The repository's own, alone.
+    assert len(listed) == 1
 
 
 @pytest.mark.parametrize("text", [

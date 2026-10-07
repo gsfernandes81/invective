@@ -6,8 +6,9 @@ the last, so the files a person is working on never hold a mutant, and a run
 that is killed leaves nothing behind in them. Each is a context manager that
 gives the path of the copy's top level.
 
-**A copy carries the pid of the process it belongs to**, in `MARKER` at its
-top, and each context manager begins by removing the copies whose owner is
+**A copy carries the pid of the process it belongs to**, in `MARKER` at the
+top of its directory (for a ref, the directory the worktree is checked out
+into), and each context manager begins by removing the copies whose owner is
 dead. The removal at the end runs on an interrupt and a SIGTERM, which the
 engine turns into one, and on nothing else: a run killed outright leaves its
 copy, a whole working tree with whatever untracked files hold, and the marker
@@ -33,10 +34,10 @@ SKIPPED = frozenset({".git", ".hg", ".svn", ".tox", ".nox", "__pycache__",
                      ".pytest_cache", ".mypy_cache", ".ruff_cache",
                      "node_modules"})
 
-#: The file at a copy's top that names its owner: `{"pid": ..., "root": ...}`,
-#: the process the copy belongs to and the project it is a copy of. `root`
-#: is read by nothing here; it is for a person who finds a copy and wants to
-#: know whose it was.
+#: The file at the top of a copy's directory that names its owner:
+#: `{"pid": ..., "root": ...}`, the process the copy belongs to and the
+#: project it is a copy of. `root` is read by nothing here; it is for a
+#: person who finds a copy and wants to know whose it was.
 MARKER = ".invective-owner"
 
 
@@ -86,7 +87,7 @@ def working_tree(root: str, exclude: tuple[str, ...] = ()):
             raise Refusal("could not copy %s: %s" % (root, exc)) from exc
         yield where
     finally:
-        shutil.rmtree(where, ignore_errors=True)
+        _remove(where)
 
 
 @contextlib.contextmanager
@@ -95,43 +96,64 @@ def git_ref(root: str, ref: str):
     detached git worktree; the copy's top level is the directory there that
     corresponds to *root*. The only part of invective that needs git."""
     reap()
+    # The worktree is a subdirectory of the copy's directory, which is marked
+    # before the checkout: git wants the directory it checks out into empty,
+    # and a kill while it fills a large tree, which takes seconds, must leave
+    # a copy the next reaper removes. The unmarked window is
+    # `working_tree`'s.
     where = tempfile.mkdtemp(prefix="invective-")
+    tree = os.path.join(where, "tree")
     try:
-        prefix = _git(root, "rev-parse", "--show-prefix").strip()
-        _git(root, "worktree", "add", "--detach", where, ref)
-        # After the checkout, since git wants the directory empty; the window
-        # is the milliseconds `worktree add` takes.
         _mark(where, root)
+        prefix = _git(root, "rev-parse", "--show-prefix").strip()
+        _git(root, "worktree", "add", "--detach", tree, ref)
     except BaseException:
         # A Refusal is the ordinary way here; the rest is a SIGTERM or ^C
-        # during the checkout, which on a large tree stays open for seconds
-        # and would otherwise leave an unmarked directory that no reaper
-        # touches, and a worktree entry that git keeps as locked.
+        # during the checkout, which leaves a worktree entry that git keeps
+        # as locked.
         _discard(root, where)
         raise
     try:
-        yield os.path.join(where, *prefix.split("/")) if prefix else where
+        yield os.path.join(tree, *prefix.split("/")) if prefix else tree
     finally:
         _discard(root, where)
 
 
+def _remove(where: str) -> None:
+    """Remove the copy *where*, raising nothing.
+
+    Renamed first, atomically, to `invective-dead-<name>`, as `reap()` does:
+    removing a large tree takes seconds and may delete the marker first, and
+    a kill during it then leaves a name the next reaper removes
+    unconditionally, not an unmarked directory it never touches. A rename
+    that fails -- on Windows a file the stopped run holds open is enough --
+    leaves the removal to be done in place."""
+    dead = os.path.join(os.path.dirname(where), "invective-dead-"
+                        + os.path.basename(where)[len("invective-"):])
+    try:
+        os.rename(where, dead)
+    except OSError:
+        dead = where
+    shutil.rmtree(dead, ignore_errors=True)
+
+
 def _discard(root: str, where: str) -> None:
-    """Remove the worktree *where* of *root*, locked or not, and everything
-    git keeps of it. Says nothing and raises nothing: it runs on the way out
-    of a run whose own outcome is the one to report, and where there may be
-    no git."""
+    """Remove the copy *where* that `git_ref` made of *root*, and the entry
+    git keeps of its worktree, locked or not. Says nothing and raises
+    nothing: it runs on the way out of a run whose own outcome is the one to
+    report, and where there may be no git."""
+    _remove(where)
     # invective: accept[equivalent: True -> False] git says nothing here a person needs
     quietly = {"capture_output": True, "text": True}
     try:
-        # Two `--force` remove a locked worktree.
+        # With the directory gone, `remove` on the registered path clears the
+        # entry, a locked one only with `--force` given twice; `prune` drops
+        # the entries of earlier runs' copies that a reaper removed.
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force",
-                        "--force", where], **quietly)
-        shutil.rmtree(where, ignore_errors=True)
-        # When `remove` failed -- on Windows a file the stopped run held open
-        # is enough -- the directory is gone now but git still lists it.
+                        "--force", os.path.join(where, "tree")], **quietly)
         subprocess.run(["git", "-C", root, "worktree", "prune"], **quietly)
     except FileNotFoundError:
-        shutil.rmtree(where, ignore_errors=True)
+        pass
 
 
 def _git(root: str, *args: str) -> str:
@@ -226,10 +248,12 @@ def reap() -> None:
     fails in the safe direction: a dead owner's pid taken by an unrelated
     process keeps the copy until that pid is free, a delayed reap and never
     a wrong one, and a zombie owner reads as alive until its parent collects
-    it. A `--ref` copy was a git worktree, and its removal leaves an entry
-    in the repository's `.git/worktrees`, which `git_ref` prunes at the end
-    of the next `--ref` run: no git is run here, so a plain run still asks
-    git nothing, whatever sits in the temporary directory.
+    it. A `--ref` copy holds a git worktree, whose entry in the repository's
+    `.git/worktrees` `git_ref` clears on its own way out; the entry of one
+    removed here is dropped by the `prune` at the end of the next `--ref`
+    run, unless a kill during its checkout left it locked. No git is run
+    here, so a plain run still asks git nothing, whatever sits in the
+    temporary directory.
     """
     box = tempfile.gettempdir()
     try:
