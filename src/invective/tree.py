@@ -102,20 +102,36 @@ def git_ref(root: str, ref: str):
         # After the checkout, since git wants the directory empty; the window
         # is the milliseconds `worktree add` takes.
         _mark(where, root)
-    except Refusal:
-        shutil.rmtree(where, ignore_errors=True)
+    except BaseException:
+        # A Refusal is the ordinary way here; the rest is a SIGTERM or ^C
+        # during the checkout, which on a large tree stays open for seconds
+        # and would otherwise leave an unmarked directory that no reaper
+        # touches, and a worktree entry that git keeps as locked.
+        _discard(root, where)
         raise
     try:
         yield os.path.join(where, *prefix.split("/")) if prefix else where
     finally:
-        # invective: accept[equivalent: True -> False] git says nothing here a person needs
-        quietly = {"capture_output": True, "text": True}
+        _discard(root, where)
+
+
+def _discard(root: str, where: str) -> None:
+    """Remove the worktree *where* of *root*, locked or not, and everything
+    git keeps of it. Says nothing and raises nothing: it runs on the way out
+    of a run whose own outcome is the one to report, and where there may be
+    no git."""
+    # invective: accept[equivalent: True -> False] git says nothing here a person needs
+    quietly = {"capture_output": True, "text": True}
+    try:
+        # Two `--force` remove a locked worktree.
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force",
-                        where], **quietly)
+                        "--force", where], **quietly)
         shutil.rmtree(where, ignore_errors=True)
         # When `remove` failed -- on Windows a file the stopped run held open
         # is enough -- the directory is gone now but git still lists it.
         subprocess.run(["git", "-C", root, "worktree", "prune"], **quietly)
+    except FileNotFoundError:
+        shutil.rmtree(where, ignore_errors=True)
 
 
 def _git(root: str, *args: str) -> str:
@@ -155,6 +171,7 @@ def _alive(pid: int) -> bool:
         # has ended but is still held open somewhere (a `Popen` not yet
         # collected) has an exit code that is not `STILL_ACTIVE`.
         import ctypes
+        # invective: accept[untestable: True -> False] Windows only, and the sweep runs on Linux
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel.OpenProcess.restype = ctypes.c_void_p
         kernel.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -231,7 +248,17 @@ def reap() -> None:
                 pid = json.load(fh)["pid"]
         except (OSError, ValueError, KeyError, TypeError):
             continue
-        if pid == os.getpid() or _alive(pid):
+        # A marker that does not hold a pid is not ours, and is left like one
+        # that cannot be parsed: a stray file must not stop every start.
+        # invective: accept[untestable: LtE -> Lt] pid 0 probes the caller's own process group on POSIX and reads as running either way; it is told apart only on Windows
+        # invective: accept[untestable: 0 -> 1] pid 1 is init on POSIX and reads as running either way; it is told apart only on Windows
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            continue
+        try:
+            owner_alive = pid == os.getpid() or _alive(pid)
+        except (OverflowError, ValueError, OSError):
+            continue
+        if owner_alive:
             continue
         dead = os.path.join(box, "invective-dead-" + name[len("invective-"):])
         try:

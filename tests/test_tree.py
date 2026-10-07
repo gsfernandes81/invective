@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 
@@ -12,7 +13,7 @@ import pytest
 from invective import mutate
 from invective import tree as trees
 
-from conftest import slow_run, stop_group, write_tree
+from conftest import git, slow_run, stop_group, write_tree
 
 
 def _files(where):
@@ -108,6 +109,26 @@ def test_a_ref_needs_git_and_says_so_when_there_is_none(tmp_path, monkeypatch):
         with trees.git_ref(str(tmp_path), "HEAD"):
             pass
     assert "needs git" in str(caught.value)
+    assert not [n for n in os.listdir(tmp_path) if n.startswith("invective-")]
+
+
+def test_a_ref_without_git_is_refused_even_when_its_directory_will_not_go(
+        tmp_path, monkeypatch):
+    """The refusal is what the person is told; the cleanup's own failure
+    does not replace it."""
+    monkeypatch.setenv("PATH", str(tmp_path))
+    real = os.rmdir
+
+    def rmdir(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)).startswith("invective-"):
+            raise PermissionError(path)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rmdir", rmdir)
+
+    with pytest.raises(mutate.Refusal):
+        with trees.git_ref(str(tmp_path), "HEAD"):
+            pass
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
@@ -275,3 +296,102 @@ def test_a_marker_at_the_project_s_top_is_not_copied_over_the_copy_s(tmp_path):
     with trees.working_tree(root) as where:
         with open(os.path.join(where, trees.MARKER), encoding="utf-8") as fh:
             assert json.load(fh)["pid"] == os.getpid()
+
+
+def test_a_ref_stopped_during_the_checkout_leaves_no_copy_and_no_worktree(
+        repo, tmp_path, monkeypatch):
+    """A SIGTERM or ^C that lands while git is filling the worktree comes
+    before the marker, so the directory is one no reaper would touch, and git
+    keeps the entry: both are removed on the way out."""
+    real = trees._git
+
+    def stopped_after_the_add(root, *args):
+        out = real(root, *args)
+        if args[:2] == ("worktree", "add"):
+            raise mutate._Terminated(signal.SIGTERM)
+        return out
+
+    monkeypatch.setattr(trees, "_git", stopped_after_the_add)
+    with pytest.raises(mutate._Terminated):
+        with trees.git_ref(repo, "HEAD"):
+            pass
+
+    assert not [n for n in os.listdir(tmp_path) if n.startswith("invective-")]
+    listed = [line for line in git(repo, "worktree", "list",
+                                   "--porcelain").splitlines()
+              if line.startswith("worktree ")]
+    assert not [line for line in listed
+                if os.path.basename(line).startswith("invective-")]
+
+
+@pytest.mark.parametrize("text", [
+    json.dumps({"pid": "123"}),
+    json.dumps({"pid": None}),
+    json.dumps({"pid": 1.5}),
+    json.dumps({"pid": 10 ** 20}),
+    json.dumps({"pid": True}),
+    # Negative, a process group to `os.kill`, and one nothing has.
+    json.dumps({"pid": -(2 ** 31 - 1)}),
+    "[]",
+    "not json",
+], ids=["string", "null", "float", "too-large", "bool", "negative", "list",
+        "unparsable"])
+def test_a_marker_that_holds_no_pid_is_left_and_stops_nothing(tmp_path, text):
+    """A stray file in the temporary directory is not an owner to ask about,
+    and must not make every start of invective fail."""
+    stray = tmp_path / "invective-cccccccc"
+    os.mkdir(stray)
+    (stray / trees.MARKER).write_text(text, encoding="utf-8")
+
+    trees.reap()
+
+    assert stray.is_dir()
+
+
+def _dead_owners_copy(tmp_path, name):
+    gone = subprocess.Popen([sys.executable, "-c", ""])
+    gone.wait()
+    dead = tmp_path / name
+    os.mkdir(dead)
+    (dead / trees.MARKER).write_text(
+        json.dumps({"pid": gone.pid, "root": "elsewhere"}), encoding="utf-8")
+    return dead
+
+
+def test_a_ref_begins_by_removing_the_copies_of_dead_owners(repo, tmp_path):
+    """`working_tree` is covered by the test of the killed run; the ref's own
+    start has to reap as well."""
+    dead = _dead_owners_copy(tmp_path, "invective-dddddddd")
+
+    with trees.git_ref(repo, "HEAD"):
+        assert not dead.exists()
+
+
+def _refuse_to_remove_directories(monkeypatch):
+    """Every directory removal under an `invective-` name fails, as one does
+    on Windows for a file the stopped run held open."""
+    real = os.rmdir
+
+    def rmdir(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)).startswith("invective-"):
+            raise PermissionError(path)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rmdir", rmdir)
+
+
+def test_a_dead_owner_s_copy_that_will_not_be_removed_does_not_stop_the_start(
+        tmp_path, monkeypatch):
+    _dead_owners_copy(tmp_path, "invective-eeeeeeee")
+    _refuse_to_remove_directories(monkeypatch)
+
+    trees.reap()
+
+
+def test_a_copy_already_renamed_for_removal_that_will_not_go_does_not_stop_the_start(
+        tmp_path, monkeypatch):
+    """What a reaper killed halfway leaves, met by the next one."""
+    os.mkdir(tmp_path / "invective-dead-ffffffff")
+    _refuse_to_remove_directories(monkeypatch)
+
+    trees.reap()
