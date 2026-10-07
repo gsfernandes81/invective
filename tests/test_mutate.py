@@ -522,9 +522,11 @@ def test_every_mutant_s_entry_carries_its_diff(repo):
     since the mutant is the file with one span edited. Both are within three
     lines of the end, so the hunk's context runs to the file's last line and
     no further: the file's final line break ends that line, and is no empty
-    line after it."""
+    line after it. The headers spell the path with `/` on every platform,
+    while `target` is the path as this platform spells it."""
     report = mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS,
                            ["RAISE", "BOOL"], None)
+    assert report["target"] == GATE
     count = FILES[GATE.replace(os.sep, "/")].count("\n")
     last = FILES[GATE.replace(os.sep, "/")].split("\n")[-2]
 

@@ -815,9 +815,14 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # report's `line` are, so the `@@` numbers are the report's lines,
             # no `\r` is left on a line, and a `\r\n` file's diff is the
             # edited lines alone, both sides having lost their endings alike.
+            # The headers spell the path with `/` on every platform, as git
+            # writes a diff and as the report's node ids are spelt: they are
+            # part of a text another tool reads, unlike `target`, which is a
+            # path on this machine and keeps its native separators.
+            shown = src_rel.replace(os.sep, "/")
             diff = "\n".join(difflib.unified_diff(
-                lines, _report_lines(written), fromfile=src_rel,
-                tofile=src_rel + " (mutant)", lineterm=""))
+                lines, _report_lines(written), fromfile=shown,
+                tofile=shown + " (mutant)", lineterm=""))
             mutant = {"kind": kind, "line": line, "change": what, "diff": diff}
             if not spliced:
                 # Said beside the entry and not only in the closing lines,
