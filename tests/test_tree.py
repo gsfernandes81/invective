@@ -377,16 +377,26 @@ def test_a_ref_stopped_during_the_checkout_leaves_no_copy_and_no_worktree(
     json.dumps({"pid": None}),
     json.dumps({"pid": 1.5}),
     json.dumps({"pid": 10 ** 20}),
+    # Past what a pid is on any OS: on Windows ctypes refuses it with an
+    # error that is not an `OverflowError`.
+    json.dumps({"pid": 2 ** 32}),
     json.dumps({"pid": True}),
     # Negative, a process group to `os.kill`, and one nothing has.
     json.dumps({"pid": -(2 ** 31 - 1)}),
+    # The caller's own process group to `os.kill`.
+    json.dumps({"pid": 0}),
     "[]",
     "not json",
-], ids=["string", "null", "float", "too-large", "bool", "negative", "list",
-        "unparsable"])
-def test_a_marker_that_holds_no_pid_is_left_and_stops_nothing(tmp_path, text):
+], ids=["string", "null", "float", "too-large", "past-32-bits", "bool",
+        "negative", "zero", "list", "unparsable"])
+def test_a_marker_that_holds_no_pid_is_left_and_stops_nothing(tmp_path, text,
+                                                              monkeypatch):
     """A stray file in the temporary directory is not an owner to ask about,
     and must not make every start of invective fail."""
+    # Not asked at all: what the OS would say of such a number differs by
+    # platform, and on Linux a probe of `True` is a probe of pid 1.
+    monkeypatch.setattr(trees, "_alive",
+                        lambda pid: pytest.fail("asked about %r" % (pid,)))
     stray = tmp_path / "invective-cccccccc"
     os.mkdir(stray)
     (stray / trees.MARKER).write_text(text, encoding="utf-8")
@@ -394,6 +404,24 @@ def test_a_marker_that_holds_no_pid_is_left_and_stops_nothing(tmp_path, text):
     trees.reap()
 
     assert stray.is_dir()
+
+
+def test_every_pid_an_os_hands_out_is_asked_about(tmp_path, monkeypatch):
+    """The bounds a marker's pid is held to leave out none that a process
+    can have: from 1 to the last 32-bit number, a Windows pid."""
+    asked = []
+    monkeypatch.setattr(trees, "_alive",
+                        lambda pid: asked.append(pid) or False)
+    for name, pid in (("invective-11111111", 1),
+                      ("invective-22222222", 2 ** 32 - 1)):
+        os.mkdir(tmp_path / name)
+        (tmp_path / name / trees.MARKER).write_text(
+            json.dumps({"pid": pid, "root": "elsewhere"}), encoding="utf-8")
+
+    trees.reap()
+
+    assert sorted(asked) == [1, 2 ** 32 - 1]
+    assert _marked(tmp_path) == []
 
 
 def _dead_owners_copy(tmp_path, name):

@@ -275,13 +275,17 @@ def reap() -> None:
         except (OSError, ValueError, KeyError, TypeError):
             continue
         # A marker that does not hold a pid is not ours, and is left like one
-        # that cannot be parsed: a stray file must not stop every start.
-        # invective: accept[untestable: LtE -> Lt] pid 0 probes the caller's own process group on POSIX and reads as running either way; it is told apart only on Windows
-        # invective: accept[untestable: 0 -> 1] pid 1 is init on POSIX and reads as running either way; it is told apart only on Windows
-        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        # that cannot be parsed: a stray file must not stop every start. No
+        # OS invective runs on hands out a pid of 2 ** 32 or more (a signed
+        # `pid_t` on POSIX, a DWORD on Windows), and on Windows ctypes refuses
+        # one with an `ArgumentError`, which is no `OverflowError`.
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            continue
+        if pid <= 0 or pid >= 2 ** 32:
             continue
         try:
             owner_alive = pid == os.getpid() or _alive(pid)
+        # An `OverflowError` from `os.kill` past 2 ** 31 on POSIX.
         except (OverflowError, ValueError, OSError):
             continue
         if owner_alive:
