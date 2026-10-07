@@ -13,7 +13,7 @@ from invective import mutate
 from invective.config import Config
 from invective.errors import Refusal
 
-from conftest import write_tree
+from conftest import no_pytest_settings_above, write_tree
 
 
 def test_an_acceptance_on_the_line_applies_to_that_line():
@@ -233,6 +233,7 @@ def test_pytest_settings_above_the_project_s_top_are_named(tmp_path):
     and a copy of the member does not hold; none when the member has its
     own, or when the file above sets nothing for pytest."""
     top = os.path.realpath(tmp_path)
+    no_pytest_settings_above(top)
     member = os.path.join(top, "m")
     write_tree(top, {"pyproject.toml":
                      "[tool.pytest.ini_options]\nxfail_strict = true\n",
@@ -274,6 +275,7 @@ def test_each_file_pytest_reads_settings_from_is_one(tmp_path, name, text):
 def test_a_file_that_holds_no_pytest_section_is_not_pytest_s(tmp_path, name,
                                                              text):
     top = os.path.realpath(tmp_path)
+    no_pytest_settings_above(top)
     write_tree(top, {name: text, "m/.git": ""})
     assert config.pytest_config_above(os.path.join(top, "m")) is None
 
@@ -312,6 +314,7 @@ def test_a_conftest_pytest_loads_above_the_project_s_top_is_named(tmp_path):
     does not hold. With none, a `pyproject.toml` of a tool's settings in the
     home directory is no reason to refuse."""
     home = os.path.realpath(tmp_path)
+    no_pytest_settings_above(home)
     proj = os.path.join(home, "work", "proj")
     write_tree(home, {"pyproject.toml": "[tool.ruff]\n",
                       "work/proj/.git": ""})

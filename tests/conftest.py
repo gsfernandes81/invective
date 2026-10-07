@@ -45,9 +45,10 @@ def own_temp(tmp_path, monkeypatch):
 #: which is the layout where a sweep has to tell the suite's own files from
 #: the modules it is there to mutate.
 FILES = {
-    # Empty: invective's settings are the defaults, and pytest's rootdir is
-    # the tree's top.
-    "pyproject.toml": "",
+    # pytest's own settings file with nothing set: pytest stops its search for
+    # one here, so what is above the temporary directory is not read, and
+    # invective's settings are the defaults.
+    "pyproject.toml": "[tool.pytest.ini_options]\n",
     "pkg/__init__.py": "",
     # Line 2 is refused by a test; the `and` on line 4 is checked by nothing.
     "pkg/gate.py": (
@@ -159,10 +160,25 @@ def commit(root, files=None):
         "commit", "-q", "-m", "fixture")
 
 
-# The fixture carries its own `pyproject.toml`, so the nearest marker, and
-# the project's top, is always its own directory, whatever lies above the
-# temporary directory: a `--basetemp` inside a checkout, or a temporary
-# directory under a home directory that holds one.
+# The fixture carries its own `pyproject.toml`, which is pytest's settings
+# file with nothing set: the nearest marker, and the project's top, is its own
+# directory, and pytest's search for settings stops there, whatever lies above
+# the temporary directory (a `--basetemp` inside a checkout, or a temporary
+# directory under a home directory that holds one). A test that builds a tree
+# of its own does the same, or calls `no_pytest_settings_above`: the one
+# requirement the suite keeps is that no pytest settings file is above the
+# temporary directory, which the default under the system temporary directory
+# satisfies.
+def no_pytest_settings_above(path):
+    """Skip the test when pytest, started in *path*, would read a settings
+    file from a directory above it: the test is about a tree with none."""
+    from invective import config
+    found = config._pytest_reads(os.path.realpath(path))
+    if found is not None and config._holds_settings(found):
+        pytest.skip("%s is above the temporary directory and holds pytest "
+                    "settings" % found)
+
+
 @pytest.fixture
 def tree(tmp_path):
     """The fixture files on disk, with no repository around them."""

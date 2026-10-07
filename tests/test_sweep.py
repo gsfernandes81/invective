@@ -491,7 +491,8 @@ def test_a_sweep_sent_sigterm_stops_its_engine_and_dies_by_the_signal(
     pid_file = str(tmp_path / "run.pid")
     files = {rel: text for rel, text in FILES.items()
              if rel not in ("pkg/tests/test_gate.py", "pkg/tests/helpers.py")}
-    write_tree(root, {**files, "pyproject.toml": "[project]\nname = 'x'\n",
+    write_tree(root, {**files, "pyproject.toml": ("[project]\nname = 'x'\n"
+                                          "[tool.pytest.ini_options]\n"),
                       "pkg/tests/test_slow.py": SLOW_TEST % pid_file})
     proc = subprocess.Popen(
         [sys.executable, "-u", "-m", "invective", "sweep", "--src", "pkg",

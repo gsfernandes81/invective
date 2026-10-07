@@ -14,7 +14,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from conftest import FILES, WORKSPACE, commit, write_tree
+from conftest import (FILES, WORKSPACE, commit, no_pytest_settings_above,
+                      write_tree)
 
 #: This checkout's own `src`, ahead of any installed copy, so that the pytest
 #: started here loads the plugin under test.
@@ -147,6 +148,8 @@ def test_a_test_whose_path_is_not_ascii_is_found(repo, tmp_path):
 
 def test_a_test_outside_the_project_is_refused(repo, tmp_path):
     """No run at the last commit has it."""
+    # pytest starts its search above the project, where the test is.
+    no_pytest_settings_above(tmp_path)
     outside = tmp_path / "outside" / "test_outside.py"
     outside.parent.mkdir()
     outside.write_text("def test_outside():\n    pass\n", encoding="utf-8")
@@ -467,7 +470,8 @@ def test_a_package_s_own_init_loaded_from_elsewhere_is_refused(tmp_path):
                                        "    return True\n")}
     write_tree(tmp_path / "other", package)
     project = os.path.realpath(tmp_path / "project")
-    write_tree(project, {**package, "pyproject.toml": "",
+    write_tree(project, {**package,
+                         "pyproject.toml": "[tool.pytest.ini_options]\n",
                          "tests/test_pkg.py": (
                              "import pytest\n"
                              "from pkg import admit\n"
@@ -685,7 +689,8 @@ def test_a_package_below_a_namespace_named_like_the_library_s_runs(tmp_path):
     so the mutant is the file they ran against and is killed."""
     project = os.path.realpath(tmp_path / "proj")
     write_tree(project, {
-        "pyproject.toml": "[project]\nname = 'acme'\nversion = '0'\n",
+        "pyproject.toml": ("[project]\nname = 'acme'\nversion = '0'\n"
+                           "[tool.pytest.ini_options]\n"),
         "src/acme/logging/__init__.py": "",
         "src/acme/logging/handlers.py": ("def handle(x):\n"
                                          "    if x < 0:\n"
@@ -716,6 +721,7 @@ def test_a_package_below_a_namespace_named_like_the_library_s_runs(tmp_path):
 
 def test_a_run_that_breaks_the_project_s_rules_fails_as_a_test_would(repo):
     write_tree(repo, {"pyproject.toml":
+                      "[tool.pytest.ini_options]\n"
                       "[tool.invective]\nfail-on-survivors = true\n"})
 
     done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only", "BOOL",

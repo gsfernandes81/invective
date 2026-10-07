@@ -1438,6 +1438,7 @@ def test_the_command_fails_a_run_that_breaks_the_project_s_rules(tree,
     with 1, and accepting it in the source passes it."""
     monkeypatch.chdir(tree)
     write_tree(tree, {"pyproject.toml":
+                      "[tool.pytest.ini_options]\n"
                       "[tool.invective]\nfail-on-survivors = true\n"})
     argv = ["--target", GATE, "--tests", *GATE_TESTS, "--only", "BOOL"]
 
