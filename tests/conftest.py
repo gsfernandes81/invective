@@ -45,6 +45,9 @@ def own_temp(tmp_path, monkeypatch):
 #: which is the layout where a sweep has to tell the suite's own files from
 #: the modules it is there to mutate.
 FILES = {
+    # Empty: invective's settings are the defaults, and pytest's rootdir is
+    # the tree's top.
+    "pyproject.toml": "",
     "pkg/__init__.py": "",
     # Line 2 is refused by a test; the `and` on line 4 is checked by nothing.
     "pkg/gate.py": (
@@ -156,10 +159,10 @@ def commit(root, files=None):
         "commit", "-q", "-m", "fixture")
 
 
-# The tests that reach `main` or the plugin from here rely on no
-# `pyproject.toml` or `.git` above the temporary directory, as the project's
-# top is the nearest: a `TMPDIR` inside a checkout makes every such test copy
-# that checkout.
+# The fixture carries its own `pyproject.toml`, so the nearest marker, and
+# the project's top, is always its own directory, whatever lies above the
+# temporary directory: a `--basetemp` inside a checkout, or a temporary
+# directory under a home directory that holds one.
 @pytest.fixture
 def tree(tmp_path):
     """The fixture files on disk, with no repository around them."""

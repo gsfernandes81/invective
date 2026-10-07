@@ -1384,7 +1384,6 @@ def test_the_command_runs_from_a_subdirectory_of_the_project(tree, monkeypatch,
     """From `pkg` the project is still the whole tree: copied from its top,
     the target and the tests typed from `pkg` found where they are. Copied
     from `pkg` alone, the copy holds no `pkg` to import."""
-    write_tree(tree, {"pyproject.toml": ""})
     monkeypatch.chdir(os.path.join(tree, "pkg"))
 
     assert mutate.main(["--target", "gate.py", "--tests", *tests,

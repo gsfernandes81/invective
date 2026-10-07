@@ -118,12 +118,29 @@ def test_a_setting_that_cannot_be_right_is_refused(tmp_path, table, says):
     assert says in str(caught.value)
 
 
+def _marker_above(path):
+    """A marker of a project's top in a directory above *path*, or None."""
+    here = os.path.dirname(path)
+    while True:
+        for name in config._PROJECT + config._REPOSITORY:
+            if os.path.exists(os.path.join(here, name)):
+                return os.path.join(here, name)
+        up = os.path.dirname(here)
+        if up == here:
+            return None
+        here = up
+
+
 def test_the_project_s_top_is_the_nearest_pyproject_above_the_working_directory(
         tmp_path):
     """From a subdirectory the whole project is the one copied, and its
     settings the ones read; with no marker anywhere, where the command was
-    started is the top, as it always was."""
+    started is the top."""
     top = os.path.realpath(tmp_path)
+    marker = _marker_above(top)
+    if marker is not None:
+        pytest.skip("%s is above the temporary directory, so no directory "
+                    "in it is without a marker above" % marker)
     deep = os.path.join(top, "a", "b", "c")
     os.makedirs(deep)
     assert config.project_root(deep) == deep

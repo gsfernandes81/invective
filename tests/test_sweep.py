@@ -580,7 +580,6 @@ def test_the_sweep_runs_from_a_subdirectory_of_the_project(tree, monkeypatch,
     """From `pkg` the engine is started at the project's top, given the
     module from there. Started in `pkg`, it copies `pkg` alone, which holds
     no `pkg` to import, and the baseline is red."""
-    write_tree(tree, {"pyproject.toml": ""})
     monkeypatch.chdir(os.path.join(tree, "pkg"))
     out = str(tmp_path / "sweep.json")
 
