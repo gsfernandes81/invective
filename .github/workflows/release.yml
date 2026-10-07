@@ -8,8 +8,8 @@ name: release
 # release already made are carried on from, not refused.
 
 on:
-  # Only `main`'s copy of this file answers `workflow_run`, after any run of
-  # `checks`, whatever started it; the job keeps the green pushes to `main`.
+  # Only `main`'s copy of this file answers `workflow_run`, after a run of
+  # `checks` on `main`; the job keeps the green pushes.
   # `checks` cancels a run a later push supersedes, and a cancelled run tags
   # nothing: the later push's run tags the later commit. `mutation` is not
   # waited for, since it fails only on a run it cannot trust and may not run
@@ -17,6 +17,8 @@ on:
   workflow_run:
     workflows: [checks]
     types: [completed]
+    # Filters on the triggering run's head branch.
+    branches: [main]
   # By hand, for the tip of `main` when this workflow's own run failed or was
   # cancelled; it acts on the tip of `main` only. A commit whose `checks` run
   # was cancelled, because a second push to `main` came before it finished,
@@ -24,13 +26,6 @@ on:
   # Left alone, its version goes out with the next green commit, unless that
   # one bumps the version again.
   workflow_dispatch:
-
-# Two merges in quick succession tag in turn rather than at once. A third
-# that queues behind them replaces the one still waiting; the commit of the
-# replaced run is released by re-running its `checks`, as above.
-concurrency:
-  group: release
-  cancel-in-progress: false
 
 # `actions: read` is what lets the manual run find `checks`' runs.
 permissions:
@@ -44,6 +39,16 @@ defaults:
 
 jobs:
   release:
+    # On the job, so that a run its `if` skips never enters the group: at the
+    # workflow level every completed `checks` run, a pull request's included,
+    # would queue here, and the group holds one waiting run, so one of them
+    # could replace the run of a merge. Two merges in quick succession tag in
+    # turn rather than at once. A third that queues behind them replaces the
+    # one still waiting; the commit of the replaced run is released by
+    # re-running its `checks`, as above.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     if: >-
       (github.event_name == 'workflow_run'
        && github.event.workflow_run.conclusion == 'success'
@@ -130,17 +135,31 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: git push origin "$SHA:refs/tags/$TAG"
 
-      # A new release is created with its assets, which `gh` makes a draft,
-      # uploads to and only then publishes, so a failed upload leaves no
-      # public release without a wheel; a rerun finds the draft and uploads to
-      # it. `--clobber` makes a rerun replace assets rather than fail on them.
+      # A rerun finishes what the last run left. A new release is created
+      # with its assets, which `gh` makes a draft, uploads to and only then
+      # publishes, so a failed upload leaves no public release without a
+      # wheel. A draft left behind by a run that stopped in between has its
+      # assets replaced and is published. A published release is given only
+      # the assets it lacks, since `--clobber` deletes an asset before it
+      # uploads the new one.
       - name: Release
         if: steps.tag.outputs.state != 'elsewhere'
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft \
+              2> /dev/null); then
+            if [ "$draft" = true ]; then
+              gh release upload "$TAG" dist/* --clobber
+              gh release edit "$TAG" --draft=false
+            else
+              have=$(gh release view "$TAG" --json assets \
+                --jq '.assets[].name')
+              for f in dist/*; do
+                grep -qxF "$(basename "$f")" <<< "$have" \
+                  || gh release upload "$TAG" "$f"
+              done
+            fi
           else
             gh release create "$TAG" --verify-tag --title "$TAG" \
               --generate-notes dist/*
