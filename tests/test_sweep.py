@@ -220,6 +220,20 @@ def test_the_driver_starts_the_engine_beside_it_with_the_stated_defaults(
     assert os.path.samefile(kwargs["cwd"], repo)
 
 
+def test_modules_with_nothing_after_it_sweeps_no_module(repo, monkeypatch,
+                                                         capsys):
+    """`--modules $(changed files)` with nothing changed is a request for no
+    module, not for every one."""
+    engine = _Engine()
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
+
+    assert sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                       "--modules"]) == 0
+
+    assert engine.commands == []
+    assert "0 module(s) measured; 0 with no test file" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("said, rc, note", [
     ("refused: no mutation sites in pkg/gate.py for RAISE", 2,
      "no mutation sites"),

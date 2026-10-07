@@ -256,7 +256,7 @@ def main(argv=None):
         # is started and its copy begins.
         args.src = [_from_root(given, root) for given in args.src]
         args.tests_dir = _from_root(args.tests_dir, root)
-        if args.modules:
+        if args.modules is not None:
             args.modules = [_from_root(given, root) for given in args.modules]
         # A directory that is not there walks as empty, and an empty sweep
         # prints "0 module(s) measured" -- which reads as a result, not as a
@@ -283,7 +283,10 @@ def main(argv=None):
 def _sweep(args, root):
     """Every module measured and printed as it is, and the exit code."""
     report, unmeasured, failing = [], [], []
-    for module in (args.modules or modules(root, args.src, args.tests_dir)):
+    # A bare `--modules` names no file and sweeps none: an empty list is what
+    # a shell expansion of the changed files expands to when nothing changed.
+    for module in (args.modules if args.modules is not None
+                   else modules(root, args.src, args.tests_dir)):
         tests = covering(root, module, args.src, args.tests_dir)
         if not tests:
             unmeasured.append(module)
