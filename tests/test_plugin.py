@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging.handlers
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -450,14 +452,19 @@ NOT_AT_LAYOUT = "other/lib/sub/mod.py"
 NAMES = ("pkg", "pkg.sub", "pkg.sub.mod", "sub", "sub.mod", "mod")
 
 
-def _decide(tmp_path, monkeypatch, target, loaded, before=(), copy=NESTED):
+def _decide(tmp_path, monkeypatch, target, loaded, before=(), copy=NESTED,
+            library=None):
     """`_loaded_elsewhere` of this checkout's plugin for a copy at `copy/`
     holding *copy*, with `other/` beside it holding the same package, and
     with *loaded* in `sys.modules`: name -> the module's `__file__`, given
-    from *tmp_path* unless it is None (a module with no `__file__`). The
-    plugin takes *before* for the modules loaded ahead of it."""
+    from *tmp_path* unless it is None (a module with no `__file__`) or
+    absolute. The plugin takes *before* for the modules loaded ahead of it,
+    and *library*, when given, for the interpreter's own library."""
     plugin = _plugin_here()
     monkeypatch.setattr(plugin, "_LOADED_BEFORE", frozenset(before))
+    if library is not None:
+        monkeypatch.setattr(plugin, "_LIBRARY", (
+            os.path.join(_file(tmp_path, library), ""),))
     write_tree(tmp_path / "copy", copy)
     write_tree(tmp_path / "other", {**NESTED, "lib/sub/mod.py": ""})
     for name in NAMES:
@@ -465,7 +472,8 @@ def _decide(tmp_path, monkeypatch, target, loaded, before=(), copy=NESTED):
     for name, file in loaded.items():
         module = ModuleType(name)
         if file is not None:
-            module.__file__ = str(tmp_path / _p(file))
+            module.__file__ = (file if os.path.isabs(file)
+                               else str(tmp_path / _p(file)))
         monkeypatch.setitem(sys.modules, name, module)
     return plugin._loaded_elsewhere(str(tmp_path / "copy"), target)
 
@@ -554,6 +562,105 @@ def test_a_package_s_init_is_the_package(tmp_path, monkeypatch):
     assert _decide(tmp_path, monkeypatch, "src/pkg/__init__.py",
                    {"pkg": "other/src/pkg/__init__.py"}) \
         == _file(tmp_path, "other/src/pkg/__init__.py")
+
+
+#: A regular package below a namespace package: `src/acme` has no
+#: `__init__.py`, so the target is named `logging.handlers` from the copy,
+#: which is the standard library's name, while the tests import it as
+#: `acme.logging.handlers`.
+UNDER_A_NAMESPACE = {"src/acme/logging/__init__.py": "",
+                     "src/acme/logging/handlers.py": "def f():\n    return 1\n"}
+HANDLERS = "src/acme/logging/handlers.py"
+
+
+def test_a_target_whose_name_is_the_library_s_is_cleared_by_its_own_file(
+        tmp_path, monkeypatch):
+    """The tests loaded the copy's file under its full name, and the
+    library's `logging.handlers` besides."""
+    assert _decide(tmp_path, monkeypatch, HANDLERS, {
+        "acme.logging.handlers": "copy/" + HANDLERS,
+        "logging.handlers": logging.handlers.__file__},
+        copy=UNDER_A_NAMESPACE) == ""
+
+
+@pytest.mark.parametrize("target, copy, loaded", [
+    (HANDLERS, UNDER_A_NAMESPACE,
+     {"logging.handlers": logging.handlers.__file__}),
+    ("src/acme/logging/__init__.py", UNDER_A_NAMESPACE,
+     {"logging": logging.__file__}),
+    ("tools/queue.py", {"tools/queue.py": ""}, {"queue": queue.__file__}),
+], ids=["module", "package", "loose"])
+def test_the_interpreter_s_own_library_is_never_the_one_named(
+        tmp_path, monkeypatch, target, copy, loaded):
+    """The tests import the library's module the copy's file is named like,
+    and nothing says they loaded the copy's: the library is never where a
+    project's file is, so it is not named. The loose file's tests run it in
+    a child interpreter."""
+    assert _decide(tmp_path, monkeypatch, target, loaded, copy=copy) == ""
+
+
+@pytest.mark.parametrize("file, named", [
+    ("lib/python3.X/pkg/sub/mod.py", None),
+    ("lib/python3.X/site-packages/pkg/sub/mod.py", True),
+    ("lib/python3.X/dist-packages/pkg/sub/mod.py", True),
+], ids=["library", "site-packages", "dist-packages"])
+def test_a_project_installed_inside_the_library_s_directory_is_named(
+        tmp_path, monkeypatch, file, named):
+    """Outside a virtual environment the site directory lies inside the
+    library's, and a project installed there is a file to name."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": file},
+                   library="lib/python3.X") == (
+        _file(tmp_path, file) if named else "")
+
+
+@pytest.mark.parametrize("loaded, named", [
+    ({"acme.logging.handlers": "copy/" + HANDLERS,
+      "logging.handlers": "other/lib/logging/handlers.py"}, None),
+    ({"logging.handlers": "other/lib/logging/handlers.py"}, True),
+], ids=["copy-s-own-loaded", "not-loaded"])
+def test_a_name_another_package_holds_is_cleared_by_the_copy_s_own_file(
+        tmp_path, monkeypatch, loaded, named):
+    """A third party's `logging.handlers` holds the name the copy gives the
+    target. The copy's own file loaded under any name is the mutant the
+    tests saw; without it, the other file is named."""
+    assert _decide(tmp_path, monkeypatch, HANDLERS, loaded,
+                   copy=UNDER_A_NAMESPACE) == (
+        _file(tmp_path, "other/lib/logging/handlers.py") if named else "")
+
+
+def test_a_package_below_a_namespace_named_like_the_library_s_runs(tmp_path):
+    """The tests import the library's `logging.handlers` and the copy's
+    `acme.logging.handlers`, and the copy's `src` comes first on the path,
+    so the mutant is the file they ran against and is killed."""
+    project = os.path.realpath(tmp_path / "proj")
+    write_tree(project, {
+        "pyproject.toml": "[project]\nname = 'acme'\nversion = '0'\n",
+        "src/acme/logging/__init__.py": "",
+        "src/acme/logging/handlers.py": ("def handle(x):\n"
+                                         "    if x < 0:\n"
+                                         "        raise ValueError(x)\n"
+                                         "    return x\n"),
+        "tests/conftest.py": (
+            "import os\n"
+            "import sys\n"
+            "\n"
+            "sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname("
+            "os.path.abspath(__file__))), 'src'))\n"),
+        "tests/test_handlers.py": ("import logging.handlers\n"
+                                   "\n"
+                                   "import pytest\n"
+                                   "\n"
+                                   "from acme.logging import handlers\n"
+                                   "\n"
+                                   "def test_negative():\n"
+                                   "    with pytest.raises(ValueError):\n"
+                                   "        handlers.handle(-1)\n")})
+
+    done = pytest_in(project, "--mutate", HANDLERS, "--mutate-only", "RAISE",
+                     "tests/test_handlers.py")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed" in done.stdout
 
 
 def test_a_run_that_breaks_the_project_s_rules_fails_as_a_test_would(repo):

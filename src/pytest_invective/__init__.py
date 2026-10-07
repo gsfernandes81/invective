@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import sysconfig
 
 import pytest
 
@@ -49,6 +50,16 @@ TARGET = "INVECTIVE_TARGET"
 #: `addopts` is imported before this one, so whatever it imported is in
 #: here too: `_loaded_elsewhere` says how far that exemption goes.
 _LOADED_BEFORE = frozenset(sys.modules)
+
+#: The directories of the interpreter's own library, each ending in a
+#: separator. No project's file is in them, and `_LOADED_BEFORE` holds only
+#: what pytest loaded, not what the tests load: a test that imports
+#: `logging.handlers` or `queue` puts the library's module under the name a
+#: project's file can be given.
+_LIBRARY = tuple(sorted({
+    os.path.join(os.path.normcase(os.path.realpath(
+        sysconfig.get_paths()[key])), "")
+    for key in ("stdlib", "platstdlib")}))
 
 _REPORTS = pytest.StashKey[list]()
 _FAILURES = pytest.StashKey[list]()
@@ -198,16 +209,28 @@ def _loaded_elsewhere(copy, target):
     in a namespace package, at the top or inside a regular package, is a
     loose file here, and one in a regular package below a namespace package
     is named from that package down. Neither is the name the tests import
-    it by, so as a rule nothing is under it and the target is not checked.
+    it by. When another module holds that name, the target is cleared if
+    the copy's own file is loaded under any name, and is otherwise judged
+    by the name as it stands; when nothing holds it, the target is not
+    checked.
+
+    **The interpreter's own library is never named.** No project's file is
+    in it, and a test that imports `logging.handlers` puts the library's
+    module under the name `src/acme/logging/handlers.py` is given here when
+    `acme` is a namespace package. A site directory inside the library's
+    directory, as an interpreter outside a virtual environment has, is not
+    the library: a project installed there is a file to name.
 
     **The name decides whenever it can.** `sys.modules` is keyed by import
     name, so the module under the target's name is one lookup: under the
     copy, nothing is wrong, and that holds when it is a different file of
     the copy than the target (the tests import `src/pkg` while the target is
-    a copy of the package elsewhere in the tree), which is a decision: that
-    is the run as it was before this check. Any other file is the one named.
-    An editable install's `.pth` line, or a `sys.path` entry, puts the
-    project's own `src` ahead of the copy's exactly this way.
+    a copy of the package elsewhere in the tree), which is a decision: the
+    run is then unchanged. Any other file is the one named, unless the
+    copy's own file is loaded under some other name, which is the mutant
+    the tests saw. An editable install's `.pth` line, or a `sys.path`
+    entry, puts the project's own `src` ahead of the copy's exactly this
+    way.
 
     **A name in `_LOADED_BEFORE` was loaded by the harness, not the tests,
     and is let be** -- unless the target has an anchored path and the module
@@ -262,22 +285,58 @@ def _loaded_elsewhere(copy, target):
         file = getattr(module, "__file__", None)
         if not isinstance(file, str) or not file.endswith(".py"):
             return None
-        return os.path.normcase(os.path.realpath(os.path.join(copy, file)))
+        file = os.path.normcase(os.path.realpath(os.path.join(copy, file)))
+        return None if _in_the_library(file) else file
 
-    file = found(name)
-    if file is not None and (name not in _LOADED_BEFORE
-                             or (anchored and file.endswith(os.sep + anchored))):
-        return "" if file.startswith(inside) else file
-    if anchored:
-        for n in range(1, len(names)):
-            suffix = ".".join(names[n:])
-            if suffix in _LOADED_BEFORE:
-                continue
-            file = found(suffix)
-            if (file is not None and not file.startswith(inside)
-                    and file.endswith(os.sep + anchored)):
-                return file
-    return ""
+    def decide():
+        file = found(name)
+        if file is not None and (
+                name not in _LOADED_BEFORE
+                or (anchored and file.endswith(os.sep + anchored))):
+            return "" if file.startswith(inside) else file
+        if anchored:
+            for n in range(1, len(names)):
+                suffix = ".".join(names[n:])
+                if suffix in _LOADED_BEFORE:
+                    continue
+                file = found(suffix)
+                if (file is not None and not file.startswith(inside)
+                        and file.endswith(os.sep + anchored)):
+                    return file
+        return ""
+
+    elsewhere = decide()
+    # Only on the way to a refusal, so an ordinary run pays nothing for the
+    # scan, and a scan that can only clear makes no refusal of its own.
+    if elsewhere and _is_loaded(copy, os.path.normcase(os.path.realpath(
+            os.path.join(copy, *parts)))):
+        return ""
+    return elsewhere
+
+
+def _in_the_library(file):
+    """Whether *file*, resolved, is one of the interpreter's own library's,
+    and not in a site directory inside the library's directory."""
+    for library in _LIBRARY:
+        if file.startswith(library):
+            rest = file[len(library):].split(os.sep)
+            return "site-packages" not in rest and "dist-packages" not in rest
+    return False
+
+
+def _is_loaded(copy, mine):
+    """Whether a module in `sys.modules` was loaded from *mine*, a resolved
+    file of the copy at *copy*, under whatever name."""
+    for module in list(sys.modules.values()):
+        try:
+            file = getattr(module, "__file__", None)
+        except Exception:
+            # A lazily loaded module can fail on any attribute.
+            continue
+        if isinstance(file, str) and os.path.normcase(os.path.realpath(
+                os.path.join(copy, file))) == mine:
+            return True
+    return False
 
 
 # First: a plugin registered after this one would otherwise be asked first.
