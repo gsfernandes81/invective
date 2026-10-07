@@ -9,9 +9,23 @@ are still all to do.
 
 ## Intent
 
-We intend to build options 1 to 4 below. We are open to dropping any of them
-if the code complexity is not worth the return: measure on a real project
-before and after each one, and cut the ones that do not pay for themselves.
+All four options below are approved by the owner (2026-10-07), and they are
+the current scope of work. We are still open to dropping any of them if the
+code complexity is not worth the return: measure on a real project before and
+after each one, and cut the ones that do not pay for themselves.
+
+## How the work is to be done (owner, 2026-10-07)
+
+1. **Plan.** A Fable advisor drafts the implementation plan; a second Fable
+   advisor reviews it; the two loop, draft and review, until they converge.
+2. **Build.** Claude implements the converged plan, bringing blockers and
+   issues to the owner as they come up and carrying on with everything not
+   blocked, until finished or blocked on every front. A reminder timer is set
+   at the start of this phase to restate that rule, and kept alive (re-armed
+   each time it fires) until the phase ends.
+3. **Review.** An Opus agent reviews the code. A Fable advisor sorts its
+   findings into must fix, can fix and don't fix (incorrect findings), and
+   says how to fix each. Claude then fixes them.
 
 ## Where we differ from pytest-gremlins
 
