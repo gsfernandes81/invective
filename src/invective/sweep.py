@@ -158,8 +158,7 @@ def covering(root, module, sources, tests_dir):
 
 #: How long an engine told to stop is given to unwind: its own grace for the
 #: run it stops, and the copy's removal on top.
-# invective: accept[equivalent: 2 -> 3] any bound past the engine's own grace serves
-_GRACE = 2 * _STOP_GRACE
+_GRACE = 2 * _STOP_GRACE  # invective: accept[equivalent: 2 -> 3] any bound past the engine's own grace serves
 
 
 def _engine(cmd, cwd):
@@ -364,12 +363,12 @@ def _sweep(args, root):
                        # `invective run --json` writes for this module:
                        # survivors, accepted and stale entries as data (the
                        # `survivors` above are the printed lines; `report`
-                       # holds the entries), and whatever the engine adds to its
-                       # entries later, with nothing here to teach. Unknown
-                       # -- not none -- when it could not be read, `detail`
-                       # being `{}` then. `kills` and `broken` are the same
-                       # report's, kept for the consumer that reads them
-                       # here; `report` is the one to read.
+                       # holds the entries), and whatever else the engine puts
+                       # in its entries. Unknown -- not none -- when it could
+                       # not be read, `detail` being `{}` then. `kills` and
+                       # `broken` are the same report's, kept for the
+                       # consumer that reads them here; `report` is the one
+                       # to read.
                        "report": detail or None,
                        "kills": detail.get("kills"),
                        "broken": detail.get("broken"),

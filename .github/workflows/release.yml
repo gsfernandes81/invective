@@ -73,7 +73,7 @@ jobs:
         with:
           version: '0.10.11'
 
-      # The `workflow_run` path had this from its event; by hand it is
+      # The `workflow_run` path has this from its event; by hand it is
       # looked up, with the same three conditions.
       - name: Check the commit is green
         if: github.event_name == 'workflow_dispatch'
@@ -126,9 +126,9 @@ jobs:
       # git refuses the push if the tag appeared since it was looked for;
       # nothing here forces. A tag pushed with the workflow's token starts no
       # other workflow, and none listens for tags. A tag ruleset or tag
-      # protection rule on the repository (there is none) would refuse this
-      # token's push: the job goes red with nothing tagged, and the push then
-      # needs an actor the rule exempts, a deploy key or an app's token.
+      # protection rule on the repository would refuse this token's push:
+      # the job goes red with nothing tagged, and the push then needs an
+      # actor the rule exempts, a deploy key or an app's token.
       - name: Tag
         if: steps.tag.outputs.state == 'absent'
         env:

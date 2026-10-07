@@ -506,8 +506,8 @@ def stopping_on_sigterm():
     installed. Windows never delivers SIGTERM (`TerminateProcess` ends a
     process outright), so there the handler is installed and never runs.
     """
-    # A signal ignored on entry stays ignored, as the shell's `trap '' TERM`
-    # asked; the marker covers the copy of a run then killed outright.
+    # The shell's `trap '' TERM` asked for that; the marker covers the copy
+    # of a run then killed outright.
     if signal.getsignal(signal.SIGTERM) is signal.SIG_IGN:
         yield
         return
@@ -725,9 +725,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "%s was imported from %s, not from the copy at %s, so no "
                     "mutant of it can reach the tests. An editable install, "
                     "or a sys.path entry, points the tests at the project "
-                    "itself; a conftest.py that puts the copy's own "
-                    "directory for it first on sys.path (from its own "
-                    "__file__) makes them import the copy."
+                    "itself; a conftest.py that puts the directory of the "
+                    "copy's own `src` first on sys.path, computed from its "
+                    "own __file__, makes them import the copy."
                     % (src_rel, got.elsewhere, where))
             return got
 

@@ -215,11 +215,13 @@ def _loaded_elsewhere(copy, target):
     checked.
 
     **The interpreter's own library is never named.** No project's file is
-    in it, and a test that imports `logging.handlers` puts the library's
-    module under the name `src/acme/logging/handlers.py` is given here when
-    `acme` is a namespace package. A site directory inside the library's
-    directory, as an interpreter outside a virtual environment has, is not
-    the library: a project installed there is a file to name.
+    in it, and `_LOADED_BEFORE` holds only what pytest loaded: a test that
+    imports `logging.handlers` puts the library's module under the name that
+    `src/acme/logging/handlers.py` is given here when `acme` is a namespace
+    package, so a hit in the library's directories is the harness's and not
+    the project's. A site directory inside the library's directory, as an
+    interpreter outside a virtual environment has, is not the library: a
+    project installed there is a file to name.
 
     **The name decides whenever it can.** `sys.modules` is keyed by import
     name, so the module under the target's name is one lookup: under the
