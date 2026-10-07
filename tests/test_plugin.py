@@ -245,6 +245,8 @@ def test_a_settings_file_found_above_the_project_that_sets_nothing_is_let_be(
     has no settings of its own, and every run in the copy finds none there
     either: a file up there that sets nothing changes nothing, unlike one
     given with `-c`."""
+    # The fixture's own settings table would stop the search at the tree.
+    write_tree(tree, {"pyproject.toml": ""})
     write_tree(str(tmp_path), {"pytest.ini": "[pytest]\n"})
 
     done = pytest_in(tree, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
