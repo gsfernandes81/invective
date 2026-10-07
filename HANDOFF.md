@@ -43,7 +43,7 @@ multipliers are estimates, not measurements.**
 |---|---|---|---|
 | 1 | Workers: one copy and one process group per worker, mutants taken from a shared queue, results printed in site order | 5-7x on 8 cores | None. Parallel tests that share a port, a `/tmp` path or a database can interfere; a repository whose `addopts` already carries `-n` has declared itself safe. A refusal or ^C must stop every live run. |
 | 2 | Coverage-guided selection: run only the tests that cover the mutated lines, then re-run every survivor against the full selection before reporting it | 2-8x, about 3x on the reference case; about 2.6x on a first run | A survivor is still one the whole selection let through. Falls back to the full selection when coverage is missing or a line has no covering test. Opt-in, `coverage` as an optional extra. |
-| 3 | Previous-killer-first: put the test that killed a mutant last time first in its selection | About 3.4x on a re-run with a prior report, 1x on a first run | None. Same tests, different order. |
+| 3 | Previous killer as a probe: run the test that killed a mutant last time alone first, and the full selection only if it passes (decided 2026-10-07, see Decisions) | About 3.4x on a re-run with a prior report, 1x on a first run | Moving the killer to the front, the first idea, was not risk-free: an order-dependent test can fail on the original and score a false kill. The probe is gated on the killer passing alone on the original. |
 | 4 | Cache verdicts, keyed on the mutated module's text, the ordered selection, every test file and `conftest.py`, pytest config, interpreter and distribution versions, and the repository files the baseline imported | 1x on a first run; 10-50x on a sweep where one module changed | Unsound for files only a child interpreter imports. Timeouts are never cached; cached verdicts are marked in the report. Opt-in. |
 
 ### How they combine
@@ -163,10 +163,57 @@ score, and its message should name the option.
   whole selection. The alternative to weigh then is the skipped tests alone,
   against a measurement of how often the two disagree on a real project.
 
+- **3 is a probe, not a reorder** (proposed in this session, reviewed by an
+  independent advisor, who accepted it with the amendments folded in below,
+  2026-10-07). Moving the previous killer to the front changes which tests
+  run before it and before everything it jumps; an order-dependent test then
+  fails on the original and scores a false kill, the silent direction.
+  - *Gate.* After the full baseline and before the first mutant is written,
+    each distinct remembered killer K is run alone on the unmutated copy,
+    with the mutant budget as its timeout (not `BASELINE_TIMEOUT`). K is
+    usable as a probe in this run only if that run is `ok` with nothing
+    `missing`; otherwise it is dropped without a refusal, since the full
+    selection still decides. On the plugin path, killers not in the
+    selection are skipped before the gate.
+  - *Probe.* Per mutant with a usable K: run K alone (a one-line selection
+    file; on the CLI path the `--tests` arguments are kept, since they can be
+    `-k`, `-m` or a directory, which the probe then still collects). It is a
+    kill only when `code == TESTS_FAILED`, `killer == K` and nothing is
+    `missing`. Anything else, a pass, a collection error, exit 2 to 5 or a
+    timeout, falls back to the full selection in its original order, exactly
+    as today, so `broken` and kills by time are unchanged.
+  - *A probe kill is a definition change and is marked.* K alone can kill a
+    mutant the full run would let survive (an earlier test warms a cache so K
+    never reaches the mutated branch). That is still a real kill: K is in the
+    selection and passes alone on the original. The kill carries
+    `"via": "probe"`, and `summary()` counts probe kills on a line of their
+    own beside the timeout and broken lines.
+  - *History.* `.invective/history.json` at the project root, the directory
+    created with a `.gitignore` reading `# Created by invective
+    automatically.` then `*`, as pytest does for `.pytest_cache`. Shape:
+    `{target_rel_path: {mutant_key: killer}}`. Read and written inside
+    `mutate()`, so `invective run` and `pytest --mutate` both use it.
+    Written atomically (temp file and replace). A new kill overwrites; a
+    survivor, accepted or not, deletes its entry; mutants not run this time
+    (`--only`, `--limit`) keep theirs; keys no longer among the module's full
+    set of sites (from `every`, not the filtered list) are pruned. Only
+    probeable killers are stored: a node id with `::` that is not `TIMEOUT`
+    (never a collection kill's bare path, never an empty killer). A corrupt
+    or unreadable history is ignored with a warning, not a refusal. On by
+    default, since it cannot change a verdict other than as marked above;
+    `history = false` in `[tool.invective]` turns it off. `.invective` joins
+    `tree.py`'s skip list. CI can persist it with actions/cache. Option 4's
+    cache would live in the same directory.
+  - *Matching.* Key: JSON of `[kind, change, ast.unparse(node), stripped
+    source line, ordinal]`, the ordinal counting sites with an identical
+    tuple in `_sites` order (`ast.walk`'s, already deterministic). No
+    enclosing qualname: the ordinal breaks the same ties without a parent
+    map. A wrong match costs speed only.
+  - *Measure* the gate's cost (one start per distinct killer, about 0.25 to
+    1.5 s each) on a real project; a heavy `conftest.py` is where it shows.
+
 ## Open items
 
-- Decide where a prior report lives for 3, and how mutants are matched across
-  runs (by kind, change and source line text, not line number).
 - Measure 1 first, on a real project; it is the largest and the cheapest.
 - Worth a README line either way: a child interpreter started in a different
   directory imports whatever copy of the package is installed, not the one
