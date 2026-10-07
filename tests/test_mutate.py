@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -15,7 +16,7 @@ from invective import mutate
 from invective import tree as trees
 from invective.tree import git_ref, working_tree
 
-from conftest import commit, git, write_tree
+from conftest import FILES, commit, git, write_tree
 
 SAMPLE = '''
 def refuse(n, flag, other):
@@ -114,6 +115,68 @@ def test_a_mutant_is_the_change_its_description_names(source, kind, change,
 
     assert [(k, w) for k, _n, w in mutate._sites(tree)] == [(kind, change)]
     assert ast.unparse(mutate._apply(tree, 0)) == mutant
+    # And written into the source, the mutant is that text, bare, inside the
+    # site's span: the one place the exact spelling of every kind is pinned.
+    assert mutate._text_of(source, tree, 0) == (mutant, True)
+
+
+def test_a_nested_bool_op_is_wrapped_so_it_stays_nested():
+    """`a or b or c` is one flat `or`, a different tree from `(a or b) or c`
+    with the same meaning; the bare text is wrong here, and the splice must
+    notice and write the parenthesised form rather than fall back."""
+    tree = ast.parse("x = a and b or c\n")
+
+    # The outer `or` is site 0, the inner `and` site 1.
+    assert [w for _k, _n, w in mutate._sites(tree)] == ["Or -> And", "And -> Or"]
+    assert mutate._text_of("x = a and b or c\n", tree, 1) == (
+        "x = (a or b) or c\n", True)
+
+
+#: Formatting `ast.unparse` loses: a comment on a mutated line, odd spacing,
+#: a `raise` and a compare each across two lines, a compare continued with a
+#: backslash (where the bare text padded to two lines is a syntax error and
+#: only the parenthesised form holds), and a trailing comment.
+FORMATTED = (
+    "def check(a, b, flag):  # kept\n"
+    "    if a <  b:   # odd spacing, and a comment on the mutated line\n"
+    "        raise ValueError(\n"
+    "            'too small')\n"
+    "    if (a <=\n"
+    "            b and flag):\n"
+    "        return True\n"
+    "    if a <= \\\n"
+    "            b:\n"
+    "        return 1\n"
+    "    return not flag  # trailing comment\n")
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"])
+def test_a_mutant_differs_from_its_source_only_inside_the_node_s_span(ending):
+    """Issue #1's done-when: outside the mutated node's span the mutant is
+    the source, byte for byte, every line keeps its number, and what the
+    span holds parses to the mutant `_apply` makes. Under each of the three
+    endings the tokenizer counts as a line break, since positions are the
+    tokenizer's and a lone `\\r` is a line to it too.
+    """
+    source = FORMATTED.replace("\n", ending)
+    tree = ast.parse(source)
+    before = mutate._LINE_END.split(source)[::2]
+    sites = mutate._sites(tree)
+    assert len(sites) == 8, [k for k, _n, _w in sites]
+
+    for index, (kind, node, what) in enumerate(sites):
+        text, spliced = mutate._text_of(source, tree, index)
+        assert spliced, (kind, what)
+        after = mutate._LINE_END.split(text)[::2]
+        assert len(after) == len(before), (kind, what)
+        changed = [n + 1 for n, (x, y) in enumerate(zip(before, after)) if x != y]
+        assert set(changed) <= set(range(node.lineno, node.end_lineno + 1)), (
+            kind, what, changed)
+        first = before[node.lineno - 1].encode()[:node.col_offset]
+        last = before[node.end_lineno - 1].encode()[node.end_col_offset:]
+        assert after[node.lineno - 1].encode().startswith(first)
+        assert after[node.end_lineno - 1].encode().endswith(last)
+        assert ast.dump(ast.parse(text)) == ast.dump(mutate._apply(tree, index))
 
 
 def test_the_raise_operator_really_removes_the_refusal():
@@ -362,6 +425,100 @@ def test_a_run_leaves_the_project_as_it_was_and_its_copy_gone(tree, capsys):
     assert snapshot() == before
     where = capsys.readouterr().out.split("copy:", 1)[1].split()[0]
     assert "invective-" in where and not os.path.exists(where)
+
+
+@pytest.mark.parametrize("ending", ["\r\n", "\r"])
+def test_a_mutant_of_a_crlf_or_cr_file_differs_from_the_file_only_inside_the_span(
+        tree, monkeypatch, ending):
+    """The file as written, through the engine: a Windows checkout's `\\r\\n`
+    endings are what the mutant is built from, so it differs from the file
+    at the mutation and not at every line, and a lone-`\\r` file is read by
+    the report line by line as the parser counts them.
+    """
+    write_tree(tree, {"pkg/gate.py": FILES["pkg/gate.py"].replace("\n", ending)})
+    gate = os.path.join(tree, GATE)
+    with open(gate, "rb") as fh:
+        original = fh.read()
+    reads = []
+
+    def run(where, tests, timeout, *rest):
+        with open(os.path.join(where, GATE), "rb") as fh:
+            reads.append(fh.read())
+        return mutate.Verdict(True, 0, "", "")
+
+    monkeypatch.setattr(mutate, "run_tests", run)
+    report = mutate.mutate(tree, gate, GATE_TESTS, ["RAISE", "CMP"], None)
+
+    # The baseline's read is the file; each mutant's differs on its line only.
+    assert reads[0] == original and len(reads) == 4
+    lines = re.split(rb"\r\n|\r|\n", original)
+    for mutant, entry in zip(reads[1:], report["survivors"]):
+        got = re.split(rb"\r\n|\r|\n", mutant)
+        assert len(got) == len(lines)
+        assert [n + 1 for n, (x, y) in enumerate(zip(lines, got)) if x != y] == [
+            entry["line"]], entry
+        assert mutant.count(ending.encode()) == original.count(ending.encode())
+    assert [s["source"] for s in report["survivors"]] == [
+        "if age < 18:", "raise ValueError('under age')",
+        "if member and age >= 65:"]
+
+
+def test_a_site_the_splice_cannot_hold_falls_back_to_the_whole_file_and_says_so(
+        tree, monkeypatch):
+    """`pass` padded to the two lines of the `raise` leaves the `; y = 3` on
+    a line of its own, which is no statement, so this mutant is the whole
+    file unparsed, as every mutant once was -- flagged in its entry, since
+    its line numbers are not the file's, and counted in the closing lines.
+    """
+    source = "def f():\n    raise E(\n        1); y = 3\n"
+    tree_ = ast.parse(source)
+    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree_))
+                if k == "RAISE"]
+    assert mutate._text_of(source, tree_, index) == (
+        ast.unparse(mutate._apply(tree_, index)), False)
+
+    write_tree(tree, {"pkg/gate.py": source})
+    monkeypatch.setattr(mutate, "run_tests",
+                        lambda *a, **k: mutate.Verdict(True, 0, "", ""))
+    report = mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None)
+
+    # The `raise` alone; the two constants beside it are spliced and unflagged.
+    assert [(s["kind"], s.get("whole_file")) for s in report["survivors"]] == [
+        ("RAISE", True), ("CONST", None), ("CONST", None)]
+    assert mutate.summary(report)[-1] == (
+        "           1 of the mutants could not be written inside their node's "
+        "span and were written as a reformatted file")
+
+
+def test_a_test_that_reads_the_module_s_own_source_survives_a_mutant_elsewhere(
+        tree):
+    """Issue #1's other done-when, with nothing stubbed: a test that reads the
+    module's source through `inspect.getsource` is not failed by a mutant of
+    another function, which it would be if the mutant's formatting were
+    `ast.unparse`'s and the comment it looks for were gone.
+    """
+    write_tree(tree, {
+        "pkg/own.py": ("def f():\n"
+                       "    return 1  # kept\n"
+                       "\n"
+                       "\n"
+                       "def g(x):\n"
+                       "    if x < 0:\n"
+                       "        raise ValueError\n"
+                       "    return x\n"),
+        "pkg/tests/test_own.py": (
+            "import inspect\n"
+            "from pkg import own\n"
+            "\n"
+            "def test_the_comment_is_kept():\n"
+            "    assert '# kept' in inspect.getsource(own.f)\n"),
+    })
+
+    report = mutate.mutate(tree, os.path.join(tree, "pkg", "own.py"),
+                           ["pkg/tests/test_own.py"], ["RAISE"], None)
+
+    assert report["mutants"] == 1 and report["killed"] == 0
+    assert [s["line"] for s in report["survivors"]] == [7]
 
 
 @pytest.mark.parametrize("selection, code", [

@@ -20,6 +20,16 @@ def test_an_acceptance_on_the_line_applies_to_that_line():
     assert got == accept.Accept(1, 1, "equivalent", None, "any length serves")
 
 
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"])
+def test_an_acceptance_is_on_the_line_the_parser_counts_whatever_ends_it(ending):
+    """The source is read with its own endings, and a lone `\\r` is a line
+    break to the tokenizer; read on `\\n` alone, every comment of such a
+    file would stand on line 1."""
+    source = "x = 1\ny = 2\nz = 3  # invective: accept[equivalent] why\n"
+    (got,) = accept.read(source.replace("\n", ending), "m.py")
+    assert (got.line, got.at) == (3, 3)
+
+
 def test_acceptances_above_a_line_apply_to_it_however_many_stand_there():
     """pytest-gremlins' line-above form, stacked."""
     source = ("# invective: accept[equivalent: 400 -> 401] any length\n"

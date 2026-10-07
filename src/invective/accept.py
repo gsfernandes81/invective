@@ -48,8 +48,14 @@ def read(source: str, path: str) -> list[Accept]:
     """Every acceptance in *source*, the file at *path*."""
     found = []
     standalone = []
+    # `newline=None`: *source* holds the file's own line endings, and the
+    # tokenizer counts a lone `\r` as a line break while `StringIO`'s
+    # `readline` by default splits on `\n` alone, so a file ended that way
+    # would put every comment on line 1. Translating on read, as the
+    # tokenizer itself does, keeps the line numbers the parser's.
     try:
-        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        for tok in tokenize.generate_tokens(io.StringIO(source, newline=None)
+                                            .readline):
             if tok.type == tokenize.COMMENT and _MARK.match(tok.string):
                 at = tok.start[0]
                 if tok.line[:tok.start[1]].strip():

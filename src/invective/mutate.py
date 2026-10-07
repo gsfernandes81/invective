@@ -121,10 +121,10 @@ _CMP_SWAP = {
 def _sites(tree: ast.AST) -> list[tuple[str, ast.AST, str]]:
     """Every place this file can be broken, as (kind, node, what changed).
 
-    Collected off the ORIGINAL tree so a site's reported line number is the
-    line somebody can go and look at. The mutation itself is applied to a deep
-    copy, because `ast.unparse` rewrites the whole file and a mutant's own line
-    numbers mean nothing.
+    Collected off the ORIGINAL tree, so a site's reported line number is the
+    line somebody can go and look at, and its node's position is the span of
+    the source that `_text_of` edits. The mutation itself is applied to a
+    copy.
     """
     found: list[tuple[str, ast.AST, str]] = []
     for node in ast.walk(tree):
@@ -201,6 +201,117 @@ class _ToPass(ast.NodeTransformer):
 
     def visit_Raise(self, node: ast.Raise):
         return ast.Pass() if node is self.target else node
+
+
+# --------------------------------------------------------------------------
+# **A mutant is the file with one span edited, not the file unparsed.** The
+# whole file through `ast.unparse` drops every comment, re-wraps every line
+# and moves every line number, so a traceback in a killed run pointed at
+# lines the source does not have, a diff of the mutant was the whole file,
+# and a test that reads the module's own source (`inspect.getsource`, a
+# check on a file's text, a line-number assertion) failed on every mutant
+# for the formatting and not the mutation: a false kill of all of them.
+
+#: The three endings Python's tokenizer counts as a line break, and nothing
+#: else: not `str.splitlines`, which also splits on `\f`, `\v`, `\x1c`-`\x1e`,
+#: `\x85` and `\u2028`, none of which moves a `lineno`. Captured, so a split
+#: gives the lines at the even indexes and their endings at the odd ones.
+_LINE_END = re.compile(r"(\r\n|\r|\n)")
+
+#: The kinds whose replacement is an expression. Parentheses make one safe
+#: whatever its parent's precedence, which the bare text is not always: the
+#: inner `and` of `a and b or c` turned to `or` must read `(a or b) or c`,
+#: since `a or b or c` is one flat `or`, a different tree with the same
+#: meaning. Bare first all the same, so the usual survivor's diff reads
+#: `if member or age >= 65:` and not `if (member or age >= 65):`. A `CONST`
+#: is never wrapped: a literal binds tightest already, and a parenthesised
+#: key in a `case {1: x}` pattern is a syntax error. `RAISE` is a statement.
+_WRAPPED = frozenset(("CMP", "BOOL", "NOT"))
+
+
+def _mutated_node(tree: ast.AST, index: int) -> tuple[str, ast.AST, ast.AST]:
+    """Site *index*: its kind, its node in *tree*, and a copy of that node
+    alone with the kind's edit made to it."""
+    kind, node, _what = _sites(tree)[index]
+    edited = copy.deepcopy(node)
+    if kind == "CMP":
+        edited.ops[0] = _CMP_SWAP[type(edited.ops[0])]()        # type: ignore[attr-defined]
+    elif kind == "BOOL":
+        edited.op = ast.Or() if isinstance(edited.op, ast.And) else ast.And()   # type: ignore[attr-defined]
+    elif kind == "NOT":
+        edited = edited.operand                                # type: ignore[attr-defined]
+    elif kind == "CONST":
+        if edited.value is True or edited.value is False:      # type: ignore[attr-defined]
+            edited.value = not edited.value                    # type: ignore[attr-defined]
+        else:
+            edited.value = edited.value + 1                    # type: ignore[attr-defined]
+    elif kind == "RAISE":
+        edited = ast.Pass()
+    return kind, node, edited
+
+
+def _splice(source: str, node: ast.AST, head: str, tail: str = "") -> str:
+    """*source* with the span of *node* replaced by *head*, then the line
+    endings the span held that *head* does not, then *tail*.
+
+    The endings are given back so that every line after the node keeps its
+    number: between *head* and *tail*, which is inside the parenthesis of a
+    wrapped expression, where a line break is a continuation, and after
+    `pass`, since a blank line is legal at any indentation. They are the
+    span's own endings, not the file's first, so a file of mixed endings has
+    the same count of each in the mutant as it had.
+
+    Positions are the parser's: `col_offset` and `end_col_offset` count
+    BYTES of the UTF-8 line, so the edit is made on bytes. `end_col_offset`
+    never reaches a `\\r` of a `\\r\\n` ending: the tokenizer had translated
+    it before the positions were assigned.
+    """
+    pieces = _LINE_END.split(source)
+    lines, ends = pieces[::2], pieces[1::2]
+    starts = [0]
+    for line, end in zip(lines, ends):
+        starts.append(starts[-1] + len(line.encode("utf-8")) + len(end))
+    first, last = node.lineno, node.end_lineno                 # type: ignore[attr-defined]
+    a = starts[first - 1] + node.col_offset                    # type: ignore[attr-defined]
+    b = starts[last - 1] + node.end_col_offset                 # type: ignore[attr-defined]
+    kept = "".join(ends[first - 1 + head.count("\n"):last - 1])
+    data = source.encode("utf-8")
+    return (data[:a] + (head + kept + tail).encode("utf-8") + data[b:]
+            ).decode("utf-8")
+
+
+def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
+    """The mutant's text, and whether it is *source* edited inside the
+    site's span only (True) or the whole file unparsed (False).
+
+    **The splice is checked, not trusted.** Its result is parsed and
+    compared, as a tree, with the mutant `_apply` makes, and must have the
+    source's line count: so no quirk of a Python version's positions or of
+    `ast.unparse` can hand the tests a mutant that is valid and not the one
+    the report describes. When the bare text fails that, an expression is
+    tried once more in parentheses; when that fails too, or for any other
+    exception from the attempt (`ast.unparse` raises `ValueError` on some
+    f-strings before 3.12), the mutant is the whole file unparsed, as every
+    mutant once was, and the report says so beside it. A refusal would stop
+    a campaign for one awkward site, and skipping the site would make the
+    count of mutants depend on the interpreter.
+    """
+    kind, node, edited = _mutated_node(tree, index)
+    whole = _apply(tree, index)
+    want = ast.dump(whole)
+    text = ast.unparse(edited)
+    forms = [(text, "")]
+    if kind in _WRAPPED:
+        forms.append(("(" + text, ")"))
+    for head, tail in forms:
+        try:
+            out = _splice(source, node, head, tail)
+            if (ast.dump(ast.parse(out)) == want
+                    and len(_LINE_END.split(out)) == len(_LINE_END.split(source))):
+                return out, True
+        except Exception:
+            pass
+    return ast.unparse(whole), False
 
 
 # --------------------------------------------------------------------------
@@ -382,9 +493,15 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         if not real.startswith(os.path.join(os.path.realpath(where), "")):
             raise Refusal("%s reaches %s through a link, outside the copy the "
                           "mutants are written in" % (src_rel, real))
-        with open(path, encoding="utf-8") as fh:
+        # **`newline=""`, the mirror of `_write`'s.** A mutant must differ
+        # from the file only at the mutation, so it is built from the file's
+        # own line endings: read with the default's translation, every `\r\n`
+        # of a Windows checkout would be written back as `\n`, and the mutant
+        # would differ at every line. The one line rule is `_LINE_END`'s, so
+        # a line of the report is a line the parser counted.
+        with open(path, encoding="utf-8", newline="") as fh:
             source = fh.read()
-        lines = source.split("\n")
+        lines = _LINE_END.split(source)[::2]
         tree_ = ast.parse(source)
         accepts = read_accepts(source, src_rel)
         every = [(n.lineno, w) for _k, n, w in _sites(tree_)]   # type: ignore[attr-defined]
@@ -454,7 +571,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # differs from the copy by exactly one edit.
         clock = int(time.time())
         for n, (idx, kind, node, what) in enumerate(sites, 1):
-            _write(path, ast.unparse(_apply(tree_, idx)), clock + n)
+            written, spliced = _text_of(source, tree_, idx)
+            _write(path, written, clock + n)
             got = run(budget)
             line = node.lineno                                  # type: ignore[attr-defined]
             text = lines[line - 1].strip()
@@ -471,6 +589,11 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     % (src_rel, line, what, got.code, got.tail))
             covering = [a for a in accepts if a.covers(line, what)]
             mutant = {"kind": kind, "line": line, "change": what}
+            if not spliced:
+                # Said beside the entry and not only in the closing lines,
+                # because this is the mutant whose line numbers are not the
+                # file's and whose diff is the whole file.
+                mutant["whole_file"] = True
             if got.ok and covering:
                 accepted.append({**mutant, "source": text,
                                  "reason": covering[0].reason,
@@ -551,6 +674,16 @@ def summary(report: dict) -> list[str]:
         # of this kind is not a well-tested file.
         lines.append("           %d of the kills were collection or internal "
                      "errors, not a test failing" % report["broken"])
+    # `.get`: the key is only there when the fallback was used, over the
+    # three lists a report already has.
+    whole = sum(e.get("whole_file", False) for e in
+                report["survivors"] + report["kills"] + report["accepted"])
+    if whole:
+        # Said out loud: for these, and these alone, a traceback's line
+        # numbers are the reformatted file's and not the source's.
+        lines.append("           %d of the mutants could not be written "
+                     "inside their node's span and were written as a "
+                     "reformatted file" % whole)
     return lines
 
 
