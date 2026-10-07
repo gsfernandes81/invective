@@ -169,6 +169,8 @@ def _git(root: str, *args: str) -> str:
 
 
 def _mark(where: str, root: str) -> None:
+    """Write *where*'s marker: the pid of this process and the project it is
+    a copy of."""
     with open(os.path.join(where, MARKER), "w", encoding="utf-8") as fh:
         json.dump({"pid": os.getpid(), "root": root}, fh)
 
