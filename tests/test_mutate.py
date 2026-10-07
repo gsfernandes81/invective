@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import re
@@ -1228,6 +1229,33 @@ def test_a_previous_handler_python_did_not_install_is_left_alone(monkeypatch):
         with mutate.stopping_on_sigterm():
             raise mutate._Terminated(signal.SIGTERM)
     assert len(calls) == 1 and calls[0][1] is not None, calls
+
+
+class _Broken(io.StringIO):
+    """A stream whose reader has gone: a closed pipe."""
+
+    def flush(self):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_dying_by_the_signal_first_writes_out_what_was_printed(monkeypatch):
+    """A process killed by its own signal never flushes its buffers, so a
+    run printing to a file or a pipe would end with that file empty; and a
+    stream that cannot be flushed does not stand in for the signal."""
+    raw = io.BytesIO()
+    out = io.TextIOWrapper(raw)
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", _Broken())
+    out.write("copy: x\n")
+    assert raw.getvalue() == b""
+    died = []
+    monkeypatch.setattr(mutate.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: died.append(signum))
+
+    mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+
+    assert raw.getvalue() == b"copy: x\n"
+    assert died == [signal.SIGTERM]
 
 
 def test_a_baseline_that_runs_out_of_time_is_refused_for_that(repo, monkeypatch):

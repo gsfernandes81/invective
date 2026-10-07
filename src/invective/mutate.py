@@ -541,7 +541,15 @@ def _exit_by(exc: _Terminated) -> None:
     """End this process by the signal *exc* carries, as it would have ended
     without a handler. A shell, `timeout(1)` or CI's cancel then sees the
     status it expects of a process it terminated (143 in a shell), and not an
-    exit code that reads as a verdict."""
+    exit code that reads as a verdict. What was printed is written out
+    first: the signal ends the process without flushing a buffer, and a
+    run's output sent to a file or a pipe is buffered."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            # A closed or broken stream must not replace the exit.
+            pass
     signal.signal(exc.signum, signal.SIG_DFL)
     os.kill(os.getpid(), exc.signum)
 
