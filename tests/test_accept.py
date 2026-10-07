@@ -169,6 +169,125 @@ def test_a_file_pytest_takes_for_a_project_s_marks_its_top(tmp_path, marker):
     assert config.project_root(os.path.join(proj, "pkg")) == proj
 
 
+def test_pytest_settings_above_the_project_s_top_are_named(tmp_path):
+    """The workspace's settings, which pytest reads from inside the member
+    and a copy of the member does not hold; none when the member has its
+    own, or when the file above sets nothing for pytest."""
+    top = os.path.realpath(tmp_path)
+    member = os.path.join(top, "m")
+    write_tree(top, {"pyproject.toml":
+                     "[tool.pytest.ini_options]\nxfail_strict = true\n",
+                     "m/pyproject.toml": ""})
+    assert config.pytest_config_above(member) == os.path.join(
+        top, "pyproject.toml")
+
+    write_tree(top, {"m/pytest.ini": ""})
+    assert config.pytest_config_above(member) is None
+
+    os.remove(os.path.join(member, "pytest.ini"))
+    write_tree(top, {"pyproject.toml": "[tool.ruff]\nline-length = 79\n"})
+    assert config.pytest_config_above(member) is None
+
+
+@pytest.mark.parametrize("name, text", [
+    ("pytest.toml", "[pytest]\nxfail_strict = true\n"),
+    (".pytest.toml", "[pytest]\nxfail_strict = true\n"),
+    ("pytest.ini", "[pytest]\nxfail_strict = true\n"),
+    (".pytest.ini", "[pytest]\nxfail_strict = true\n"),
+    ("pyproject.toml", "[tool.pytest]\nxfail_strict = true\n"),
+    ("tox.ini", "[pytest]\nxfail_strict = true\n"),
+    ("setup.cfg", "[tool:pytest]\nxfail_strict = true\n"),
+    ("pyproject.toml", "[tool.pytest.ini_options\n"),
+])
+def test_each_file_pytest_reads_settings_from_is_one(tmp_path, name, text):
+    """A file pytest cannot read stops it too, so it is named."""
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {name: text, "m/.git": ""})
+    assert config.pytest_config_above(os.path.join(top, "m")) == os.path.join(
+        top, name)
+
+
+@pytest.mark.parametrize("name, text", [
+    ("tox.ini", "[tox]\nenvlist = py\n"),
+    ("setup.cfg", "[metadata]\nname = m\n"),
+    ("pyproject.toml", "[tool]\n"),
+])
+def test_a_file_that_holds_no_pytest_section_is_not_pytest_s(tmp_path, name,
+                                                             text):
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {name: text, "m/.git": ""})
+    assert config.pytest_config_above(os.path.join(top, "m")) is None
+
+
+def test_an_empty_pytest_table_does_not_stop_pytest_s_search(tmp_path):
+    """`[tool.pytest]` with nothing in it is no settings file to pytest,
+    which goes on up to the one that is."""
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {"pytest.ini": "[pytest]\nxfail_strict = true\n",
+                     "a/pyproject.toml": "[tool.pytest]\n", "a/m/.git": ""})
+    assert config.pytest_config_above(os.path.join(top, "a", "m")) == (
+        os.path.join(top, "pytest.ini"))
+
+
+def test_the_search_starts_where_pytest_s_does_among_the_tests(tmp_path):
+    """pytest looks from the deepest directory every test path is under: the
+    tests' own `pytest.ini` comes before the workspace's, and a node id or
+    an option among them changes nothing."""
+    top = os.path.realpath(tmp_path)
+    member = os.path.join(top, "m")
+    write_tree(top, {"pytest.ini": "[pytest]\nxfail_strict = true\n",
+                     "m/.git": "", "m/tests/pytest.ini": "",
+                     "m/tests/test_a.py": "", "m/tests/sub/test_b.py": ""})
+    assert config.pytest_config_above(
+        member, ["tests/test_a.py::test_x", "-q", "tests/sub"]) is None
+    assert config.pytest_config_above(member) == os.path.join(top,
+                                                              "pytest.ini")
+    # A path that names nothing, or leads out, leaves the search at the top.
+    assert config.pytest_config_above(member, ["tests/none.py", ".."]) == (
+        os.path.join(top, "pytest.ini"))
+
+
+def test_a_conftest_pytest_loads_above_the_project_s_top_is_named(tmp_path):
+    """Settings that set nothing still put pytest's rootdir above the top,
+    and pytest loads every `conftest.py` from there down, which the copy
+    does not hold. With none, a `pyproject.toml` of a tool's settings in the
+    home directory is no reason to refuse."""
+    home = os.path.realpath(tmp_path)
+    proj = os.path.join(home, "work", "proj")
+    write_tree(home, {"pyproject.toml": "[tool.ruff]\n",
+                      "work/proj/.git": ""})
+    assert config.pytest_config_above(proj) is None
+
+    write_tree(home, {"work/conftest.py": ""})
+    assert config.pytest_config_above(proj) == os.path.join(home, "work",
+                                                            "conftest.py")
+    # The plugin asks with the file its pytest found.
+    assert config.pytest_file_left_out(
+        proj, os.path.join(home, "pyproject.toml")) == os.path.join(
+            home, "work", "conftest.py")
+    # From the settings file's directory down: one at the home directory
+    # too, and not one above the nearest `pyproject.toml`, where pytest's
+    # rootdir is when none of them is pytest's.
+    os.remove(os.path.join(home, "work", "conftest.py"))
+    write_tree(home, {"conftest.py": ""})
+    assert config.pytest_config_above(proj) == os.path.join(home,
+                                                            "conftest.py")
+    write_tree(home, {"work/pyproject.toml": ""})
+    assert config.pytest_config_above(proj) is None
+    assert "give the project pytest settings of its own" in str(
+        config.outside_refusal(os.path.join(home, "work", "conftest.py"),
+                               proj))
+    assert config.pytest_file_left_out(proj, None) is None
+    # A settings file beside the project (`-c`) loads no `conftest.py` above
+    # it: pytest loads them from the settings file's directory down.
+    write_tree(home, {"elsewhere/pytest.ini": ""})
+    assert config.pytest_file_left_out(
+        proj, os.path.join(home, "elsewhere", "pytest.ini")) is None
+    write_tree(home, {"work/proj/pytest.ini": "[pytest]\nxfail_strict = 1\n"})
+    assert config.pytest_file_left_out(
+        proj, os.path.join(proj, "pytest.ini")) is None
+
+
 @pytest.mark.parametrize("path, rel", [
     ("pkg/gate.py", os.path.join("pkg", "gate.py")),
     (".", "."),

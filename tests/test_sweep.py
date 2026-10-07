@@ -10,7 +10,7 @@ import pytest
 
 from invective import mutate, sweep
 
-from conftest import write_tree
+from conftest import WORKSPACE, write_tree
 
 SOURCES = ["pkg", "loose"]
 TESTS_DIR = "pkg/tests"
@@ -453,3 +453,17 @@ def test_the_sweep_runs_from_a_subdirectory_of_the_project(tree, monkeypatch,
     assert entry["module"] == _p("pkg/gate.py")
     assert entry["tests"] == [_p("pkg/tests/test_gate.py")]
     assert (entry["killed"], entry["mutants"]) == (1, 1)
+
+
+def test_a_sweep_whose_pytest_settings_are_above_the_project_is_refused(
+        tmp_path, monkeypatch, capsys):
+    """Said once, before any module is measured under other settings."""
+    top = os.path.realpath(tmp_path / "ws")
+    write_tree(top, WORKSPACE)
+    monkeypatch.chdir(os.path.join(top, "m"))
+
+    assert sweep.main(["--src", "pkg", "--tests-dir", "tests"]) == 2
+    said = capsys.readouterr()
+    assert "refused: pytest reads %s" % os.path.join(top, "pyproject.toml") in (
+        said.err)
+    assert "measured" not in said.out

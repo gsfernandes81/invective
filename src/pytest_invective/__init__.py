@@ -301,6 +301,13 @@ def pytest_runtestloop(session):
     root = settings.project_root(str(config.invocation_params.dir))
     reports, failures = [], []
     try:
+        # Exact: this pytest has found its settings file already, and every
+        # mutant's run has to go by the same.
+        ini = config.inipath
+        left_out = settings.pytest_file_left_out(
+            root, None if ini is None else str(ini))
+        if left_out:
+            raise settings.outside_refusal(left_out, root)
         if session.testsfailed:
             # Even with --continue-on-collection-errors: the tests that did
             # collect are not the selection that was asked for.

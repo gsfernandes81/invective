@@ -18,7 +18,8 @@ from invective import mutate
 from invective import tree as trees
 from invective.tree import git_ref, working_tree
 
-from conftest import FILES, commit, git, slow_run, write_tree
+from conftest import (FILES, WORKSPACE, commit, git, slow_run,
+                      write_tree)
 
 SAMPLE = '''
 def refuse(n, flag, other):
@@ -1392,6 +1393,30 @@ def test_the_command_runs_from_a_subdirectory_of_the_project(tree, monkeypatch,
     assert "project:   %s" % tree in said
     assert "target:    %s" % GATE in said
     assert "1/1 killed (100.0%)" in said
+
+
+def test_a_run_whose_pytest_settings_are_above_the_project_is_refused(
+        tmp_path, monkeypatch, capsys):
+    """From the member `m` the copy is `m`, which holds none of the settings
+    pytest reads from the workspace's top; under its own the xfail is not
+    strict, and the mutant that a strict one kills would be reported as a
+    survivor. Run from the top, the copy holds them, and it is killed."""
+    top = os.path.realpath(tmp_path / "ws")
+    write_tree(top, WORKSPACE)
+    monkeypatch.chdir(os.path.join(top, "m"))
+
+    assert mutate.main(["--target", os.path.join("pkg", "gate.py"), "--tests",
+                        "tests/test_gate.py", "--only", "RAISE"]) == 2
+    said = capsys.readouterr()
+    assert "refused: pytest reads %s, which is above the project's top %s" % (
+        os.path.join(top, "pyproject.toml"), os.path.join(top, "m")) in said.err
+    assert "copy:" not in said.out
+
+    monkeypatch.chdir(top)
+    assert mutate.main(["--target", os.path.join("m", "pkg", "gate.py"),
+                        "--tests", "m/tests/test_gate.py", "--only",
+                        "RAISE"]) == 0
+    assert "1/1 killed (100.0%)" in capsys.readouterr().out
 
 
 def test_the_value_after_an_expression_or_plugin_option_is_left_as_typed(

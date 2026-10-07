@@ -53,7 +53,8 @@ from pytest import ExitCode
 
 import pytest_invective
 from invective.accept import read as read_accepts
-from invective.config import (Config, load as load_config, project_root,
+from invective.config import (Config, load as load_config, outside_refusal,
+                              project_root, pytest_config_above,
                               relative_to_root)
 from invective.errors import Refusal
 from invective.tree import git_ref, working_tree
@@ -982,6 +983,9 @@ def main(argv: list[str] | None = None) -> int:
     tests = rewrite_tests(args.tests, os.getcwd(), root)
     try:
         config = load_config(root)
+        left_out = pytest_config_above(root, tests)
+        if left_out:
+            raise outside_refusal(left_out, root)
         tree = (git_ref(root, args.ref) if args.ref
                 else working_tree(root, config.exclude))
         report = mutate(root, args.target, tests, only, args.limit,

@@ -24,7 +24,8 @@ import subprocess
 import sys
 import tempfile
 
-from invective.config import project_root, relative_to_root
+from invective.config import (outside_refusal, project_root,
+                               pytest_config_above, relative_to_root)
 from invective.errors import Refusal
 from invective.mutate import _STOP_GRACE, _Terminated, _exit_by, stopping_on_sigterm
 
@@ -247,6 +248,11 @@ def main(argv=None):
         for given in [*args.src, args.tests_dir]:
             if not os.path.isdir(os.path.join(root, given)):
                 raise Refusal("%s is not a directory under %s" % (given, root))
+        # Every module's engine would refuse on its own; said once here,
+        # the sweep does not print a `?` for each.
+        left_out = pytest_config_above(root, [args.tests_dir])
+        if left_out:
+            raise outside_refusal(left_out, root)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2

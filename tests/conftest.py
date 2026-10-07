@@ -110,6 +110,28 @@ FILES = {
 }
 
 
+#: A workspace whose member `m` takes its pytest settings from the top's
+#: `pyproject.toml`, where an xfail is strict: the gate's one `RAISE` mutant
+#: makes the xfailing test pass, which only a strict xfail fails. From the
+#: top, `pythonpath` finds `pkg` in `m`; from `m`, the working directory does.
+WORKSPACE = {
+    "pyproject.toml": ("[tool.pytest.ini_options]\nxfail_strict = true\n"
+                       "pythonpath = ['m']\n"),
+    "m/pyproject.toml": "[project]\nname = 'm'\n",
+    "m/pkg/__init__.py": "",
+    "m/pkg/gate.py": ("def admit(age):\n"
+                      "    if age < 18:\n"
+                      "        raise ValueError('under age')\n"
+                      "    return age\n"),
+    "m/tests/test_gate.py": ("import pytest\n"
+                             "from pkg import gate\n"
+                             "\n"
+                             "@pytest.mark.xfail(raises=ValueError)\n"
+                             "def test_a_minor_is_refused():\n"
+                             "    gate.admit(10)\n"),
+}
+
+
 def write_tree(root, files):
     for rel, text in files.items():
         path = os.path.join(root, *rel.split("/"))

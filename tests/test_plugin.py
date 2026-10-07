@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import FILES, commit, write_tree
+from conftest import FILES, WORKSPACE, commit, write_tree
 
 #: This checkout's own `src`, ahead of any installed copy, so that the pytest
 #: started here loads the plugin under test.
@@ -176,6 +176,28 @@ def test_mutate_from_a_subdirectory_copies_the_whole_project(repo, tmp_path):
     assert gate["target"] == _p("pkg/gate.py")
     assert gate["tests"] == [MINOR, ADULT]
     assert (gate["mutants"], gate["killed"]) == (1, 1)
+
+
+def test_mutate_whose_pytest_settings_are_above_the_project_is_refused(
+        tmp_path):
+    """This pytest reads the workspace's settings, a copy of the member `m`
+    would not have them, and the mutant only they kill would survive. From
+    the top, the copy holds them."""
+    top = os.path.realpath(tmp_path / "ws")
+    write_tree(top, WORKSPACE)
+
+    done = pytest_in(os.path.join(top, "m"), "--mutate", "pkg/gate.py",
+                     "--mutate-only", "RAISE", "tests/test_gate.py")
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "refused: pytest reads %s, which is above the project's top" % (
+        os.path.join(top, "pyproject.toml")) in done.stdout
+    assert "copy:" not in done.stdout
+
+    done = pytest_in(top, "--mutate", "m/pkg/gate.py", "--mutate-only",
+                     "RAISE", "m/tests/test_gate.py")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed (100.0%)" in done.stdout
 
 
 def test_mutate_inside_a_mutant_s_own_run_is_a_usage_error(repo, tmp_path):
