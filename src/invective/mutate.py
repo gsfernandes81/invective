@@ -199,9 +199,9 @@ def _apply(tree: ast.AST, index: int) -> ast.AST:
     # interpolation back from. An edit inside one leaves that text naming the
     # original expression, so it is brought in step for every interpolation
     # the edited node sits in, and for no other: an untouched `{x+1}` keeps
-    # its own text, as the splice keeps it. A `raise` is a statement and is
-    # never inside one.
-    if _INTERPOLATION is not None and kind != "RAISE":
+    # its own text, as the splice keeps it. A `raise` is a statement, never
+    # inside one, so the loop finds nothing for it.
+    if _INTERPOLATION is not None:
         edited = node.operand if kind == "NOT" else node       # type: ignore[attr-defined]
         for outer in ast.walk(clone):
             if (isinstance(outer, _INTERPOLATION)
