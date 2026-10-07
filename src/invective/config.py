@@ -95,15 +95,35 @@ def project_root(start: str | None = None) -> str:
         here = up
 
 
+def _inside(path: str, root: str) -> str | None:
+    """*path*, an absolute path, given from *root*; None when it is not
+    inside it."""
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:
+        return None
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return None
+    return rel
+
+
 def relative_to_root(path: str, root: str) -> str:
     """*path*, as typed where the command was started, given from *root*.
 
-    Raises `ValueError` when it is not inside *root*: a `..` would lead out
-    of the copy it is joined to, and on Windows another drive has no
-    relative path at all.
+    A link inside the project is kept as typed, wherever it leads: the
+    project's tests reach the file through it. A path reached through a link
+    to the project, as every absolute path is from a working directory
+    entered through one, is the project's own file, and is given from the
+    root once both are resolved.
+
+    Raises `ValueError` when it is not inside *root* either way: a `..` would
+    lead out of the copy it is joined to, and on Windows another drive has
+    no relative path at all.
     """
-    rel = os.path.relpath(os.path.abspath(path), root)
-    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+    rel = _inside(os.path.abspath(path), root)
+    if rel is None:
+        rel = _inside(os.path.realpath(path), os.path.realpath(root))
+    if rel is None:
         raise ValueError("%s is outside %s" % (path, root))
     return rel
 

@@ -334,6 +334,34 @@ def test_a_path_that_leads_out_of_the_project_has_no_place_in_it(tmp_path,
         config.relative_to_root(path, top)
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
+                    reason="a symbolic link without privileges")
+def test_a_path_typed_through_a_link_to_the_project_is_the_project_s(
+        tmp_path):
+    """A working directory reached through a link, a logical `$PWD`, gives
+    absolute paths through the link while the project's top is the real
+    directory: the file they name is the project's own, given from its top,
+    and not a file above it."""
+    proj = tmp_path / "proj"
+    link = tmp_path / "link"
+    write_tree(str(proj), {"tests/pytest.ini": "[pytest]\nxfail_strict = 1\n"})
+    os.symlink(proj, link)
+    top = os.path.realpath(proj)
+    typed = str(link / "tests" / "pytest.ini")
+    assert config.relative_to_root(typed, top) == os.path.join("tests",
+                                                               "pytest.ini")
+    assert config.pytest_file_left_out(top, typed) is None
+    # A link inside the project is kept as typed, wherever it leads, and a
+    # file outside it is outside.
+    write_tree(str(tmp_path), {"elsewhere/pytest.ini": "[pytest]\n"})
+    os.symlink(tmp_path / "elsewhere", proj / "out")
+    assert config.relative_to_root(str(proj / "out" / "pytest.ini"),
+                                   top) == os.path.join("out", "pytest.ini")
+    with pytest.raises(ValueError):
+        config.relative_to_root(str(tmp_path / "elsewhere" / "pytest.ini"),
+                                top)
+
+
 REPORT = {"survivors": [{}], "accepted": [{}, {}], "stale": [{}]}
 
 
