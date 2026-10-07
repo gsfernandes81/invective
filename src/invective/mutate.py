@@ -501,7 +501,11 @@ def stopping_on_sigterm():
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        # `None` is a handler Python did not install (an embedding host's, a
+        # C extension's), which it cannot put back: `signal.signal` refuses
+        # it, and the error would replace whatever is unwinding.
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def _exit_by(exc: _Terminated) -> None:

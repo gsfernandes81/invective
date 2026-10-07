@@ -1152,6 +1152,26 @@ def test_a_second_sigterm_while_unwinding_does_not_cut_the_cleanup_short():
     assert signal.getsignal(signal.SIGTERM) == before
 
 
+def test_a_previous_handler_python_did_not_install_is_left_alone(monkeypatch):
+    """`signal.signal` returns `None` for a handler set from C, and refuses
+    `None` as a handler, so putting it back would raise in place of the
+    `_Terminated` unwinding through the block."""
+    calls = []
+
+    def fake(signum, handler):
+        calls.append((signum, handler))
+        if handler is None:
+            raise TypeError("signal handler must be signal.SIG_IGN, "
+                            "signal.SIG_DFL, or a callable object")
+        return None
+
+    monkeypatch.setattr(mutate.signal, "signal", fake)
+    with pytest.raises(mutate._Terminated):
+        with mutate.stopping_on_sigterm():
+            raise mutate._Terminated(signal.SIGTERM)
+    assert len(calls) == 1 and calls[0][1] is not None, calls
+
+
 def test_a_baseline_that_runs_out_of_time_is_refused_for_that(repo, monkeypatch):
     """Not as a red baseline: nothing failed, and a person told it did would
     go looking for a failing test."""
