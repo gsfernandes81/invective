@@ -31,3 +31,36 @@ invective's own version. Once that pull request is merged and `checks` is
 green on `main`, the `release` workflow tags the commit `v<version>`. A
 version that is already tagged is left alone, so a pull request that does not
 bump the version releases nothing.
+
+## Documentation
+
+### Who writes it
+
+Only Claude Opus 4.6 (`claude-opus-4-6`) may write or rephrase
+documentation, or any part of it. Any model may make corrections: fixing a
+fact that is wrong, a broken reference, a typo -- without rewording the
+surrounding prose.
+
+What counts as documentation: `README.md`, `CLAUDE.md`, everything under
+`docs/`, and any handoff or plan page (`HANDOFF.md` and its equivalents).
+Code comments and docstrings are not covered by this rule.
+
+### No history
+
+Documentation says what is true now. It never carries history: no
+"previously", "was changed", "update:", "decided on (date)", no narrative of
+how something came to be. Git is the history.
+
+The one exception is structured findings -- a measurement, an assessment, a
+benchmark with its numbers and conditions. Each finding must be isolated from
+normal prose and immediately recognisable as a finding, never blended into
+the description of how things are. Use this form:
+
+> **Finding:** (date, conditions)
+>
+> The numbers, and what they show.
+
+A finding carries the date it was taken, the conditions under which it was
+taken, the numbers, and the conclusion. It stands on its own, in a block or
+under a heading that starts with **Finding:**, so that no reader mistakes it
+for current-state documentation.
