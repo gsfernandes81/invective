@@ -9,8 +9,12 @@ commit.
 
 - Open the pull request against `main`, and merge it only once `checks` is
   green on its head commit.
-- Claude may merge its own pull requests once they are green and their
-  review threads are answered; it does not need to ask first.
+- A pull request is merged only when it is finished: thoroughly reviewed,
+  every review thread answered, and code that is ready to stay. Green checks
+  are necessary, not sufficient. Claude may merge its own pull requests on
+  those terms without asking first.
+- One piece of work is one pull request. Don't merge a part of it early to
+  get something onto `main`.
 - A pull request that has been merged is finished. Further work starts a
   fresh branch from the latest `main`, never more commits on the merged one.
 - Once a pull request is merged, delete its branch: on the remote always, and
