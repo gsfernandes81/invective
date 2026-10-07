@@ -169,6 +169,27 @@ def test_a_file_pytest_takes_for_a_project_s_marks_its_top(tmp_path, marker):
     assert config.project_root(os.path.join(proj, "pkg")) == proj
 
 
+@pytest.mark.parametrize("marker", ["pyproject.toml", ".git", "../.git"])
+def test_the_home_directory_is_the_top_only_from_itself(tmp_path,
+                                                       monkeypatch, marker):
+    """A `pyproject.toml` of a tool's settings in the home directory, a
+    dotfiles repository there, or a marker above it, does not make it or
+    anything above it the top of a project below it with no marker of its
+    own: that project's top is where the command was started, and the home
+    directory is not copied."""
+    home = os.path.join(os.path.realpath(tmp_path), "home")
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("USERPROFILE", home)
+    proj = os.path.join(home, "proj")
+    write_tree(home, {marker: "[tool.ruff]\n", "proj/gate.py": ""})
+    assert config.project_root(proj) == proj
+    top = home if marker != "../.git" else os.path.dirname(home)
+    assert config.project_root(home) == top
+
+    write_tree(home, {"proj/pytest.ini": "", "proj/pkg/__init__.py": ""})
+    assert config.project_root(os.path.join(proj, "pkg")) == proj
+
+
 def test_pytest_settings_above_the_project_s_top_are_named(tmp_path):
     """The workspace's settings, which pytest reads from inside the member
     and a copy of the member does not hold; none when the member has its

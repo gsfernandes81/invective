@@ -51,8 +51,9 @@ _PROJECT = ("pyproject.toml", "pytest.toml", ".pytest.toml", "pytest.ini",
 
 def project_root(start: str | None = None) -> str:
     """The top of the project *start* (by default the working directory) is
-    in: the nearest directory at or above it that holds one of `_PROJECT`,
-    or that is a repository's own directory; with neither, *start* itself.
+    in: the nearest directory at or above it, short of the home directory
+    when *start* is below that, that holds one of `_PROJECT` or that is a
+    repository's own directory; with neither, *start* itself.
 
     **The nearest marker wins.** The nearest is what nested projects need: a
     fixture project inside a repository is the top only from inside it. And
@@ -64,6 +65,12 @@ def project_root(start: str | None = None) -> str:
     directory ends the walk for the same reason, for a project that has
     neither.
 
+    **Never above the home directory.** The home directory is nobody's
+    project but its own: a `pyproject.toml` of a tool's settings there, a
+    dotfiles repository, or any marker above it, is the top only for a
+    command started in it. Below it, with no marker on the way up, where the
+    command was started is the top, as with no marker at all.
+
     **The top has to hold whatever pytest reads.** Every run is started in
     a copy of the top, so pytest's settings, and a `conftest.py` it loads
     because its rootdir is above the top, are left behind when they are
@@ -72,8 +79,12 @@ def project_root(start: str | None = None) -> str:
     commands refuse the run.
     """
     start = os.path.abspath(start if start is not None else os.getcwd())
+    # On Windows a drive letter or a name may be spelt in either case.
+    home = os.path.normcase(os.path.abspath(os.path.expanduser("~")))
     here = start
     while True:
+        if os.path.normcase(here) == home and here != start:
+            return start
         if (any(os.path.isfile(os.path.join(here, name)) for name in _PROJECT)
                 or any(os.path.exists(os.path.join(here, name))
                        for name in _REPOSITORY)):
