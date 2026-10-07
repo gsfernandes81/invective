@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 
 import pytest
 
@@ -144,18 +145,31 @@ def test_a_harness_file_that_imports_a_module_does_not_cover_it(tree):
 
 
 class _Engine:
-    """Stands in for the engine's process; `git` is still really run."""
+    """Stands in for the engine's process, a `Popen`; `git` is still really
+    run, through the real one."""
 
     def __init__(self, returncode=2, stdout="", stderr=""):
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-        self.commands = []
-        self._real = sweep.subprocess.run
+        self.commands, self.calls = [], []
+        self._real = sweep.subprocess.Popen
 
     def __call__(self, cmd, **kwargs):
         if cmd[0] == "git":
             return self._real(cmd, **kwargs)
         self.commands.append((cmd, kwargs))
         return self
+
+    def communicate(self, timeout=None):
+        return self.stdout, self.stderr
+
+    def wait(self, timeout=None):
+        self.calls.append("wait")
+
+    def terminate(self):
+        self.calls.append("terminate")
+
+    def kill(self):
+        self.calls.append("kill")
 
 
 def test_the_driver_starts_the_engine_beside_it_with_the_stated_defaults(
@@ -166,7 +180,7 @@ def test_the_driver_starts_the_engine_beside_it_with_the_stated_defaults(
     The defaults are the ones the README states.
     """
     engine = _Engine(stderr="refused: no mutation sites in x for RAISE")
-    monkeypatch.setattr(sweep.subprocess, "run", engine)
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
 
     assert sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
                        "--modules", _p("pkg/gate.py")]) == 0
@@ -198,7 +212,7 @@ def test_a_module_with_no_score_says_why(repo, monkeypatch, tmp_path, said,
     """An engine that could not start must not read as an answer about the
     module. The traceback says "occurred", which holds the letters "red".
     """
-    monkeypatch.setattr(sweep.subprocess, "run", _Engine(rc, stderr=said))
+    monkeypatch.setattr(sweep.subprocess, "Popen", _Engine(rc, stderr=said))
     out = str(tmp_path / "sweep.json")
 
     sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR, "--json", out,
@@ -304,7 +318,7 @@ def test_a_report_the_engine_wrote_but_the_driver_cannot_read_is_said(
         repo, monkeypatch, capsys, tmp_path):
     """The score still comes from the printed summary; what only the report
     holds is unknown, not none."""
-    monkeypatch.setattr(sweep.subprocess, "run", _Engine(
+    monkeypatch.setattr(sweep.subprocess, "Popen", _Engine(
         0, stdout="1/1 killed (100.0%), 0 survived\n"))
     out = str(tmp_path / "sweep.json")
 
@@ -354,7 +368,7 @@ def test_the_help_says_what_modules_does(capsys):
 
 def test_a_module_that_breaks_the_project_s_rules_fails_the_sweep(
         repo, monkeypatch, capsys):
-    monkeypatch.setattr(sweep.subprocess, "run", _Engine(
+    monkeypatch.setattr(sweep.subprocess, "Popen", _Engine(
         1, stdout=("1/2 killed (50.0%), 1 survived\n"
                    "fails:     1 survivor(s) that no comment accepts\n")))
 
@@ -367,13 +381,59 @@ def test_a_module_that_breaks_the_project_s_rules_fails_the_sweep(
 
 def test_a_ref_given_to_the_sweep_reaches_the_engine(repo, monkeypatch):
     engine = _Engine(0, stdout="1/1 killed (100.0%), 0 survived\n")
-    monkeypatch.setattr(sweep.subprocess, "run", engine)
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
 
     sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR, "--ref", "main",
                 "--modules", _p("pkg/gate.py")])
 
     ((cmd, _kwargs),) = engine.commands
     assert cmd[cmd.index("--ref") + 1] == "main"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows never delivers SIGTERM")
+def test_a_terminated_sweep_terminates_the_engine_it_started(repo, monkeypatch):
+    """`subprocess.run` kills its child outright on any exception, with the
+    engine's copy stranded. The engine is told to stop instead and waited
+    for, and the sweep then dies by the signal, as `run` does."""
+    engine = _Engine()
+
+    def communicate(timeout=None):
+        raise mutate._Terminated(signal.SIGTERM)
+
+    engine.communicate = communicate
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
+    died = []
+    monkeypatch.setattr(sweep, "_exit_by", lambda exc: died.append(exc.signum))
+
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                "--modules", _p("pkg/gate.py")])
+
+    assert engine.calls == ["terminate", "wait"]
+    assert died == [signal.SIGTERM]
+
+
+@pytest.mark.parametrize("raised, told", [
+    (KeyboardInterrupt, []),
+    (RuntimeError, ["terminate"]),
+])
+def test_an_interrupted_sweep_waits_for_the_engine_and_the_interrupt_goes_on(
+        repo, monkeypatch, raised, told):
+    """A ^C reached the engine too, in the same foreground group, so it is
+    only waited for: told to stop as well, its own cleanup would be cut
+    short. Anything else the engine has not heard of. Either way the
+    exception comes out once the engine is gone, as it would have."""
+    engine = _Engine()
+
+    def communicate(timeout=None):
+        raise raised()
+
+    engine.communicate = communicate
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
+
+    with pytest.raises(raised):
+        sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                    "--modules", _p("pkg/gate.py")])
+    assert engine.calls == told + ["wait"]
 
 
 def test_the_sweep_runs_from_a_subdirectory_of_the_project(tree, monkeypatch,

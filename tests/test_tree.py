@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 
 import pytest
 
 from invective import mutate
 from invective import tree as trees
 
-from conftest import write_tree
+from conftest import slow_run, stop_group, write_tree
 
 
 def _files(where):
+    # The copy's own marker is not a file of the project's.
     return sorted(os.path.relpath(os.path.join(d, f), where).replace(os.sep, "/")
-                  for d, _dirs, files in os.walk(where) for f in files)
+                  for d, _dirs, files in os.walk(where) for f in files
+                  if f != trees.MARKER)
 
 
 def test_the_copy_leaves_out_version_control_caches_and_environments(tmp_path):
@@ -172,3 +177,101 @@ def test_a_module_reached_through_a_linked_directory_is_refused(
                       ["tests/test_f.py"], None, None)
     assert "through a link" in str(caught.value)
     assert (elsewhere / "gate.py").read_text(encoding="utf-8") == before
+
+
+def _marked(box):
+    return sorted(n for n in os.listdir(box) if n.startswith("invective-"))
+
+
+def test_a_copy_whose_owner_was_killed_is_removed_at_the_next_start(tree,
+                                                                     tmp_path):
+    """A SIGKILL runs no `finally`: the copy stays, a whole working tree,
+    marked with the pid of a process that is gone, and the next copy to be
+    made begins by removing it."""
+    with slow_run(tree, tmp_path) as (proc, where, run):
+        proc.kill()
+        # The run goes on in a group of its own, and holds the copy as its
+        # working directory until it is stopped.
+        stop_group(run)
+        # Collected, not merely dead: a killed child is a zombie until its
+        # parent waits on it, and a zombie still answers `os.kill(pid, 0)`,
+        # so the reap would read the owner as alive and rightly keep its
+        # copy.
+        proc.wait()
+        assert os.path.exists(where)
+
+        with trees.working_tree(tree):
+            assert not os.path.exists(where)
+
+
+def test_a_live_owner_s_copy_is_never_removed(tmp_path):
+    """A dead owner's copy goes, and nothing else: not a live owner's, and
+    not a directory with no marker, which is one of the engine's own boxes or
+    a copy whose owner has not marked it yet. The two halves are one test
+    because the first passes vacuously where there is no reaper at all."""
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    gone = subprocess.Popen([sys.executable, "-c", ""])
+    gone.wait()
+    try:
+        for name, pid in (("invective-aaaaaaaa", live.pid),
+                          ("invective-bbbbbbbb", gone.pid)):
+            os.mkdir(tmp_path / name)
+            (tmp_path / name / trees.MARKER).write_text(
+                json.dumps({"pid": pid, "root": "elsewhere"}), encoding="utf-8")
+        os.mkdir(tmp_path / "invective-verdict-x")
+
+        trees.reap()
+
+        assert _marked(tmp_path) == ["invective-aaaaaaaa", "invective-verdict-x"]
+        # And still running half a second on: the probe has to be the signal
+        # that does nothing, not one that stops the owner it asks after.
+        with pytest.raises(subprocess.TimeoutExpired):
+            live.wait(timeout=0.5)
+        live.kill()
+        live.wait()
+
+        trees.reap()
+
+        assert _marked(tmp_path) == ["invective-verdict-x"]
+    finally:
+        live.kill()
+        live.wait()
+
+
+def test_the_copy_is_marked_with_its_owner_before_it_is_filled(tmp_path,
+                                                                monkeypatch):
+    """A run killed halfway through the copying still leaves a marked
+    directory, so the marker goes in first."""
+    root = str(tmp_path / "project")
+    write_tree(root, {"pkg/a.py": "x = 1\n"})
+    seen = []
+
+    def copytree(src, dst, **kwargs):
+        with open(os.path.join(dst, trees.MARKER), encoding="utf-8") as fh:
+            seen.append(json.load(fh))
+        raise OSError("killed halfway")
+
+    monkeypatch.setattr(trees.shutil, "copytree", copytree)
+    with pytest.raises(mutate.Refusal):
+        with trees.working_tree(root):
+            pass
+    assert seen == [{"pid": os.getpid(), "root": root}]
+
+
+def test_a_ref_s_copy_is_marked_with_its_owner_too(repo):
+    """A worktree is a copy like any other, marked once git has filled it."""
+    with trees.git_ref(repo, "HEAD") as where:
+        with open(os.path.join(where, trees.MARKER), encoding="utf-8") as fh:
+            assert json.load(fh)["pid"] == os.getpid()
+
+
+def test_a_marker_at_the_project_s_top_is_not_copied_over_the_copy_s(tmp_path):
+    """A project holding one -- the leaked copy of something, being measured
+    -- would otherwise hand the copy a stale pid."""
+    root = str(tmp_path / "project")
+    write_tree(root, {"pkg/a.py": "x = 1\n",
+                      trees.MARKER: json.dumps({"pid": 1, "root": "elsewhere"})})
+
+    with trees.working_tree(root) as where:
+        with open(os.path.join(where, trees.MARKER), encoding="utf-8") as fh:
+            assert json.load(fh)["pid"] == os.getpid()

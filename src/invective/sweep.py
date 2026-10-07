@@ -26,6 +26,7 @@ import tempfile
 
 from invective.config import project_root, relative_to_root
 from invective.errors import Refusal
+from invective.mutate import _STOP_GRACE, _Terminated, _exit_by, stopping_on_sigterm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -132,6 +133,69 @@ def covering(root, module, sources, tests_dir):
     return hits
 
 
+#: How long an engine told to stop is given to unwind: its own grace for the
+#: run it stops, and the copy's removal on top.
+# invective: accept[equivalent: 2 -> 3] any bound past the engine's own grace serves
+_GRACE = 2 * _STOP_GRACE
+
+
+def _engine(cmd, cwd):
+    """The engine's exit code, stdout and stderr, run to its end.
+
+    **Not `subprocess.run`, which on any exception kills its child outright,
+    copy and all.** When this process is stopped while the engine runs, the
+    engine is told, waited for, and only then is the exception let go: a
+    SIGTERM to the sweep is forwarded as one the engine unwinds on, and the
+    copy is gone before the sweep is. `communicate` itself
+    catches an interrupt, the subclass included, waits a quarter second for
+    the child and re-raises, so a SIGTERM takes that much longer per level
+    to come out; harmless.
+    """
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    try:
+        with stopping_on_sigterm():
+            stdout, stderr = proc.communicate()
+    # `_Terminated` is a `KeyboardInterrupt`, so this clause has to come
+    # before that one: the other way round a SIGTERM to the sweep would fall
+    # into the wait-only branch, the engine would never be told, and after
+    # the wait it would be killed outright with its copy stranded.
+    except _Terminated:
+        proc.terminate()
+        _finish(proc)
+        raise
+    except KeyboardInterrupt:
+        # A ^C: the engine is in the same foreground group and got the
+        # SIGINT itself, so it is unwinding already, and a SIGTERM now would
+        # raise inside its cleanup and cut it short. Told only when the wait
+        # runs out, which is a `kill -INT` to this process alone, one the
+        # engine never saw.
+        _finish(proc)
+        raise
+    except BaseException:
+        # `SystemExit` and the rest: the engine has heard nothing.
+        proc.terminate()
+        _finish(proc)
+        raise
+    return proc.returncode, stdout, stderr
+
+
+def _finish(proc):
+    """Wait for the engine to end; when it does not, tell it to stop, which
+    its once-only handler makes harmless if it was told already, and wait
+    once more before killing it outright."""
+    try:
+        proc.wait(timeout=_GRACE)
+        return
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+    try:
+        proc.wait(timeout=_GRACE)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def _from_root(given, root):
     """*given*, typed here, as a path from *root*."""
     try:
@@ -186,7 +250,16 @@ def main(argv=None):
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
+    try:
+        return _sweep(args, root)
+    except _Terminated as exc:
+        # The engine that was running is gone and its copy with it; now die
+        # by the signal, as `run` does.
+        _exit_by(exc)
 
+
+def _sweep(args, root):
+    """Every module measured and printed as it is, and the exit code."""
     report, unmeasured, failing = [], [], []
     for module in (args.modules or modules(root, args.src, args.tests_dir)):
         tests = covering(root, module, args.src, args.tests_dir)
@@ -212,9 +285,8 @@ def main(argv=None):
         # finding no percentage can show.
         with tempfile.TemporaryDirectory(prefix="invective-sweep-") as box:
             one = os.path.join(box, "report.json")
-            got = subprocess.run(cmd + ["--json", one], capture_output=True,
-                                 text=True, cwd=root)
-            body = got.stdout + got.stderr
+            code, stdout, stderr = _engine(cmd + ["--json", one], root)
+            body = stdout + stderr
             detail = {}
             try:
                 with open(one, encoding="utf-8") as fh:
@@ -242,7 +314,7 @@ def main(argv=None):
             note = "no mutation sites" if "no mutation sites" in body else \
                    ("RED baseline" if "is RED on the unmutated tree" in body else
                     "DRIVER FAILED rc=%d: %s" % (
-                        got.returncode,
+                        code,
                         # invective: accept[equivalent: 90 -> 91] a display width
                         (body.strip().splitlines() or ["no output"])[-1][:90]))
             report.append({"module": module, "note": note, "tests": tests})
@@ -252,7 +324,7 @@ def main(argv=None):
         lines = [ln for ln in body.splitlines() if "SURVIVED" in ln]
         fails = [ln.partition(":")[2].strip() for ln in body.splitlines()
                  if ln.startswith("fails:")]
-        if got.returncode == 1:
+        if code == 1:
             failing.append(module)
         report.append({"module": module, "tests": tests, "killed": int(killed),
                        "mutants": int(total), "score": float(pct),

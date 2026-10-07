@@ -6,6 +6,7 @@ import ast
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 
@@ -16,7 +17,7 @@ from invective import mutate
 from invective import tree as trees
 from invective.tree import git_ref, working_tree
 
-from conftest import FILES, commit, git, write_tree
+from conftest import FILES, commit, git, slow_run, write_tree
 
 SAMPLE = '''
 def refuse(n, flag, other):
@@ -990,6 +991,47 @@ def test_an_interrupted_run_is_stopped_and_the_interrupt_goes_on(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         mutate.run_tests("/nowhere", ["t.py"], timeout=1)
     assert len(stopped) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows never delivers SIGTERM")
+def test_a_terminated_run_stops_its_run_and_removes_its_copy(tree, tmp_path):
+    """SIGTERM is what `timeout(1)`, a supervisor and CI's cancel send, and
+    without a handler the process dies where it stands: the copy stays, and
+    the run goes on in a group of its own. It unwinds as a ^C does instead,
+    and exits by the signal, the status a supervisor expects."""
+    with slow_run(tree, tmp_path) as (proc, where, run):
+        os.kill(proc.pid, signal.SIGTERM)
+
+        assert proc.wait(timeout=30) == -signal.SIGTERM
+        assert not os.path.exists(where)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(run, 0)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows never delivers SIGTERM")
+def test_a_second_sigterm_while_unwinding_does_not_cut_the_cleanup_short():
+    """The first raises, where a ^C would; a second, as the copy is being
+    removed, is ignored, or it would raise inside that removal. Afterwards
+    the signal has its old handler back."""
+    before = signal.getsignal(signal.SIGTERM)
+    cleaned = []
+
+    with pytest.raises(mutate._Terminated) as caught:
+        with mutate.stopping_on_sigterm():
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(1)
+                pytest.fail("the signal did not stop the body")
+            finally:
+                os.kill(os.getpid(), signal.SIGTERM)
+                # A sleep the signal interrupts, so the handler has run by
+                # the next line.
+                time.sleep(0.05)
+                cleaned.append(True)
+
+    assert cleaned == [True]
+    assert caught.value.signum == signal.SIGTERM
+    assert signal.getsignal(signal.SIGTERM) == before
 
 
 def test_a_baseline_that_runs_out_of_time_is_refused_for_that(repo, monkeypatch):

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import copy
 import difflib
 import importlib.util
@@ -388,6 +389,64 @@ def _stop(proc: subprocess.Popen) -> None:
         proc.wait()
 
 
+class _Terminated(KeyboardInterrupt):
+    """A SIGTERM, raised where it landed. A `KeyboardInterrupt`, so that
+    every path that unwinds on a ^C -- the live run stopped with its group,
+    the copy removed, pytest's own session ended as interrupted -- unwinds on
+    it unchanged. *signum* is the signal, for the exit by it at the end."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+@contextlib.contextmanager
+def stopping_on_sigterm():
+    """A SIGTERM during the body raises `_Terminated` in it, once.
+
+    Without a handler the process dies where it stands and no `finally`
+    runs, so a copy of the project stays in the temporary directory. With
+    one that raises, the signal unwinds exactly as a ^C does: it interrupts
+    the `communicate` that waits on a run (the syscall is retried only when
+    the handler returns), the run's group is stopped on the way out, and
+    the copy is removed. **Once**: a second SIGTERM while the copy is being
+    removed would raise inside that removal and cut it short, so later ones
+    are ignored until the previous handler is back. SIGKILL remains the way
+    to stop a cleanup that hangs, and the copy's marker covers what that
+    leaves. Windows never delivers SIGTERM (`TerminateProcess` ends a process
+    outright), so there the handler is installed and never runs.
+    """
+    fired = False
+
+    def handler(signum, frame):
+        nonlocal fired
+        if fired:
+            return
+        fired = True
+        raise _Terminated(signum)
+
+    try:
+        previous = signal.signal(signal.SIGTERM, handler)
+    except ValueError:
+        # Not the main thread, the only one a handler can be set from: the
+        # signal keeps its default, and the marker is what covers the copy.
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _exit_by(exc: _Terminated) -> None:
+    """End this process by the signal *exc* carries, as it would have ended
+    without a handler. A shell, `timeout(1)` or CI's cancel then sees the
+    status it expects of a process it terminated (143 in a shell), and not an
+    exit code that reads as a verdict."""
+    signal.signal(exc.signum, signal.SIG_DFL)
+    os.kill(os.getpid(), exc.signum)
+
+
 def run_tests(where: str, tests: list[str], timeout: float,
               selection: str | None = None, options: tuple[str, ...] = (),
               target: str = "") -> Verdict:
@@ -484,7 +543,11 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # be written over whatever file it lands on.
         raise Refusal("%s is outside the project at %s" % (target, root))
 
-    with tempfile.TemporaryDirectory(prefix="invective-selection-") as box, \
+    # The handler lives exactly as long as the copy: here and not in the
+    # commands' entry points, so `pytest --mutate`, which has none, gets it
+    # too, and a plain pytest with the plugin installed never does.
+    with stopping_on_sigterm(), \
+            tempfile.TemporaryDirectory(prefix="invective-selection-") as box, \
             (tree if tree is not None else working_tree(root)) as where:
         listed = None
         if selection is not None:
@@ -841,6 +904,10 @@ def main(argv: list[str] | None = None) -> int:
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
+    except _Terminated as exc:
+        # The copy is gone and the run's group with it; now die by the
+        # signal, as the process would have without the handler.
+        _exit_by(exc)
 
     print()
     for line in summary(report):

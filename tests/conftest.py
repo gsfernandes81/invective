@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 
 import pytest
 
@@ -15,8 +19,27 @@ import pytest
 # verdict must not: pytest 8.4 and later apply `pythonpath` before loading
 # plugins, which would make a mutant of the plugin the judge of its own run.
 # Every pytest imports a conftest after its plugins.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "src"))
+SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                   "src")
+sys.path.insert(0, SRC)
+
+
+@pytest.fixture(autouse=True)
+def own_temp(tmp_path, monkeypatch):
+    """Every test's temporary directory is its own, for the processes it
+    starts too, and the real one is never looked at.
+
+    Every copy begins by removing the copies in there whose owner is dead.
+    The suite's workers each make copies, whose owner is alive; a test that
+    kills a run leaves a dead one, which a sibling could reap before the test
+    looks; and in a run of invective on its own code, a mutant of the reaper
+    that reads a live owner as dead would remove the campaign's own copy, the
+    one that holds the mutant, from inside the campaign's tests.
+    """
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    for name in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.setenv(name, str(tmp_path))
+
 
 #: The fixture repository, as path -> text. Its tests live INSIDE the package,
 #: which is the layout where a sweep has to tell the suite's own files from
@@ -130,3 +153,80 @@ def repo(tree, monkeypatch):
     commit(tree)
     monkeypatch.chdir(tree)
     return tree
+
+
+#: A test that hangs on the gate's one `RAISE` mutant, after writing its own
+#: pid where the test that started the run can read it. On the unmutated
+#: tree the refusal fires and it returns at once, so the baseline is green
+#: and quick; on the mutant it sleeps, so a signal sent once the pid is there
+#: lands mid-campaign, on the first mutant's run.
+SLOW_TEST = (
+    "import os\n"
+    "import time\n"
+    "from pkg import gate\n"
+    "\n"
+    "def test_slow():\n"
+    "    try:\n"
+    "        gate.admit(10, False)\n"
+    "    except ValueError:\n"
+    "        return\n"
+    "    with open(%r, 'w') as fh:\n"
+    "        fh.write(str(os.getpid()))\n"
+    "    time.sleep(60)\n")
+
+
+@contextlib.contextmanager
+def slow_run(tree, tmp_path):
+    """`invective run` on *tree* against `SLOW_TEST`, in a process of its own:
+    the process, the copy's path from its first line, and the pid of the run
+    hanging on the mutant, which is the moment a test about a signal sends
+    it. Whatever the test leaves running is stopped on the way out."""
+    pid_file = str(tmp_path / "run.pid")
+    write_tree(tree, {"pkg/tests/test_slow.py": SLOW_TEST % pid_file})
+    proc = subprocess.Popen(
+        [sys.executable, "-u", "-m", "invective", "run",
+         "--target", os.path.join("pkg", "gate.py"),
+         "--tests", "pkg/tests/test_slow.py", "--only", "RAISE"],
+        cwd=tree, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "PYTHONPATH": SRC})
+    run = None
+    try:
+        line = proc.stdout.readline()
+        # An engine that could not start has ended, and said why on stderr.
+        assert line.startswith("copy:"), (line, proc.communicate(timeout=30))
+        where = line.split(None, 1)[1].strip()
+        run = int(wait_for(pid_file))
+        yield proc, where, run
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        if run is not None:
+            stop_group(run)
+        proc.communicate()
+
+
+def wait_for(path, seconds=30):
+    """The text of *path*, once it is there and holds some."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            if text:
+                return text
+        time.sleep(0.05)
+    pytest.fail("%s never appeared" % path)
+
+
+def stop_group(pid):
+    """Stop the process *pid* and everything in its group, as the engine's
+    `_stop` does. `/F`, because without it `taskkill` only asks, and a run
+    still winding down holds the copy as its working directory."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True)
+    else:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
