@@ -125,15 +125,17 @@ def _remove(where: str) -> None:
     Renamed first, atomically, to `invective-dead-<name>`, as `reap()` does:
     removing a large tree takes seconds and may delete the marker first, and
     a kill during it then leaves a name the next reaper removes
-    unconditionally, not an unmarked directory it never touches. A rename
-    that fails -- on Windows a file the stopped run holds open is enough --
-    leaves the removal to be done in place."""
+    unconditionally, not an unmarked directory it never touches. A copy whose
+    rename fails -- on Windows a file the stopped run holds open is enough --
+    is left whole and marked, as `reap()` leaves one, for the first reaper
+    to start once this process is gone: removed in place, it could lose its
+    marker and then stop on the file held open."""
     dead = os.path.join(os.path.dirname(where), "invective-dead-"
                         + os.path.basename(where)[len("invective-"):])
     try:
         os.rename(where, dead)
     except OSError:
-        dead = where
+        return
     shutil.rmtree(dead, ignore_errors=True)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -330,6 +331,32 @@ def test_a_copy_killed_while_it_is_removed_is_left_under_a_name_the_reaper_remov
     monkeypatch.setattr(trees.shutil, "rmtree", real)
     trees.reap()
     assert _marked(tmp_path) == []
+
+
+def test_a_copy_that_cannot_be_renamed_for_removal_is_left_marked(
+        tmp_path, monkeypatch):
+    """Removed in place, it could lose its marker first and then stop on a
+    file held open, leaving a directory no reaper touches. Left whole, the
+    next reaper removes it once its owner is gone."""
+    root = str(tmp_path / "project")
+    write_tree(root, {"pkg/a.py": "x = 1\n"})
+    real = os.rename
+
+    def rename(src, dst, *args, **kwargs):
+        raise PermissionError(src)
+
+    monkeypatch.setattr(trees.os, "rename", rename)
+    with trees.working_tree(root) as where:
+        pass
+
+    assert os.path.isfile(os.path.join(where, "pkg", "a.py"))
+    with open(os.path.join(where, trees.MARKER), encoding="utf-8") as fh:
+        assert json.load(fh)["pid"] == os.getpid()
+    monkeypatch.setattr(trees.os, "rename", real)
+    # Its owner, this process, is alive.
+    trees.reap()
+    assert os.path.isdir(where)
+    shutil.rmtree(where)
 
 
 def test_a_marker_at_the_project_s_top_is_not_copied_over_the_copy_s(tmp_path):
