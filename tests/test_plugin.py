@@ -155,6 +155,28 @@ def test_a_test_outside_the_project_is_refused(repo, tmp_path):
     assert "copy:" not in done.stdout
 
 
+def test_mutate_from_a_subdirectory_copies_the_whole_project(repo, tmp_path):
+    """Started in `pkg`, the run copies the project from its top. A copy of
+    `pkg` alone holds no `pkg` to import, so its baseline is red.
+
+    The project's `pythonpath` puts its top on `sys.path`, which `python -m`
+    does only for the directory pytest is started in.
+    """
+    write_tree(repo, {"pyproject.toml":
+                      "[tool.pytest.ini_options]\npythonpath = ['.']\n"})
+    out = tmp_path / "reports.json"
+
+    done = pytest_in(os.path.join(repo, "pkg"), "--mutate", "gate.py",
+                     "--mutate-only", "RAISE", "--mutate-json", str(out),
+                     "tests/test_gate.py")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    (gate,) = json.loads(out.read_text(encoding="utf-8"))
+    assert gate["target"] == _p("pkg/gate.py")
+    assert gate["tests"] == [MINOR, ADULT]
+    assert (gate["mutants"], gate["killed"]) == (1, 1)
+
+
 def test_mutate_inside_a_mutant_s_own_run_is_a_usage_error(repo, tmp_path):
     """In PYTEST_ADDOPTS or addopts, `--mutate` reaches every mutant's run,
     each would start a campaign of its own, and so on without end. A run that

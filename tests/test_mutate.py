@@ -1029,3 +1029,41 @@ def test_a_refused_command_exits_2_and_says_why(tree, monkeypatch, capsys):
                         *GATE_TESTS]) == 2
     assert "refused: pkg/nowhere.py is not in the tree" in (
         capsys.readouterr().err.replace(os.sep, "/"))
+
+
+@pytest.mark.parametrize("tests", [
+    ["tests/test_gate.py"],
+    ["tests/test_gate.py::test_a_minor_is_refused"],
+])
+def test_the_command_runs_from_a_subdirectory_of_the_project(tree, monkeypatch,
+                                                             capsys, tests):
+    """From `pkg` the project is still the whole tree: copied from its top,
+    the target and the tests typed from `pkg` found where they are. Copied
+    from `pkg` alone, the copy holds no `pkg` to import."""
+    write_tree(tree, {"pyproject.toml": ""})
+    monkeypatch.chdir(os.path.join(tree, "pkg"))
+
+    assert mutate.main(["--target", "gate.py", "--tests", *tests,
+                        "--only", "RAISE"]) == 0
+    said = capsys.readouterr().out
+    assert "project:   %s" % tree in said
+    assert "target:    %s" % GATE in said
+    assert "1/1 killed (100.0%)" in said
+
+
+def test_the_value_after_an_expression_or_plugin_option_is_left_as_typed(
+        tree):
+    """`tests` is an entry of `pkg`, and still no path after `-k`, `-m` or
+    `-p`, nor in `-m=tests`, which has one dash and is no `--option=`; after
+    `--option=` it is one. A path out of the project is given whole, and
+    what names nothing is passed as typed."""
+    pkg = os.path.join(tree, "pkg")
+    test_gate = os.path.join("pkg", "tests", "test_gate.py")
+
+    assert mutate.rewrite_tests(
+        ["tests/test_gate.py", "-k", "tests", "-m", "tests", "-p", "tests",
+         "-m=tests", "--deselect=tests/test_gate.py::x", "--rootdir=../..",
+         "-q", "tests/test_none.py::x"], pkg, tree) == [
+        test_gate, "-k", "tests", "-m", "tests", "-p", "tests", "-m=tests",
+        "--deselect=%s::x" % test_gate, "--rootdir=%s" % os.path.dirname(tree),
+        "-q", "tests/test_none.py::x"]

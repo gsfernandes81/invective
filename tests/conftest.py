@@ -111,6 +111,10 @@ def commit(root, files=None):
         "commit", "-q", "-m", "fixture")
 
 
+# The tests that reach `main` or the plugin from here rely on no
+# `pyproject.toml` or `.git` above the temporary directory, as the project's
+# top is the nearest: a `TMPDIR` inside a checkout makes every such test copy
+# that checkout.
 @pytest.fixture
 def tree(tmp_path):
     """The fixture files on disk, with no repository around them."""

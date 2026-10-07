@@ -293,6 +293,13 @@ def test_a_directory_that_is_not_there_is_refused(repo, capsys, argv):
     assert "is not a directory" in capsys.readouterr().err
 
 
+def test_a_path_outside_the_project_is_refused(repo, capsys):
+    """`..` from the top is a directory, and walked it would sweep whatever
+    is above the project."""
+    assert sweep.main(["--src", "..", "--tests-dir", TESTS_DIR]) == 2
+    assert "is outside the project at" in capsys.readouterr().err
+
+
 def test_a_report_the_engine_wrote_but_the_driver_cannot_read_is_said(
         repo, monkeypatch, capsys, tmp_path):
     """The score still comes from the printed summary; what only the report
@@ -345,3 +352,22 @@ def test_a_ref_given_to_the_sweep_reaches_the_engine(repo, monkeypatch):
 
     ((cmd, _kwargs),) = engine.commands
     assert cmd[cmd.index("--ref") + 1] == "main"
+
+
+def test_the_sweep_runs_from_a_subdirectory_of_the_project(tree, monkeypatch,
+                                                           tmp_path):
+    """From `pkg` the engine is started at the project's top, given the
+    module from there. Started in `pkg`, it copies `pkg` alone, which holds
+    no `pkg` to import, and the baseline is red."""
+    write_tree(tree, {"pyproject.toml": ""})
+    monkeypatch.chdir(os.path.join(tree, "pkg"))
+    out = str(tmp_path / "sweep.json")
+
+    assert sweep.main(["--src", ".", "--tests-dir", "tests", "--modules",
+                       "gate.py", "--json", out]) == 0
+
+    with open(out, encoding="utf-8") as fh:
+        (entry,) = json.load(fh)["measured"]
+    assert entry["module"] == _p("pkg/gate.py")
+    assert entry["tests"] == [_p("pkg/tests/test_gate.py")]
+    assert (entry["killed"], entry["mutants"]) == (1, 1)

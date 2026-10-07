@@ -1,6 +1,9 @@
-"""Acceptances in the source, the `[tool.invective]` settings, and the gate."""
+"""Acceptances in the source, the `[tool.invective]` settings and the project
+they belong to, and the gate."""
 
 from __future__ import annotations
+
+import os
 
 import pytest
 
@@ -113,6 +116,63 @@ def test_a_setting_that_cannot_be_right_is_refused(tmp_path, table, says):
     with pytest.raises(Refusal) as caught:
         config.load(str(tmp_path))
     assert says in str(caught.value)
+
+
+def test_the_project_s_top_is_the_nearest_pyproject_above_the_working_directory(
+        tmp_path):
+    """From a subdirectory the whole project is the one copied, and its
+    settings the ones read; with no marker anywhere, where the command was
+    started is the top, as it always was."""
+    top = os.path.realpath(tmp_path)
+    deep = os.path.join(top, "a", "b", "c")
+    os.makedirs(deep)
+    assert config.project_root(deep) == deep
+
+    write_tree(top, {"a/pyproject.toml": ""})
+    assert config.project_root(deep) == os.path.join(top, "a")
+
+    # The nearest: a project inside another is the top from inside it.
+    write_tree(top, {"a/b/pyproject.toml": ""})
+    assert config.project_root(deep) == os.path.join(top, "a", "b")
+
+
+def test_a_repository_s_directory_is_the_top_when_no_pyproject_comes_first(
+        tmp_path):
+    """A `pyproject.toml` of a tool's settings in the home directory must not
+    make the home directory the project. `.git` is a file in a worktree."""
+    home = os.path.realpath(tmp_path)
+    proj = os.path.join(home, "proj")
+    write_tree(home, {"pyproject.toml": "", "proj/.git": "gitdir: elsewhere\n",
+                      "proj/pkg/__init__.py": ""})
+    assert config.project_root(os.path.join(proj, "pkg")) == proj
+
+    write_tree(home, {"proj/pyproject.toml": ""})
+    assert config.project_root(os.path.join(proj, "pkg")) == proj
+
+
+@pytest.mark.parametrize("path, rel", [
+    ("pkg/gate.py", os.path.join("pkg", "gate.py")),
+    (".", "."),
+    # A name that starts with two dots is not the way out.
+    ("..notes", "..notes"),
+])
+def test_a_path_typed_inside_the_project_is_given_from_its_top(tmp_path,
+                                                              monkeypatch,
+                                                              path, rel):
+    top = os.path.realpath(tmp_path)
+    monkeypatch.chdir(top)
+    assert config.relative_to_root(path, top) == rel
+
+
+@pytest.mark.parametrize("path", ["..", "../elsewhere"])
+def test_a_path_that_leads_out_of_the_project_has_no_place_in_it(tmp_path,
+                                                                 monkeypatch,
+                                                                 path):
+    """Joined to the copy, it would lead out of the copy too."""
+    top = os.path.realpath(tmp_path)
+    monkeypatch.chdir(top)
+    with pytest.raises(ValueError):
+        config.relative_to_root(path, top)
 
 
 REPORT = {"survivors": [{}], "accepted": [{}, {}], "stale": [{}]}

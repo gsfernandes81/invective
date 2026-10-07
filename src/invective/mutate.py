@@ -52,7 +52,8 @@ from pytest import ExitCode
 
 import pytest_invective
 from invective.accept import read as read_accepts
-from invective.config import Config, load as load_config
+from invective.config import (Config, load as load_config, project_root,
+                              relative_to_root)
 from invective.errors import Refusal
 from invective.tree import git_ref, working_tree
 
@@ -478,6 +479,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             with open(listed, "w", encoding="utf-8") as fh:
                 fh.write("".join(node + "\n" for node in selection))
         say("copy:      %s" % where)
+        say("project:   %s" % root)
         say("target:    %s" % src_rel)
         say("tests:     %s" % (" ".join(tests) if selection is None else
                                "%d collected by pytest" % len(selection)))
@@ -718,13 +720,59 @@ def gate(report: dict, config: Config) -> list[str]:
     return failures
 
 
+#: The options whose value is an expression or a plugin's import name, never
+#: a path, though a word of it may be spelt like an entry of the directory:
+#: `-k tests` typed beside a `tests/` is still the expression.
+_NOT_PATHS = frozenset({"-k", "-m", "-p"})
+
+
+def rewrite_tests(args: list[str], cwd: str, root: str) -> list[str]:
+    """pytest's arguments as typed in *cwd*, each path given from *root*,
+    where every run starts.
+
+    pytest's arguments are not all paths, so one is taken for a path only
+    when its text before any `::` names a file or directory that is there:
+    an option, an expression or a node id of a file that is not there is
+    passed as typed, and pytest says what it makes of it. The value of an
+    `--option=value` is read the same way, as `--ignore=tests` typed from a
+    subdirectory names a place there. A path that leads out of the project
+    is given whole, so it still names the place it named.
+
+    From the command line only paths and node ids reach here today: argparse
+    takes a `-k` or an `--ignore=` among `--tests` for an option of `run`'s
+    own and refuses it. The options are read here all the same, so that the
+    day they get through, none of them has its meaning changed.
+    """
+    def place(text):
+        path, sep, rest = text.partition("::")
+        if not path or not os.path.exists(os.path.join(cwd, path)):
+            return text
+        where = os.path.abspath(os.path.join(cwd, path))
+        try:
+            where = relative_to_root(where, root)
+        except ValueError:
+            pass
+        return where + sep + rest
+
+    out = []
+    for i, arg in enumerate(args):
+        if i and args[i - 1] in _NOT_PATHS:
+            out.append(arg)
+        elif arg.startswith("--") and "=" in arg:
+            option, _eq, value = arg.partition("=")
+            out.append(option + "=" + place(value))
+        else:
+            out.append(place(arg))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="invective run", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", required=True, help="the module to break")
     ap.add_argument("--tests", required=True, nargs="+",
-                    help="pytest arguments, relative to the current directory, "
-                         "the project's top level")
+                    help="pytest arguments, their paths relative to the "
+                         "current directory")
     ap.add_argument("--only", help="comma-separated: %s" % ",".join(sorted(OPERATORS)))
     ap.add_argument("--limit", type=int, help="cap the number of mutants")
     ap.add_argument("--json", help="write the report here as well")
@@ -738,12 +786,16 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             print("unknown operator(s): %s" % ", ".join(unknown), file=sys.stderr)
             return 2
-    root = os.getcwd()
+    # **The project's top, from anywhere inside it.** Every run starts at
+    # the top of the copy, so the tests' paths are rewritten to be read from
+    # there; the target needs nothing, as `mutate` reads it from here.
+    root = project_root()
+    tests = rewrite_tests(args.tests, os.getcwd(), root)
     try:
         config = load_config(root)
         tree = (git_ref(root, args.ref) if args.ref
                 else working_tree(root, config.exclude))
-        report = mutate(root, args.target, args.tests, only, args.limit,
+        report = mutate(root, args.target, tests, only, args.limit,
                         tree=tree)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)

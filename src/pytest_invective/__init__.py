@@ -165,7 +165,12 @@ def pytest_runtestloop(session):
 
     tr = config.pluginmanager.get_plugin("terminalreporter")
     say = tr.write_line if tr is not None else print
-    root = str(config.invocation_params.dir)
+    # The project's top, not the directory pytest was started in: from a
+    # subdirectory that one would be copied alone, and the tests above it
+    # and the project's settings left behind. Node ids are built from it
+    # below, not from pytest's rootdir, so they are what every run, started
+    # at the top of the copy, can find whatever pytest decided.
+    root = settings.project_root(str(config.invocation_params.dir))
     reports, failures = [], []
     try:
         if session.testsfailed:

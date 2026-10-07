@@ -10,8 +10,9 @@ coverage map the repository already maintains by writing tests that import what
 they test. A module with no such file is reported as unmeasured rather than
 skipped silently -- that distinction is the whole point.
 
-Run it from the project's top level; `--src` and `--tests-dir` are relative
-to it. It exits 1 when a module breaks the project's `[tool.invective]` rules.
+Run it from anywhere inside the project; `--src`, `--tests-dir` and
+`--modules` are relative to the directory it is run in. It exits 1 when a
+module breaks the project's `[tool.invective]` rules.
 
     invective sweep --src src/pkg --tests-dir tests [--limit N] [--only OPS]
 """
@@ -23,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 
+from invective.config import project_root, relative_to_root
 from invective.errors import Refusal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -130,11 +132,19 @@ def covering(root, module, sources, tests_dir):
     return hits
 
 
+def _from_root(given, root):
+    """*given*, typed here, as a path from *root*."""
+    try:
+        return relative_to_root(given, root)
+    except ValueError:
+        raise Refusal("%s is outside the project at %s" % (given, root)) from None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="invective sweep", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--src", required=True, nargs="+",
-                    help="directories of modules to mutate, relative to the repo root")
+                    help="directories of modules to mutate")
     ap.add_argument("--tests-dir", required=True,
                     help="the directory holding the test_*.py files")
     ap.add_argument("--only", default="RAISE")
@@ -149,8 +159,15 @@ def main(argv=None):
                                   "instead of the files as they stand")
     args = ap.parse_args(argv)
 
-    root = os.getcwd()
+    root = project_root()
     try:
+        # **Typed paths are read from where they were typed**, as every
+        # other tool reads them, and given from the top, where the engine
+        # is started and its copy begins.
+        args.src = [_from_root(given, root) for given in args.src]
+        args.tests_dir = _from_root(args.tests_dir, root)
+        if args.modules:
+            args.modules = [_from_root(given, root) for given in args.modules]
         # A directory that is not there walks as empty, and an empty sweep
         # prints "0 module(s) measured" -- which reads as a result, not as a
         # mistyped path.
