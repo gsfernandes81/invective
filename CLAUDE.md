@@ -13,6 +13,9 @@ commit.
   review threads are answered; it does not need to ask first.
 - A pull request that has been merged is finished. Further work starts a
   fresh branch from the latest `main`, never more commits on the merged one.
+- Once a pull request is merged, delete its branch: on the remote always, and
+  locally wherever a checkout has it. A branch left behind looks like work
+  still in progress.
 
 ## Versions and tags
 
