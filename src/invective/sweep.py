@@ -363,8 +363,8 @@ def _sweep(args, root):
                        # **The engine's report, whole**, which is what
                        # `invective run --json` writes for this module:
                        # survivors, accepted and stale entries as data (the
-                       # `survivors` above are the printed lines, and that
-                       # name was taken), and whatever the engine adds to its
+                       # `survivors` above are the printed lines; `report`
+                       # holds the entries), and whatever the engine adds to its
                        # entries later, with nothing here to teach. Unknown
                        # -- not none -- when it could not be read, `detail`
                        # being `{}` then. `kills` and `broken` are the same
