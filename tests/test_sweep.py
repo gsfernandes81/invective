@@ -122,11 +122,35 @@ def test_a_test_file_in_a_subdirectory_covers_the_module_it_imports(tree):
                         "pkg/tests/sub/more/test_idle_deeper.py")]
 
 
-def test_the_file_named_after_a_module_covers_it_from_a_subdirectory(tree):
-    write_tree(tree, {"pkg/tests/sub/test_idle.py": "def test_nothing():\n    pass\n"})
+def test_the_file_named_after_a_module_covers_it_from_the_mirror_directory(tree):
+    write_tree(tree, {"pkg/tests/sub/test_deep.py": "def test_nothing():\n    pass\n"})
 
-    assert sweep.covering(tree, _p("pkg/idle.py"), SOURCES, TESTS_DIR) == [
-        _p("pkg/tests/sub/test_idle.py")]
+    assert sweep.covering(tree, _p("pkg/sub/deep.py"), SOURCES, TESTS_DIR) == [
+        _p("pkg/tests/test_deep_things.py"), _p("pkg/tests/sub/test_deep.py")]
+
+
+def test_a_file_named_after_a_module_elsewhere_is_another_module_s(tmp_path):
+    """`models.py` and `test_models.py` recur in every app of a mirrored
+    layout. The file named after a module covers it at the top of the tests
+    directory and where the module's own directory is mirrored, and anywhere
+    else only by importing it."""
+    root = str(tmp_path / "proj")
+    write_tree(root, {
+        "src/app/__init__.py": "",
+        "src/app/api/__init__.py": "",
+        "src/app/api/models.py": "X = 1\n",
+        "src/app/db/__init__.py": "",
+        "src/app/db/models.py": "X = 2\n",
+        "tests/api/test_models.py": "from app.api import models\n",
+        "tests/zz/test_models.py": "def test_nothing():\n    pass\n",
+    })
+
+    assert sweep.covering(root, "src/app/db/models.py", ["src/app"], "tests") == []
+    assert sweep.covering(root, "src/app/api/models.py", ["src/app"], "tests") == [
+        os.path.join("tests", "api", "test_models.py")]
+    write_tree(root, {"tests/api/test_models.py": "def test_nothing():\n    pass\n"})
+    assert sweep.covering(root, "src/app/api/models.py", ["src/app"], "tests") == [
+        os.path.join("tests", "api", "test_models.py")]
 
 
 def test_a_file_under_pycache_in_the_tests_directory_is_not_coverage(tree):

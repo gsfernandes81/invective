@@ -87,6 +87,12 @@ def import_name(root, module, sources):
 def covering(root, module, sources, tests_dir):
     """Test files that IMPORT this module, plus the one named after it.
 
+    A file named after the module counts at the top of *tests_dir* and in the
+    directory that mirrors the module's own under *sources*
+    (`src/app/api/models.py` and `tests/api/test_models.py`); anywhere else a
+    test file covers a module only by importing it, since `test_models.py`
+    in another directory is another module's.
+
     **Matched on the import, never on the bare stem.** Matching on whether
     the module's name appears anywhere in a test file selects dozens of
     files for a module used everywhere -- essentially the whole suite as a
@@ -116,6 +122,14 @@ def covering(root, module, sources, tests_dir):
     named = "test_%s.py" % stem
     hits = []
     tests_abs = os.path.join(root, tests_dir)
+    mirror = os.curdir
+    for base in sources:
+        base = os.path.join(root, base)
+        if os.path.abspath(os.path.join(root, module)).startswith(
+                os.path.abspath(base) + os.sep):
+            mirror = os.path.relpath(
+                os.path.dirname(os.path.join(root, module)), base)
+            break
     # The walk is sorted in place, so the top-level files come first and each
     # subdirectory follows in name order: the same list on every run. A
     # directory link is not followed (`followlinks` is off), as `modules()`
@@ -128,7 +142,9 @@ def covering(root, module, sources, tests_dir):
             path = os.path.join(dirpath, f)
             with open(path, encoding="utf-8", errors="replace") as fh:
                 body = fh.read()
-            if f == named or any(re.search(pat, body, re.M) for pat in wanted):
+            by_name = f == named and os.path.relpath(dirpath, tests_abs) in (
+                os.curdir, mirror)
+            if by_name or any(re.search(pat, body, re.M) for pat in wanted):
                 hits.append(os.path.normpath(os.path.join(
                     tests_dir, os.path.relpath(path, tests_abs))))
     return hits
