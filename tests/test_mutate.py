@@ -1505,6 +1505,26 @@ def test_the_command_runs_from_a_subdirectory_of_the_project(tree, monkeypatch,
     assert "1/1 killed (100.0%)" in said
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
+                    reason="a symbolic link without privileges")
+def test_a_target_typed_through_a_link_to_the_project_is_the_project_s(
+        tree, tmp_path, monkeypatch, capsys):
+    """From a working directory entered through a link, a logical `$PWD`,
+    an absolute path to the target leads through the link while the
+    project's top is the real directory: it names the project's own file,
+    and not one outside it."""
+    link = tmp_path / "link"
+    os.symlink(tree, link)
+    monkeypatch.chdir(link)
+
+    assert mutate.main(["--target", str(link / "pkg" / "gate.py"), "--tests",
+                        str(link / "pkg" / "tests" / "test_gate.py"),
+                        "--only", "RAISE"]) == 0
+    said = capsys.readouterr().out
+    assert "target:    %s" % GATE in said
+    assert "1/1 killed (100.0%)" in said
+
+
 def test_a_run_whose_pytest_settings_are_above_the_project_is_refused(
         tmp_path, monkeypatch, capsys):
     """From the member `m` the copy is `m`, which holds none of the settings

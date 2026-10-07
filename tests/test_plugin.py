@@ -158,6 +158,24 @@ def test_a_test_outside_the_project_is_refused(repo, tmp_path):
     assert "copy:" not in done.stdout
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
+                    reason="a symbolic link without privileges")
+def test_a_test_typed_through_a_link_to_the_project_is_the_project_s(
+        tree, tmp_path):
+    """Given an absolute path through a link to the project, as every one is
+    from a logical `$PWD` entered through it, pytest keeps the test's path
+    as typed while the project's top is the real directory: the test is the
+    project's own, given from its top, and not one outside it."""
+    link = tmp_path / "link"
+    os.symlink(tree, link)
+
+    done = pytest_in(str(link), "--mutate=pkg/gate.py", "--mutate-only",
+                     "RAISE", str(link / "pkg" / "tests" / "test_gate.py"))
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed (100.0%)" in done.stdout
+
+
 def test_mutate_from_a_subdirectory_copies_the_whole_project(repo, tmp_path):
     """Started in `pkg`, the run copies the project from its top. A copy of
     `pkg` alone holds no `pkg` to import, so its baseline is red.

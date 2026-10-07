@@ -459,12 +459,30 @@ def _forwarded(config, root):
     return tuple(forwarded)
 
 
-def _key(item, root):
-    """The item's node id, its file given from *root*, where every run starts."""
+def _given_from(path, root):
+    """*path*, an absolute path, given from *root*; None when it is not
+    inside it, by a `..` or, on Windows, by another drive."""
     try:
-        path = os.path.relpath(str(item.path), root)
+        rel = os.path.relpath(path, root)
     except ValueError:
-        # Windows: the test is on another drive than the project.
+        return None
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        return None
+    return rel
+
+
+def _key(item, root):
+    """The item's node id, its file given from *root*, where every run starts;
+    a file outside *root* is given as `..`."""
+    # `invective.config.relative_to_root`'s rule, repeated because importing
+    # invective here would load the checkout's package into a mutant's run:
+    # pytest keeps a path given as typed, and an absolute one typed from a
+    # working directory entered through a link to the project leads through
+    # the link, so it is given from the root once both are resolved.
+    path = _given_from(str(item.path), root)
+    if path is None:
+        path = _given_from(os.path.realpath(item.path), os.path.realpath(root))
+    if path is None:
         path = os.pardir
     _file, sep, rest = item.nodeid.partition("::")
     return path.replace(os.sep, "/") + sep + rest
@@ -475,7 +493,7 @@ def _node(item, root):
     from invective.mutate import Refusal
 
     node = _key(item, root)
-    if node == os.pardir or node.startswith(os.pardir + "/"):
+    if node.partition("::")[0] == os.pardir:
         raise Refusal("%s is outside the project at %s, so no copy of it "
                       "has it" % (item.nodeid, root))
     return node

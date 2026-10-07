@@ -641,14 +641,12 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     run's pytest. *say* receives each line of progress as it happens.
     """
     try:
-        src_rel = os.path.relpath(os.path.abspath(target), root)
+        src_rel = relative_to_root(target, root)
     except ValueError:
-        # Windows: the target is on another drive than the project.
-        src_rel = os.pardir
-    if src_rel == os.pardir or src_rel.startswith(os.pardir + os.sep):
-        # Joined to the copy, this path leads out of it, and a mutant would
-        # be written over whatever file it lands on.
-        raise Refusal("%s is outside the project at %s" % (target, root))
+        # Joined to the copy, this path would lead out of it, and a mutant
+        # would be written over whatever file it lands on.
+        raise Refusal("%s is outside the project at %s"
+                      % (target, root)) from None
 
     # The handler lives exactly as long as the copy: here and not in the
     # commands' entry points, so `pytest --mutate`, which has none, gets it
