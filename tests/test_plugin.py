@@ -220,6 +220,22 @@ def test_mutate_whose_pytest_settings_are_above_the_project_is_refused(
     assert "1/1 killed (100.0%)" in done.stdout
 
 
+def test_a_settings_file_given_outside_the_project_is_refused(tree, tmp_path):
+    """`-c` skips pytest's search, so a file outside the project given with
+    it is what this run goes by, even when it sets nothing; no copy holds
+    it, and every mutant's run would go by the project's own settings."""
+    given = tmp_path / "elsewhere" / "pytest.ini"
+    write_tree(str(tmp_path), {"elsewhere/pytest.ini": "[pytest]\n"})
+
+    done = pytest_in(tree, "-c", str(given), "--mutate=pkg/gate.py",
+                     "--mutate-only", "RAISE", "pkg/tests/test_gate.py")
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert ("refused: pytest's settings file %s, given with -c, is outside "
+            "the project at %s" % (given, tree)) in done.stdout
+    assert "copy:" not in done.stdout
+
+
 #: A project whose pytest settings sit below its top, in `tests/`: pytest
 #: started with `tests` as its path reads them, and only they make the
 #: expected failure strict, so only they tell the `RAISE` mutant apart.

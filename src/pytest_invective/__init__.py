@@ -371,6 +371,18 @@ def pytest_runtestloop(session):
             root, None if ini is None else str(ini))
         if left_out:
             raise settings.outside_refusal(left_out, root)
+        if ini is not None and config.option.inifilename:
+            # `-c` skips pytest's search, so a file outside the project that
+            # sets nothing still decides this run: without it, every run in
+            # the copy, started at its top, would find the project's own.
+            try:
+                settings.relative_to_root(str(ini), root)
+            except ValueError:
+                raise mutate.Refusal(
+                    "pytest's settings file %s, given with -c, is outside the "
+                    "project at %s: no copy holds it, and every mutant's run "
+                    "would read the project's own settings instead"
+                    % (ini, root)) from None
         if session.testsfailed:
             # Even with --continue-on-collection-errors: the tests that did
             # collect are not the selection that was asked for.
