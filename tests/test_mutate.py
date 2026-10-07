@@ -8,6 +8,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 
 import pytest
@@ -183,6 +184,59 @@ def test_a_mutant_differs_from_its_source_only_inside_the_node_s_span(ending):
         assert after[node.lineno - 1].encode().startswith(first)
         assert after[node.end_lineno - 1].encode().endswith(last)
         assert ast.dump(ast.parse(text)) == ast.dump(mutate._apply(tree, index))
+        # A mutant is never its original.
+        assert ast.dump(ast.parse(text)) != ast.dump(tree), (kind, what)
+
+
+#: A t-string: a compare, an untouched `{x+1}` whose own constant is a site
+#: too, a constant alone, a `not`, and a constant in a format spec.
+TEMPLATE = ('def f(a, b, x):\n'
+            '    return t"{a < b} {x+1} {1} {not a} {True!r:>{3}}"\n')
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
+def test_a_site_inside_a_t_string_is_spliced_and_mutated():
+    """3.14's interpolation carries its expression's source text, and the
+    tree `_apply` makes keeps that text in step with the edit: without it
+    the splice of `a <= b` reads as another program than the stale tree,
+    and the whole file written instead is rebuilt from the stale text, so
+    the mutant is the original program and survives every suite.
+    """
+    tree = ast.parse(TEMPLATE)
+    texts = {}
+    for index, (kind, _node, what) in enumerate(mutate._sites(tree)):
+        text, spliced = mutate._text_of(TEMPLATE, tree, index)
+        assert spliced, (kind, what)
+        assert ast.dump(ast.parse(text)) != ast.dump(tree), (kind, what)
+        texts.setdefault((kind, what), []).append(text.split("\n")[1])
+    line = '    return t"{a < b} {x+1} {1} {not a} {True!r:>{3}}"'
+    assert texts == {
+        ("CMP", "Lt -> LtE"): [line.replace("a < b", "a <= b")],
+        ("CONST", "1 -> 2"): [line.replace("{1}", "{2}"),
+                              line.replace("x+1", "x+2")],
+        ("NOT", "not X -> X"): [line.replace("not a", "a")],
+        ("CONST", "True -> False"): [line.replace("True", "False")],
+        ("CONST", "3 -> 4"): [line.replace("{3}", "{4}")]}
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
+@pytest.mark.parametrize("expression, mutated, kind", [
+    ("a<b", "a <= b", "CMP"), ("not a", "a", "NOT")])
+def test_a_t_string_site_the_splice_cannot_hold_is_written_mutated(
+        expression, mutated, kind):
+    """`{a<b = }` repeats the expression's text in the template's literal
+    part, which the splice does not edit, so this mutant is the whole file
+    unparsed -- and its interpolation is the edited expression, not the
+    original one rebuilt from the text the parser gave it, while the
+    untouched `{x+1}` beside it keeps its own text."""
+    source = 'def f(a, b, x):\n    return t"{%s = } {x+1}"\n' % expression
+    tree = ast.parse(source)
+    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree))
+                if k == kind]
+    text, spliced = mutate._text_of(source, tree, index)
+    assert not spliced
+    assert [n.str for n in ast.walk(ast.parse(text))
+            if isinstance(n, ast.Interpolation)] == [mutated, "x+1"]
 
 
 def test_the_raise_operator_really_removes_the_refusal():

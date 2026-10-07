@@ -186,7 +186,43 @@ def _apply(tree: ast.AST, index: int) -> ast.AST:
             node.value = node.value + 1                        # type: ignore[attr-defined]
     elif kind == "RAISE":
         clone = _ToPass(node).visit(clone)                     # type: ignore[arg-type]
+    # **A t-string's interpolation carries its expression's source text**
+    # (3.14's `Interpolation.str`, the template's `.expression` at run
+    # time), which the parser fills and `ast.unparse` writes the
+    # interpolation back from. An edit inside one leaves that text naming the
+    # original expression, so it is brought in step for every interpolation
+    # the edited node sits in, and for no other: an untouched `{x+1}` keeps
+    # its own text, as the splice keeps it. A `raise` is a statement and is
+    # never inside one.
+    if _INTERPOLATION is not None and kind != "RAISE":
+        edited = node.operand if kind == "NOT" else node       # type: ignore[attr-defined]
+        for outer in ast.walk(clone):
+            if (isinstance(outer, _INTERPOLATION)
+                    and any(m is edited for m in ast.walk(outer.value))):
+                outer.str = ast.unparse(outer.value)
     return ast.fix_missing_locations(clone)
+
+
+#: 3.14's t-string interpolation, `None` before it.
+_INTERPOLATION = getattr(ast, "Interpolation", None)
+
+
+def _dump(tree: ast.AST) -> str:
+    """*tree* as `ast.dump` gives it, with each t-string interpolation's
+    source text written as `ast.unparse` writes its expression.
+
+    The text is the source's spelling of an expression the tree already
+    holds, so two trees that differ only there are the same program up to
+    its spacing: a splice of `x+1` to `x+2` parses to the text `x+2`, where
+    `_apply` can only give `ast.unparse`'s `x + 2`.
+    """
+    if _INTERPOLATION is None:
+        return ast.dump(tree)
+    tree = copy.deepcopy(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, _INTERPOLATION):
+            node.str = ast.unparse(node.value)
+    return ast.dump(tree)
 
 
 class _Unwrap(ast.NodeTransformer):
@@ -305,7 +341,7 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
     """
     kind, node, edited = _mutated_node(tree, index)
     whole = _apply(tree, index)
-    want = ast.dump(whole)
+    want = _dump(whole)
     text = ast.unparse(edited)
     forms = [(text, "")]
     if kind in _WRAPPED:
@@ -313,7 +349,7 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
     for head, tail in forms:
         try:
             out = _splice(source, node, head, tail)
-            if (ast.dump(ast.parse(out)) == want
+            if (_dump(ast.parse(out)) == want
                     and len(_LINE_END.split(out)) == len(_LINE_END.split(source))):
                 return out, True
         except Exception:
