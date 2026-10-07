@@ -163,7 +163,13 @@ def _sites(tree: ast.AST) -> list[tuple[str, ast.AST, str]]:
 
 
 def _apply(tree: ast.AST, index: int) -> ast.AST:
-    """A copy of *tree* with site *index* broken, and nothing else touched."""
+    """A copy of *tree* with site *index* broken, and nothing else touched.
+
+    The edits here and in `_mutated_node` are the same by construction, one
+    made in the whole tree and one in the node alone, and must stay so:
+    `_text_of`'s comparison of the two trees is what catches a drift, by
+    writing every mutant as the whole file.
+    """
     clone = copy.deepcopy(tree)
     # Walk the clone in the same order, so the Nth site of the clone is the Nth
     # site of the original. `ast.walk` is deterministic (a BFS over a fixed
@@ -286,7 +292,12 @@ _WRAPPED = frozenset(("CMP", "BOOL", "NOT"))
 
 def _mutated_node(tree: ast.AST, index: int) -> tuple[str, ast.AST, ast.AST]:
     """Site *index*: its kind, its node in *tree*, and a copy of that node
-    alone with the kind's edit made to it."""
+    alone with the kind's edit made to it.
+
+    The edits here and in `_apply` are the same by construction and must
+    stay so: `_text_of`'s comparison of the two trees is what catches a
+    drift, by writing every mutant as the whole file.
+    """
     kind, node, _what = _sites(tree)[index]
     edited = copy.deepcopy(node)
     if kind == "CMP":
@@ -354,7 +365,8 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
 
     **Before 3.12 `ast.unparse` cannot write some f-strings at all**: a
     string holding a character `repr` escapes, inside an f-string's
-    expression, raises `ValueError`, as a backslash was not allowed there.
+    expression, raises `ValueError`, since that grammar has no backslash
+    there.
     The node's own text is then not tried, and when the whole file cannot
     be written either, this is a `Refusal`: there is no text of this mutant
     to hand the tests.

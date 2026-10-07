@@ -159,11 +159,11 @@ FORMATTED = (
 
 @pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"])
 def test_a_mutant_differs_from_its_source_only_inside_the_node_s_span(ending):
-    """Issue #1's done-when: outside the mutated node's span the mutant is
-    the source, byte for byte, every line keeps its number, and what the
-    span holds parses to the mutant `_apply` makes. Under each of the three
-    endings the tokenizer counts as a line break, since positions are the
-    tokenizer's and a lone `\\r` is a line to it too.
+    """Outside the mutated node's span the mutant is the source, byte for
+    byte, every line keeps its number, and what the span holds parses to
+    the mutant `_apply` makes. Under each of the three endings the
+    tokenizer counts as a line break, since positions are the tokenizer's
+    and a lone `\\r` is a line to it too.
     """
     source = FORMATTED.replace("\n", ending)
     tree = ast.parse(source)
@@ -568,8 +568,9 @@ def test_a_site_the_splice_cannot_hold_falls_back_to_the_whole_file_and_says_so(
         tree, monkeypatch):
     """`pass` padded to the two lines of the `raise` leaves the `; y = 3` on
     a line of its own, which is no statement, so this mutant is the whole
-    file unparsed, as every mutant once was -- flagged in its entry, since
-    its line numbers are not the file's, and counted in the closing lines.
+    file unparsed (`ast.unparse` of the mutated tree) -- flagged in its
+    entry, since its line numbers are not the file's, and counted in the
+    closing lines.
     """
     source = "def f():\n    raise E(\n        1); y = 3\n"
     tree_ = ast.parse(source)
@@ -643,10 +644,10 @@ def test_the_command_refuses_a_file_this_python_cannot_write_naming_it(
 
 def test_a_test_that_reads_the_module_s_own_source_survives_a_mutant_elsewhere(
         tree):
-    """Issue #1's other done-when, with nothing stubbed: a test that reads the
-    module's source through `inspect.getsource` is not failed by a mutant of
-    another function, which it would be if the mutant's formatting were
-    `ast.unparse`'s and the comment it looks for were gone.
+    """With nothing stubbed: a test that reads the module's source through
+    `inspect.getsource` is not failed by a mutant of another function,
+    which it would be if the mutant's formatting were `ast.unparse`'s and
+    the comment it looks for were gone.
     """
     write_tree(tree, {
         "pkg/own.py": ("def f():\n"
@@ -785,8 +786,9 @@ SRC_LAYOUT = {
     "tests/test_gate.py": FILES["pkg/tests/test_gate.py"],
 }
 
-#: The copy's `src` first, as or3's conftest does it: inside the copy, the
-#: path from the conftest's own file names the copy's `src`.
+#: The copy's `src` first, as a project whose conftest puts it there does
+#: it: inside the copy, the path from the conftest's own file names the
+#: copy's `src`.
 FIXED_CONFTEST = ("import os\n"
                   "import sys\n"
                   "sys.path.insert(0, os.path.join(os.path.dirname(__file__),"
@@ -810,8 +812,8 @@ def test_a_target_the_tests_import_from_outside_the_copy_is_refused(
     which is the whole of what the hole needs.
 
     The refusal names the file the tests loaded and the copy they should
-    have loaded from. With or3's fix in the conftest, the copy's `src`
-    first, the run goes on and the `raise` is killed by the test of it.
+    have loaded from. With a conftest that puts the copy's `src` first,
+    the run goes on and the `raise` is killed by the test of it.
     """
     project = os.path.realpath(tmp_path / "project")
     write_tree(project, SRC_LAYOUT)
