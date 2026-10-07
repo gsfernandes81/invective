@@ -20,7 +20,9 @@ on:
     # Filters on the triggering run's head branch.
     branches: [main]
   # By hand, for the tip of `main` when this workflow's own run failed or was
-  # cancelled; it acts on the tip of `main` only. A commit whose `checks` run
+  # cancelled; it acts on the tip of `main` only. A tag pushed for an earlier
+  # commit whose release did not follow is not repaired from here: re-run
+  # that commit's own failed run of this workflow. A commit whose `checks` run
   # was cancelled, because a second push to `main` came before it finished,
   # has no green run, so it is released by re-running that run of `checks`.
   # Left alone, its version goes out with the next green commit, unless that
@@ -109,7 +111,18 @@ jobs:
             echo "$TAG is already on $SHA: carrying on with its release"
             echo "state=here" >> "$GITHUB_OUTPUT"
           else
-            echo "$TAG is already tagged at $at, nothing to do"
+            # A tag on another commit is a release made, or one a run of that
+            # commit pushed the tag for and then failed to publish. Only that
+            # commit's own run can finish it (it has the build), so a run
+            # here that finds no published release says so rather than going
+            # green over a version nobody can download.
+            draft=$(gh release view "$TAG" --json isDraft --jq .isDraft \
+              2>&1) || draft=none
+            if [ "$draft" != false ]; then
+              echo "::error::$TAG is on $at but has no published release; re-run the release run of $at (its payload names that commit)"
+              exit 1
+            fi
+            echo "$TAG is already tagged at $at and released, nothing to do"
             echo "state=elsewhere" >> "$GITHUB_OUTPUT"
           fi
 
