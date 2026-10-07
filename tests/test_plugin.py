@@ -200,6 +200,48 @@ def test_mutate_whose_pytest_settings_are_above_the_project_is_refused(
     assert "1/1 killed (100.0%)" in done.stdout
 
 
+#: A project whose pytest settings sit below its top, in `tests/`: pytest
+#: started with `tests` as its path reads them, and only they make the
+#: expected failure strict, so only they tell the `RAISE` mutant apart.
+BELOW_THE_TOP = {
+    "pyproject.toml": "[project]\nname = 'p'\nversion = '0'\n",
+    "pkg/__init__.py": "",
+    "pkg/gate.py": ("def check(x):\n"
+                    "    if x < 0:\n"
+                    "        raise ValueError('neg')\n"
+                    "    return x\n"),
+    "tests/pytest.ini": "[pytest]\nxfail_strict = true\npythonpath = ..\n",
+    "tests/test_gate.py": ("import pytest\n"
+                           "from pkg.gate import check\n"
+                           "\n"
+                           "@pytest.mark.xfail(raises=ValueError)\n"
+                           "def test_neg():\n"
+                           "    check(-1)\n"),
+}
+
+
+@pytest.mark.parametrize("given", [[], ["-c", _p("tests/pytest.ini")]],
+                         ids=["found", "given"])
+def test_settings_below_the_top_reach_every_mutant_s_run(tmp_path, given):
+    """Each run starts at the top of the copy with only node ids to go by,
+    so without the file this pytest read it would read the top's
+    `pyproject.toml`, the xfail would not be strict, and the mutant would
+    survive.
+
+    `--mutate=pkg/gate.py` and not `--mutate pkg/gate.py`: pytest settles
+    its settings before it knows the plugin's options, so it takes a
+    separate `pkg/gate.py` for a path to test, searches from the directory
+    above both paths, and reads the top's `pyproject.toml` itself."""
+    project = os.path.realpath(tmp_path / "proj")
+    write_tree(project, BELOW_THE_TOP)
+
+    done = pytest_in(project, *given, "--mutate=pkg/gate.py",
+                     "--mutate-only", "RAISE", "tests")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed" in done.stdout
+
+
 def test_mutate_inside_a_mutant_s_own_run_is_a_usage_error(repo, tmp_path):
     """In PYTEST_ADDOPTS or addopts, `--mutate` reaches every mutant's run,
     each would start a campaign of its own, and so on without end. A run that
@@ -586,18 +628,39 @@ def _plugin_here():
     return module
 
 
-def test_the_options_forwarded_are_those_that_change_how_tests_run():
-    """Every `-p` the run was given, but for the plugins whose options each
-    mutant's run is given anyway, and a flag only when it was set."""
+def _config(inipath=None):
+    """A run's config as `_forwarded` reads it, read from *inipath*."""
     option = SimpleNamespace(
         plugins=["myplugin", "no:terminal", "no:xdist", "pytest_invective"],
         override_ini=["xfail_strict=true"], importmode="importlib")
     given = {"pythonwarnings": ["error"], "runxfail": True,
              "strict_markers": False}
-    config = SimpleNamespace(
-        option=option, getoption=lambda name, default=None: given.get(name,
-                                                                      default))
+    return SimpleNamespace(
+        option=option, inipath=inipath,
+        getoption=lambda name, default=None: given.get(name, default))
 
-    assert _plugin_here()._forwarded(config) == (
+
+def test_the_options_forwarded_are_those_that_change_how_tests_run(tmp_path):
+    """Every `-p` the run was given, but for the plugins whose options each
+    mutant's run is given anyway, and a flag only when it was set."""
+    assert _plugin_here()._forwarded(_config(), str(tmp_path)) == (
         "-p", "myplugin", "-o", "xfail_strict=true", "-W", "error",
         "--import-mode=importlib", "--runxfail")
+
+
+def test_the_settings_file_is_forwarded_from_the_top(tmp_path):
+    """Given from the root, where every run starts."""
+    root = tmp_path / "proj"
+    ini = root / "tests" / "pytest.ini"
+
+    assert _plugin_here()._forwarded(_config(ini), str(root))[-3:] == (
+        "--runxfail", "-c", os.path.join("tests", "pytest.ini"))
+
+
+def test_a_settings_file_outside_the_root_is_not_forwarded(tmp_path):
+    """No path from the copy leads to it; `pytest_file_left_out` decides
+    whether the run may go ahead without it."""
+    root = tmp_path / "proj"
+    ini = tmp_path / "pyproject.toml"
+
+    assert "-c" not in _plugin_here()._forwarded(_config(ini), str(root))

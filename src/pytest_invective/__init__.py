@@ -304,8 +304,9 @@ def pytest_runtestloop(session):
     root = settings.project_root(str(config.invocation_params.dir))
     reports, failures = [], []
     try:
-        # Exact: this pytest has found its settings file already, and every
-        # mutant's run has to go by the same.
+        # The settings file this pytest read: `_forwarded` hands it to every
+        # run, and one outside the project, which no copy holds, refuses the
+        # run when it, or a `conftest.py` it brings in, would matter.
         ini = config.inipath
         left_out = settings.pytest_file_left_out(
             root, None if ini is None else str(ini))
@@ -331,7 +332,7 @@ def pytest_runtestloop(session):
                 config.getoption("mutate_limit"), say=say,
                 tree=(tree.git_ref(root, ref) if ref
                       else tree.working_tree(root, rules.exclude)),
-                selection=selection, options=_forwarded(config))
+                selection=selection, options=_forwarded(config, root))
             reports.append(report)
             failures.extend("%s: %s" % (report["target"], failure)
                             for failure in mutate.gate(report, rules))
@@ -364,7 +365,9 @@ _ENGINE_S = frozenset({"terminal", "xdist", "xdist.plugin", __name__})
 #: mutant's run is given too. Anything else stays behind: `--pdb` would stop
 #: a run for good, `--lf` would drop tests, and `-q` would leave a refusal
 #: nothing to quote.
-def _forwarded(config):
+def _forwarded(config, root):
+    from invective import config as settings
+
     forwarded = []
     for plugin in config.option.plugins or ():
         # The plugins whose options every run is given (`-rf`, `--no-header`,
@@ -381,6 +384,19 @@ def _forwarded(config):
                        ("--doctest-modules", "doctestmodules")):
         if config.getoption(dest, False):
             forwarded.append(flag)
+    # Every run starts at the top of the copy with node ids for its only
+    # paths, so a settings file below the top (`tests/pytest.ini` found from
+    # `pytest tests`, or one given with `-c`) is one it would never find,
+    # and it would go by the top's instead. `-c` also makes the file's
+    # directory the rootdir, as it was here. One outside the root has no
+    # path from the copy, and `pytest_file_left_out` has decided whether the
+    # runs may go without it.
+    ini = config.inipath
+    if ini is not None:
+        try:
+            forwarded += ["-c", settings.relative_to_root(str(ini), root)]
+        except ValueError:
+            pass
     return tuple(forwarded)
 
 
