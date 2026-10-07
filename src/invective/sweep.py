@@ -65,14 +65,16 @@ def import_name(root, module, sources):
     A source directory that is a package (it holds an `__init__.py`) is
     imported from the first directory above it that is not one, so
     `src/pkg/a/b.py` under `--src src/pkg` is `pkg.a.b`. A source directory
-    that is not a package holds loose files: its tests put the directory on
-    `sys.path` and import each module by its bare name.
+    that is not a package holds loose files and packages below it, each named
+    from its own top: its tests put the directory on `sys.path` and import a
+    loose module by its bare name.
     """
     mod = os.path.abspath(os.path.join(root, module))
     home = os.path.dirname(mod)
     for base in sources:
         base = os.path.abspath(os.path.join(root, base))
-        if mod.startswith(base + os.sep):
+        if (mod.startswith(base + os.sep)
+                and os.path.isfile(os.path.join(base, "__init__.py"))):
             home = base
             break
     if not os.path.isfile(os.path.join(home, "__init__.py")):

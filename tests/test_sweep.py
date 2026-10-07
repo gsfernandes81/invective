@@ -61,6 +61,22 @@ def test_a_package_under_src_is_named_from_src(tmp_path):
                              ["src/pkg"]) == "pkg.a.b"
 
 
+def test_a_package_below_a_source_directory_that_is_not_one_is_named_from_its_own_top(
+        tmp_path):
+    """`--src src` over `src/pkg/` still finds the tests that import `pkg.gate`."""
+    root = str(tmp_path)
+    write_tree(root, {"src/pkg/__init__.py": "",
+                      "src/pkg/gate.py": "x = 1\n",
+                      "tests/sub/test_x.py": "from pkg import gate\n",
+                      "scripts/tool.py": "x = 1\n"})
+
+    assert sweep.import_name(root, _p("src/pkg/gate.py"), ["src"]) == "pkg.gate"
+    assert sweep.covering(root, _p("src/pkg/gate.py"), ["src"], "tests") == [
+        _p("tests/sub/test_x.py")]
+    # A directory of loose files stays loose.
+    assert sweep.import_name(root, _p("scripts/tool.py"), ["scripts"]) is None
+
+
 @pytest.mark.parametrize("line", [
     "import pkg.gate",
     "from pkg.gate import admit",
