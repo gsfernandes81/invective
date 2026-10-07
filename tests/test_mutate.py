@@ -477,9 +477,14 @@ def test_a_real_run_names_the_killer_and_the_line_nothing_checks(repo):
 def test_every_mutant_s_entry_carries_its_diff(repo):
     """The kill and the survivor of the real run each say what the edit was,
     as a unified diff of the file against the mutant: one line out, one in,
-    since the mutant is the file with one span edited."""
+    since the mutant is the file with one span edited. Both are within three
+    lines of the end, so the hunk's context runs to the file's last line and
+    no further: the file's final line break ends that line, and is no empty
+    line after it."""
     report = mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS,
                            ["RAISE", "BOOL"], None)
+    count = FILES[GATE.replace(os.sep, "/")].count("\n")
+    last = FILES[GATE.replace(os.sep, "/")].split("\n")[-2]
 
     (kill,) = report["kills"]
     (survivor,) = report["survivors"]
@@ -490,6 +495,9 @@ def test_every_mutant_s_entry_carries_its_diff(repo):
         head, body = (entry["diff"].split("\n")[:2],
                       entry["diff"].split("\n")[3:])
         assert head == ["--- pkg/gate.py", "+++ pkg/gate.py (mutant)"]
+        assert entry["diff"].split("\n")[2] == "@@ -1,%d +1,%d @@" % (count,
+                                                                     count)
+        assert body[-1] == " " + last, entry
         assert [x for x in body if x[:1] == "-"] == ["-" + out], entry
         assert [x for x in body if x[:1] == "+"] == ["+" + into], entry
 
@@ -545,6 +553,12 @@ def test_a_mutant_of_a_crlf_or_cr_file_differs_from_the_file_only_inside_the_spa
         assert [n + 1 for n, (x, y) in enumerate(zip(lines, got)) if x != y] == [
             entry["line"]], entry
         assert mutant.count(ending.encode()) == original.count(ending.encode())
+        # The diff is the edited line alone, with no ending left on it.
+        diff = entry["diff"].split("\n")
+        assert "\r" not in entry["diff"], entry
+        assert [x for x in diff[3:] if x[:1] in "-+"] == [
+            "-" + lines[entry["line"] - 1].decode(),
+            "+" + got[entry["line"] - 1].decode()], entry
     assert [s["source"] for s in report["survivors"]] == [
         "if age < 18:", "raise ValueError('under age')",
         "if member and age >= 65:"]
@@ -572,6 +586,11 @@ def test_a_site_the_splice_cannot_hold_falls_back_to_the_whole_file_and_says_so(
     # The `raise` alone; the two constants beside it are spliced and unflagged.
     assert [(s["kind"], s.get("whole_file")) for s in report["survivors"]] == [
         ("RAISE", True), ("CONST", None), ("CONST", None)]
+    # The unparsed file has no final line break and the source does, which
+    # is no line taken out.
+    assert report["survivors"][0]["diff"].split("\n")[3:] == [
+        " def f():", "-    raise E(", "-        1); y = 3", "+    pass",
+        "+    y = 3"]
     assert mutate.summary(report)[-1] == (
         "           1 of the mutants could not be written inside their node's "
         "span and were written as a reformatted file")

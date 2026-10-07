@@ -261,6 +261,18 @@ class _ToPass(ast.NodeTransformer):
 #: gives the lines at the even indexes and their endings at the odd ones.
 _LINE_END = re.compile(r"(\r\n|\r|\n)")
 
+
+def _report_lines(text: str) -> list[str]:
+    """*text*'s lines as the report numbers them, without their endings.
+
+    A file that ends in a line break splits into one more piece than it has
+    lines, an empty one after the last break, which is no line of the file:
+    a diff would show it as a context line the file does not have, or as a
+    blank line taken out where `ast.unparse` writes no final break.
+    """
+    parts = _LINE_END.split(text)[::2]
+    return parts[:-1] if parts and parts[-1] == "" else parts
+
 #: The kinds whose replacement is an expression. Parentheses make one safe
 #: whatever its parent's precedence, which the bare text is not always: the
 #: inner `and` of `a and b or c` turned to `or` must read `(a or b) or c`,
@@ -618,7 +630,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # a line of the report is a line the parser counted.
         with open(path, encoding="utf-8", newline="") as fh:
             source = fh.read()
-        lines = _LINE_END.split(source)[::2]
+        lines = _report_lines(source)
         tree_ = ast.parse(source)
         accepts = read_accepts(source, src_rel)
         every = [(n.lineno, w) for _k, n, w in _sites(tree_)]   # type: ignore[attr-defined]
@@ -733,7 +745,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # no `\r` is left on a line, and a `\r\n` file's diff is the
             # edited lines alone, both sides having lost their endings alike.
             diff = "\n".join(difflib.unified_diff(
-                lines, _LINE_END.split(written)[::2], fromfile=src_rel,
+                lines, _report_lines(written), fromfile=src_rel,
                 tofile=src_rel + " (mutant)", lineterm=""))
             mutant = {"kind": kind, "line": line, "change": what, "diff": diff}
             if not spliced:
