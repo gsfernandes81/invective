@@ -19,8 +19,8 @@ import os
 import tomllib
 from typing import NamedTuple
 
-# pytest's own reader of `.ini` and `.cfg` files, a dependency of pytest's,
-# so that one reads here as pytest reads it.
+# pytest's own reader of `.ini` and `.cfg` files, so that one reads here as
+# pytest reads it.
 import iniconfig
 
 from invective.errors import Refusal
