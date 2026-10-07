@@ -160,8 +160,9 @@ jobs:
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft \
-              2> /dev/null); then
+          if view=$(gh release view "$TAG" --json isDraft --jq .isDraft \
+              2>&1); then
+            draft=$view
             if [ "$draft" = true ]; then
               gh release upload "$TAG" dist/* --clobber
               gh release edit "$TAG" --draft=false
@@ -173,7 +174,12 @@ jobs:
                   || gh release upload "$TAG" "$f"
               done
             fi
-          else
+          elif grep -q 'release not found' <<< "$view"; then
             gh release create "$TAG" --verify-tag --title "$TAG" \
               --generate-notes dist/*
+          else
+            # Any other failure of the lookup says nothing about whether a
+            # release exists; creating one could duplicate it.
+            echo "$view"
+            exit 1
           fi
