@@ -910,12 +910,6 @@ def gate(report: dict, config: Config) -> list[str]:
     return failures
 
 
-#: The options whose value is an expression or a plugin's import name, never
-#: a path, though a word of it may be spelt like an entry of the directory:
-#: `-k tests` typed beside a `tests/` is still the expression.
-_NOT_PATHS = frozenset({"-k", "-m", "-p"})
-
-
 def rewrite_tests(args: list[str], cwd: str, root: str) -> list[str]:
     """pytest's arguments as typed in *cwd*, each path given from *root*,
     where every run starts.
@@ -923,15 +917,8 @@ def rewrite_tests(args: list[str], cwd: str, root: str) -> list[str]:
     pytest's arguments are not all paths, so one is taken for a path only
     when its text before any `::` names a file or directory that is there:
     an option, an expression or a node id of a file that is not there is
-    passed as typed, and pytest says what it makes of it. The value of an
-    `--option=value` is read the same way, as `--ignore=tests` typed from a
-    subdirectory names a place there. A path that leads out of the project
-    is given whole, so it still names the place it named.
-
-    From the command line only paths and node ids reach here today: argparse
-    takes a `-k` or an `--ignore=` among `--tests` for an option of `run`'s
-    own and refuses it. The options are read here all the same, so that the
-    day they get through, none of them has its meaning changed.
+    passed as typed, and pytest says what it makes of it. A path that leads
+    out of the project is given whole, so it still names the place it named.
     """
     def place(text):
         path, sep, rest = text.partition("::")
@@ -944,16 +931,7 @@ def rewrite_tests(args: list[str], cwd: str, root: str) -> list[str]:
             pass
         return where + sep + rest
 
-    out = []
-    for i, arg in enumerate(args):
-        if i and args[i - 1] in _NOT_PATHS:
-            out.append(arg)
-        elif arg.startswith("--") and "=" in arg:
-            option, _eq, value = arg.partition("=")
-            out.append(option + "=" + place(value))
-        else:
-            out.append(place(arg))
-    return out
+    return [place(arg) for arg in args]
 
 
 def parser() -> argparse.ArgumentParser:

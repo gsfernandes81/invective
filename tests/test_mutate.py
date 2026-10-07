@@ -1433,22 +1433,17 @@ def test_a_run_whose_pytest_settings_are_above_the_project_is_refused(
     assert "1/1 killed (100.0%)" in capsys.readouterr().out
 
 
-def test_the_value_after_an_expression_or_plugin_option_is_left_as_typed(
-        tree):
-    """`tests` is an entry of `pkg`, and still no path after `-k`, `-m` or
-    `-p`, nor in `-m=tests`, which has one dash and is no `--option=`; after
-    `--option=` it is one. A path out of the project is given whole, and
-    what names nothing is passed as typed."""
+def test_a_path_is_given_from_the_root_and_what_names_nothing_as_typed(tree):
+    """A path that is there is given from the project's root, a path out of
+    the project whole, and a node id of a file that is not there, or an
+    option, as typed."""
     pkg = os.path.join(tree, "pkg")
     test_gate = os.path.join("pkg", "tests", "test_gate.py")
 
     assert mutate.rewrite_tests(
-        ["tests/test_gate.py", "-k", "tests", "-m", "tests", "-p", "tests",
-         "-m=tests", "--deselect=tests/test_gate.py::x", "--rootdir=../..",
-         "-q", "tests/test_none.py::x"], pkg, tree) == [
-        test_gate, "-k", "tests", "-m", "tests", "-p", "tests", "-m=tests",
-        "--deselect=%s::x" % test_gate, "--rootdir=%s" % os.path.dirname(tree),
-        "-q", "tests/test_none.py::x"]
+        ["tests/test_gate.py::x", "../..", "-q", "tests/test_none.py::x"],
+        pkg, tree) == [
+        test_gate + "::x", os.path.dirname(tree), "-q", "tests/test_none.py::x"]
 
 
 def test_the_run_command_line_is_one_a_test_can_parse():
