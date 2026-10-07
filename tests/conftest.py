@@ -197,7 +197,10 @@ def repo(tree, monkeypatch):
 
 
 #: A test that hangs on the gate's one `RAISE` mutant, after writing its own
-#: pid where the test that started the run can read it. On the unmutated
+#: pid and its parent's where the test that started the run can read them.
+#: The parent is the engine, or on Windows the launcher that a virtual
+#: environment's `python.exe` is, which starts the interpreter as its child
+#: and is a process of the run as much as the interpreter. On the unmutated
 #: tree the refusal fires and it returns at once, so the baseline is green
 #: and quick; on the mutant it sleeps, so a signal sent once the pid is there
 #: lands mid-campaign, on the first mutant's run.
@@ -212,16 +215,17 @@ SLOW_TEST = (
     "    except ValueError:\n"
     "        return\n"
     "    with open(%r, 'w') as fh:\n"
-    "        fh.write(str(os.getpid()))\n"
+    "        fh.write(str(os.getpid()) + ' ' + str(os.getppid()))\n"
     "    time.sleep(60)\n")
 
 
 @contextlib.contextmanager
 def slow_run(tree, tmp_path):
     """`invective run` on *tree* against `SLOW_TEST`, in a process of its own:
-    the process, the copy's path from its first line, and the pid of the run
+    the process, the copy's path from its first line, the pid of the run
     hanging on the mutant, which is the moment a test about a signal sends
-    it. Whatever the test leaves running is stopped on the way out."""
+    it, and the pid of that run's parent. Whatever the test leaves running is
+    stopped on the way out."""
     pid_file = str(tmp_path / "run.pid")
     write_tree(tree, {"pkg/tests/test_slow.py": SLOW_TEST % pid_file})
     proc = subprocess.Popen(
@@ -236,8 +240,8 @@ def slow_run(tree, tmp_path):
         # An engine that could not start has ended, and said why on stderr.
         assert line.startswith("copy:"), (line, proc.communicate(timeout=30))
         where = line.split(None, 1)[1].strip()
-        run = int(wait_for(pid_file))
-        yield proc, where, run
+        run, parent = (int(pid) for pid in wait_for(pid_file).split())
+        yield proc, where, run, parent
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -257,6 +261,44 @@ def wait_for(path, seconds=30):
                 return text
         time.sleep(0.05)
     pytest.fail("%s never appeared" % path)
+
+
+#: Windows: the access to a process that waiting on it needs.
+_SYNCHRONIZE = 0x00100000
+
+
+def wait_ended(*pids, seconds=30):
+    """Return once every process in *pids* has ended, and fail the test if
+    one has not within *seconds*.
+
+    On Windows `taskkill /F` only starts a process's end, and the launcher of
+    a killed interpreter ends after it, on its own: until then each may still
+    hold its working directory, and a directory some process works in cannot
+    be renamed. A process's exit code is set before that, so a liveness check
+    already reads it as gone; it is waited on instead, which returns once it
+    has finished ending. Elsewhere a killed process holds nothing that stops
+    a removal, and there is nothing to wait for."""
+    if os.name != "nt":
+        return
+    import ctypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel.WaitForSingleObject.restype = ctypes.c_ulong
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    end = time.monotonic() + seconds
+    for pid in pids:
+        handle = kernel.OpenProcess(_SYNCHRONIZE, False, pid)
+        if not handle:
+            # Ended, and nothing holds the process open any more.
+            continue
+        try:
+            left = max(0, int((end - time.monotonic()) * 1000))
+            if kernel.WaitForSingleObject(handle, left) != 0:
+                pytest.fail("process %d has not ended within %d s"
+                            % (pid, seconds))
+        finally:
+            kernel.CloseHandle(handle)
 
 
 def stop_group(pid):

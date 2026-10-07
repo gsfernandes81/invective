@@ -1163,7 +1163,7 @@ def test_a_terminated_run_stops_its_run_and_removes_its_copy(tree, tmp_path):
     without a handler the process dies where it stands: the copy stays, and
     the run goes on in a group of its own. It unwinds as a ^C does instead,
     and exits by the signal, the status a supervisor expects."""
-    with slow_run(tree, tmp_path) as (proc, where, run):
+    with slow_run(tree, tmp_path) as (proc, where, run, _parent):
         os.kill(proc.pid, signal.SIGTERM)
 
         assert proc.wait(timeout=30) == -signal.SIGTERM

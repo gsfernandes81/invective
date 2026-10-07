@@ -518,7 +518,7 @@ def test_a_sweep_sent_sigterm_stops_its_engine_and_dies_by_the_signal(
         env={**os.environ, "PYTHONPATH": SRC})
     run = None
     try:
-        run = int(wait_for(pid_file))
+        run = int(wait_for(pid_file).split()[0])
         sent = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
 

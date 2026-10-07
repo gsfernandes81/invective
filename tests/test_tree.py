@@ -14,7 +14,7 @@ import pytest
 from invective import mutate
 from invective import tree as trees
 
-from conftest import git, slow_run, stop_group, write_tree
+from conftest import git, slow_run, stop_group, wait_ended, write_tree
 
 
 def _files(where):
@@ -210,7 +210,7 @@ def test_a_copy_whose_owner_was_killed_is_removed_at_the_next_start(tree,
     """A SIGKILL runs no `finally`: the copy stays, a whole working tree,
     marked with the pid of a process that is gone, and the next copy to be
     made begins by removing it."""
-    with slow_run(tree, tmp_path) as (proc, where, run):
+    with slow_run(tree, tmp_path) as (proc, where, run, parent):
         proc.kill()
         # The run goes on in a group of its own, and holds the copy as its
         # working directory until it is stopped.
@@ -220,6 +220,11 @@ def test_a_copy_whose_owner_was_killed_is_removed_at_the_next_start(tree,
         # so the reap would read the owner as alive and rightly keep its
         # copy.
         proc.wait()
+        # Ended, not merely stopped: on Windows the run's parent is the
+        # launcher of its interpreter, which works in the copy too and ends
+        # only after the run, and a copy some process still works in cannot
+        # be renamed, so the reap would rightly leave it for a later start.
+        wait_ended(run, parent)
         assert os.path.exists(where)
 
         with trees.working_tree(tree):
