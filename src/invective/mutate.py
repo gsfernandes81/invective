@@ -345,19 +345,32 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
     `ast.unparse` can hand the tests a mutant that is valid and not the one
     the report describes. When the bare text fails that, an expression is
     tried once more in parentheses; when that fails too, or for any other
-    exception from the attempt (`ast.unparse` raises `ValueError` on some
-    f-strings before 3.12), the mutant is the whole file unparsed, as every
-    mutant once was, and the report says so beside it. A refusal would stop
-    a campaign for one awkward site, and skipping the site would make the
-    count of mutants depend on the interpreter.
+    exception from the attempt (an out-of-range position, a splice that
+    does not parse, a null byte's `ValueError`), the mutant is the whole
+    file unparsed (`ast.unparse` of the mutated tree), and the report says
+    so beside it. A refusal would stop a campaign for one awkward site, and
+    skipping the site would make the count of mutants depend on the
+    interpreter.
+
+    **Before 3.12 `ast.unparse` cannot write some f-strings at all**: a
+    string holding a character `repr` escapes, inside an f-string's
+    expression, raises `ValueError`, as a backslash was not allowed there.
+    The node's own text is then not tried, and when the whole file cannot
+    be written either, this is a `Refusal`: there is no text of this mutant
+    to hand the tests.
     """
     kind, node, edited = _mutated_node(tree, index)
     whole = _apply(tree, index)
     want = _dump(whole)
-    text = ast.unparse(edited)
-    forms = [(text, "")]
-    if kind in _WRAPPED:
-        forms.append(("(" + text, ")"))
+    forms = []
+    try:
+        text = ast.unparse(edited)
+    except ValueError:
+        pass
+    else:
+        forms.append((text, ""))
+        if kind in _WRAPPED:
+            forms.append(("(" + text, ")"))
     for head, tail in forms:
         try:
             out = _splice(source, node, head, tail)
@@ -366,7 +379,12 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
                 return out, True
         except Exception:
             pass
-    return ast.unparse(whole), False
+    try:
+        return ast.unparse(whole), False
+    except ValueError as exc:
+        raise Refusal("cannot be written inside its node's span, and this "
+                      "Python's ast.unparse cannot write the file: %s" % exc
+                      ) from exc
 
 
 # --------------------------------------------------------------------------
@@ -720,10 +738,13 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # differs from the copy by exactly one edit.
         clock = int(time.time())
         for n, (idx, kind, node, what) in enumerate(sites, 1):
-            written, spliced = _text_of(source, tree_, idx)
+            line = node.lineno                                  # type: ignore[attr-defined]
+            try:
+                written, spliced = _text_of(source, tree_, idx)
+            except Refusal as exc:
+                raise Refusal("%s:%d %s %s" % (src_rel, line, what, exc)) from exc
             _write(path, written, clock + n)
             got = run(budget)
-            line = node.lineno                                  # type: ignore[attr-defined]
             text = lines[line - 1].strip()
             if (got.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED)
                     and not got.killer):

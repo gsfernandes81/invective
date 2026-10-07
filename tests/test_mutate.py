@@ -596,6 +596,51 @@ def test_a_site_the_splice_cannot_hold_falls_back_to_the_whole_file_and_says_so(
         "span and were written as a reformatted file")
 
 
+#: A zero-width space in a string inside an f-string, which `repr` writes
+#: as `\\u200b`: before 3.12 a backslash is no part of an f-string's
+#: expression, and `ast.unparse` raises `ValueError` rather than write one.
+#: The outer compare's span holds the f-string; the inner's is inside it.
+UNWRITABLE = "def f(x, y):\n    return f\"{x == 'a\u200bb'}\" < y\n"
+
+
+def test_a_site_this_python_cannot_write_is_refused_and_not_a_traceback():
+    """3.12 and later write both compares inside their spans. Before, the
+    outer one's own text cannot be written, and the whole file cannot be
+    either, so each site is a `Refusal` and never the `ValueError`."""
+    tree = ast.parse(UNWRITABLE)
+    sites = mutate._sites(tree)
+    assert [k for k, _n, _w in sites] == ["CMP", "CMP"]
+    for index in range(len(sites)):
+        if sys.version_info >= (3, 12):
+            text, spliced = mutate._text_of(UNWRITABLE, tree, index)
+            assert spliced and ast.dump(ast.parse(text)) == ast.dump(
+                mutate._apply(tree, index))
+        else:
+            with pytest.raises(mutate.Refusal) as caught:
+                mutate._text_of(UNWRITABLE, tree, index)
+            assert "ast.unparse cannot write the file" in str(caught.value)
+
+
+def test_the_command_refuses_a_file_this_python_cannot_write_naming_it(
+        tree, monkeypatch, capsys):
+    """The refusal reaches the command as one, exit 2, and says the file,
+    the line and the change it could not write. From 3.12 `ast.unparse`
+    writes this file, so there it is made to fail as 3.11's does."""
+    write_tree(tree, {"pkg/gate.py": UNWRITABLE})
+    monkeypatch.setattr(mutate, "run_tests",
+                        lambda *a, **k: mutate.Verdict(True, 0, "", ""))
+    if sys.version_info >= (3, 12):
+        def unwritable(node):
+            raise ValueError("Unable to avoid backslash in f-string "
+                             "expression part")
+        monkeypatch.setattr(ast, "unparse", unwritable)
+    monkeypatch.chdir(tree)
+
+    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS]) == 2
+    err = capsys.readouterr().err.replace(os.sep, "/")
+    assert "refused: pkg/gate.py:2 Lt -> LtE cannot be written" in err
+
+
 def test_a_test_that_reads_the_module_s_own_source_survives_a_mutant_elsewhere(
         tree):
     """Issue #1's other done-when, with nothing stubbed: a test that reads the
