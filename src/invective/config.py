@@ -79,11 +79,14 @@ def project_root(start: str | None = None) -> str:
     commands refuse the run.
     """
     start = os.path.abspath(start if start is not None else os.getcwd())
-    # On Windows a drive letter or a name may be spelt in either case.
-    home = os.path.normcase(os.path.abspath(os.path.expanduser("~")))
+    # On Windows a drive letter or a name may be spelt in either case. Both
+    # sides go through realpath: the start descends from the working
+    # directory, which is physical, and `~` may reach the same directory
+    # through a link.
+    home = os.path.normcase(os.path.realpath(os.path.expanduser("~")))
     here = start
     while True:
-        if os.path.normcase(here) == home and here != start:
+        if os.path.normcase(os.path.realpath(here)) == home and here != start:
             return start
         if (any(os.path.isfile(os.path.join(here, name)) for name in _PROJECT)
                 or any(os.path.exists(os.path.join(here, name))

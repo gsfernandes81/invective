@@ -207,6 +207,27 @@ def test_the_home_directory_is_the_top_only_from_itself(tmp_path,
     assert config.project_root(os.path.join(proj, "pkg")) == proj
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
+                    reason="a symbolic link without privileges")
+def test_the_home_directory_reached_through_a_link_is_still_the_stop(
+        tmp_path, monkeypatch):
+    """`HOME` spelt through a link to the home directory, while the working
+    directory is the physical path, stops the walk at the home directory all
+    the same: the project below it is its own top and the home directory is
+    not copied."""
+    real = os.path.realpath(tmp_path / "real")
+    home = os.path.join(real, "home")
+    proj = os.path.join(home, "proj")
+    write_tree(real, {"home/pyproject.toml": "[tool.ruff]\n",
+                      "home/proj/gate.py": ""})
+    os.symlink(real, tmp_path / "linked")
+    linked_home = str(tmp_path / "linked" / "home")
+    monkeypatch.setenv("HOME", linked_home)
+    monkeypatch.setenv("USERPROFILE", linked_home)
+    assert config.project_root(proj) == proj
+    assert config.project_root(home) == home
+
+
 def test_pytest_settings_above_the_project_s_top_are_named(tmp_path):
     """The workspace's settings, which pytest reads from inside the member
     and a copy of the member does not hold; none when the member has its
