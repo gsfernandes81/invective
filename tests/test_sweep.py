@@ -98,6 +98,43 @@ def test_the_file_named_after_a_module_covers_it_without_importing_it(tree):
         _p("pkg/tests/test_idle.py")]
 
 
+def test_a_test_file_in_a_subdirectory_covers_the_module_it_imports(tree):
+    """A suite grouped into directories (`tests/browser/`) is still the suite.
+
+    The top-level files come first and each subdirectory follows in name
+    order, so the map is the same list on every run.
+    """
+    write_tree(tree, {
+        "pkg/tests/sub/test_idle_deep.py": "from pkg import idle\n",
+        "pkg/tests/sub/more/test_idle_deeper.py": "from pkg import idle\n",
+        "pkg/tests/aaa/test_idle_first.py": "from pkg import idle\n",
+        "pkg/tests/test_idle_top.py": "from pkg import idle\n",
+        # Not tests: a harness file and a helper in the subdirectory.
+        "pkg/tests/sub/conftest.py": "from pkg import idle\n",
+        "pkg/tests/sub/helpers.py": "from pkg import idle\n",
+    })
+
+    assert sweep.covering(tree, _p("pkg/idle.py"), SOURCES, TESTS_DIR) == [
+        _p(f) for f in ("pkg/tests/test_idle_top.py",
+                        "pkg/tests/aaa/test_idle_first.py",
+                        "pkg/tests/sub/test_idle_deep.py",
+                        "pkg/tests/sub/more/test_idle_deeper.py")]
+
+
+def test_the_file_named_after_a_module_covers_it_from_a_subdirectory(tree):
+    write_tree(tree, {"pkg/tests/sub/test_idle.py": "def test_nothing():\n    pass\n"})
+
+    assert sweep.covering(tree, _p("pkg/idle.py"), SOURCES, TESTS_DIR) == [
+        _p("pkg/tests/sub/test_idle.py")]
+
+
+def test_a_file_under_pycache_in_the_tests_directory_is_not_coverage(tree):
+    """Bytecode and stale copies are not what the project wrote."""
+    write_tree(tree, {"pkg/tests/__pycache__/test_cached.py": "from pkg import idle\n"})
+
+    assert sweep.covering(tree, _p("pkg/idle.py"), SOURCES, TESTS_DIR) == []
+
+
 def test_a_harness_file_that_imports_a_module_does_not_cover_it(tree):
     """`helpers.py` imports both modules and holds no tests to run."""
     assert sweep.covering(tree, _p("pkg/gate.py"), SOURCES, TESTS_DIR) == [

@@ -112,13 +112,21 @@ def covering(root, module, sources, tests_dir):
     named = "test_%s.py" % stem
     hits = []
     tests_abs = os.path.join(root, tests_dir)
-    for f in sorted(os.listdir(tests_abs)):
-        if not (f.startswith("test_") and f.endswith(".py")):
-            continue
-        with open(os.path.join(tests_abs, f), encoding="utf-8", errors="replace") as fh:
-            body = fh.read()
-        if f == named or any(re.search(pat, body, re.M) for pat in wanted):
-            hits.append(os.path.normpath(os.path.join(tests_dir, f)))
+    # The walk is sorted in place, so the top-level files come first and each
+    # subdirectory follows in name order: the same list on every run. A
+    # directory link is not followed (`followlinks` is off), as `modules()`
+    # does not follow one, and a `__pycache__` holds no test the project wrote.
+    for dirpath, dirnames, filenames in os.walk(tests_abs):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for f in sorted(filenames):
+            if not (f.startswith("test_") and f.endswith(".py")):
+                continue
+            path = os.path.join(dirpath, f)
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+            if f == named or any(re.search(pat, body, re.M) for pat in wanted):
+                hits.append(os.path.normpath(os.path.join(
+                    tests_dir, os.path.relpath(path, tests_abs))))
     return hits
 
 
