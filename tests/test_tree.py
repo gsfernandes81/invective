@@ -231,7 +231,14 @@ def test_a_live_owner_s_copy_is_never_removed(tmp_path):
     not a directory with no marker, which is one of the engine's own boxes or
     a copy whose owner has not marked it yet. The two halves are one test
     because the first passes vacuously where there is no reaper at all."""
-    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    # SIGHUP at its default, which ends the process, whatever the suite was
+    # started under (`nohup`): the probe is checked below by its owner
+    # surviving it, and an ignored signal 1 would survive as well as 0.
+    live = subprocess.Popen([sys.executable, "-c", (
+        "import signal, time\n"
+        "if hasattr(signal, 'SIGHUP'):\n"
+        "    signal.signal(signal.SIGHUP, signal.SIG_DFL)\n"
+        "time.sleep(60)")])
     gone = subprocess.Popen([sys.executable, "-c", ""])
     gone.wait()
     try:
@@ -459,6 +466,29 @@ def _dead_owners_copy(tmp_path, name):
     (dead / trees.MARKER).write_text(
         json.dumps({"pid": gone.pid, "root": "elsewhere"}), encoding="utf-8")
     return dead
+
+
+def test_a_dead_owner_s_copy_is_renamed_before_it_is_removed(tmp_path,
+                                                             monkeypatch):
+    """A reaper killed halfway through a removal may have deleted the marker
+    first; under its new name the next reaper still knows the directory for
+    a copy."""
+    _dead_owners_copy(tmp_path, "invective-dddddddd")
+    real = trees.shutil.rmtree
+    removed = []
+    # The removal is never done: what is left is the most a kill during it
+    # could leave.
+    monkeypatch.setattr(trees.shutil, "rmtree",
+                        lambda path, ignore_errors=False: removed.append(path))
+
+    trees.reap()
+
+    (left,) = removed
+    assert os.path.basename(left) == "invective-dead-dddddddd"
+    assert os.path.isfile(os.path.join(left, trees.MARKER))
+    monkeypatch.setattr(trees.shutil, "rmtree", real)
+    trees.reap()
+    assert _marked(tmp_path) == []
 
 
 def test_a_ref_begins_by_removing_the_copies_of_dead_owners(repo, tmp_path):
