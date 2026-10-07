@@ -58,7 +58,8 @@ Corrected after a second look at the overlap between 2 and 3:
 - **Survivors are the floor in every case.** Nothing in 2 or 3 helps them: a
   survivor has no killer, and 2's confirmation pass puts it back at the full
   suite. The full-suite re-run is safer than running only the tests the subset
-  skipped, which changes process and order.
+  skipped, which changes process and order. Decided, reversibly: see
+  Decisions below.
 - **4 is weaker without 2.** The whole module's text is in the key, so any edit
   to a module invalidates all of its mutants; what is left is the sweep case,
   modules that did not change. Saying which mutants a changed test affects
@@ -152,10 +153,18 @@ generated `_version.py`, in-place `.so` builds, fixture data). A file that was
 left out and was needed fails the baseline, which is a refusal and not a wrong
 score, and its message should name the option.
 
+## Decisions
+
+- **2's survivor confirmation re-runs the full selection** (owner, 2026-10-07).
+  Not only the tests the subset skipped: running those alone changes the
+  process and the test order a survivor is judged in. **This is reversible and
+  should be raised again whenever performance is the concern**, since survivors
+  are the floor of every run and this choice keeps each one at the cost of the
+  whole selection. The alternative to weigh then is the skipped tests alone,
+  against a measurement of how often the two disagree on a real project.
+
 ## Open items
 
-- Decide whether 2's survivor confirmation re-runs the full selection or only
-  the tests the subset skipped.
 - Decide where a prior report lives for 3, and how mutants are matched across
   runs (by kind, change and source line text, not line number).
 - Measure 1 first, on a real project; it is the largest and the cheapest.
