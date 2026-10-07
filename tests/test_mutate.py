@@ -1245,7 +1245,9 @@ def test_dying_by_the_signal_first_writes_out_what_was_printed(monkeypatch):
     run printing to a file or a pipe would end with that file empty; and a
     stream that cannot be flushed does not stand in for the signal."""
     raw = io.BytesIO()
-    out = io.TextIOWrapper(raw)
+    # `newline`, so the bytes are what was printed on every platform: by
+    # default a text stream on Windows writes each `\n` as `\r\n`.
+    out = io.TextIOWrapper(raw, newline="\n")
     monkeypatch.setattr(sys, "stdout", out)
     monkeypatch.setattr(sys, "stderr", _Broken())
     out.write("copy: x\n")
