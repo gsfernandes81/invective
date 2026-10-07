@@ -522,8 +522,9 @@ def _decide(tmp_path, monkeypatch, target, loaded, before=(), copy=NESTED,
     plugin = _plugin_here()
     monkeypatch.setattr(plugin, "_LOADED_BEFORE", frozenset(before))
     if library is not None:
+        # Through `normcase`, as the plugin's own `_LIBRARY` is.
         monkeypatch.setattr(plugin, "_LIBRARY", (
-            os.path.join(_file(tmp_path, library), ""),))
+            os.path.join(os.path.normcase(_file(tmp_path, library)), ""),))
     write_tree(tmp_path / "copy", copy)
     write_tree(tmp_path / "other", {**NESTED, "lib/sub/mod.py": ""})
     for name in NAMES:
