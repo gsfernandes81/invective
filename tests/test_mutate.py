@@ -407,6 +407,26 @@ def test_a_real_run_names_the_killer_and_the_line_nothing_checks(repo):
     assert survivor["source"] == "if member and age >= 65:"
 
 
+def test_every_mutant_s_entry_carries_its_diff(repo):
+    """The kill and the survivor of the real run each say what the edit was,
+    as a unified diff of the file against the mutant: one line out, one in,
+    since the mutant is the file with one span edited."""
+    report = mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS,
+                           ["RAISE", "BOOL"], None)
+
+    (kill,) = report["kills"]
+    (survivor,) = report["survivors"]
+    for entry, out, into in (
+            (kill, "        raise ValueError('under age')", "        pass"),
+            (survivor, "    if member and age >= 65:",
+             "    if member or age >= 65:")):
+        head, body = (entry["diff"].split("\n")[:2],
+                      entry["diff"].split("\n")[3:])
+        assert head == ["--- pkg/gate.py", "+++ pkg/gate.py (mutant)"]
+        assert [x for x in body if x[:1] == "-"] == ["-" + out], entry
+        assert [x for x in body if x[:1] == "+"] == ["+" + into], entry
+
+
 def test_a_run_leaves_the_project_as_it_was_and_its_copy_gone(tree, capsys):
     """Every mutant is written in the copy; none reaches the project, and the
     copy is removed at the end."""
@@ -942,7 +962,9 @@ def test_each_acceptance_is_judged_against_what_the_mutants_did(tree,
                        (5, "65 -> 66")}
     assert {a["reason"] for a in report["accepted"] if a["line"] == 5} == {
         "untestable"}
-    assert report["survivors"] == [
+    assert all("diff" in a for a in report["accepted"])
+    assert [{k: v for k, v in e.items() if k != "diff"}
+            for e in report["survivors"]] == [
         {"kind": "CONST", "line": 7, "change": "1 -> 2", "source": "x = 1  "
          "# invective: accept[equivalent: 1 -> 3] no such mutant"}]
     assert [(s["line"], s["problem"]) for s in report["stale"]] == [

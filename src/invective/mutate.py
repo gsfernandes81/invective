@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import ast
 import copy
+import difflib
 import importlib.util
 import json
 import os
@@ -588,7 +589,17 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "a kill would score a run that never ran a test.\n%s"
                     % (src_rel, line, what, got.code, got.tail))
             covering = [a for a in accepts if a.covers(line, what)]
-            mutant = {"kind": kind, "line": line, "change": what}
+            # The edit as a reader sees it, for every entry the mutant makes:
+            # kind, line and change find a site but do not show what a `NOT`
+            # or `RAISE` across several lines became, or which of two sites on
+            # one line this was. Split by `_LINE_END`, as the splice and the
+            # report's `line` are, so the `@@` numbers are the report's lines,
+            # no `\r` is left on a line, and a `\r\n` file's diff is the
+            # edited lines alone, both sides having lost their endings alike.
+            diff = "\n".join(difflib.unified_diff(
+                lines, _LINE_END.split(written)[::2], fromfile=src_rel,
+                tofile=src_rel + " (mutant)", lineterm=""))
+            mutant = {"kind": kind, "line": line, "change": what, "diff": diff}
             if not spliced:
                 # Said beside the entry and not only in the closing lines,
                 # because this is the mutant whose line numbers are not the
