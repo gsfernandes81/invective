@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 
 import pytest
 
@@ -448,6 +449,36 @@ def test_a_terminated_sweep_terminates_the_engine_it_started(repo, monkeypatch):
 
     assert engine.calls == ["terminate", "wait"]
     assert died == [signal.SIGTERM]
+
+
+def test_an_engine_that_outlasts_its_grace_is_told_again_and_then_killed(
+        repo, monkeypatch):
+    """An engine that does not end within the grace is terminated once more
+    (its handler makes that harmless when it was told already), given the
+    grace again, and only then killed outright and waited for."""
+    engine = _Engine()
+    waits = []
+
+    def wait(timeout=None):
+        engine.calls.append("wait")
+        waits.append(timeout)
+        if len(waits) <= 2:
+            raise subprocess.TimeoutExpired("engine", timeout)
+
+    def communicate(timeout=None):
+        raise mutate._Terminated(signal.SIGTERM)
+
+    engine.wait, engine.communicate = wait, communicate
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
+    monkeypatch.setattr(sweep, "_exit_by", lambda exc: None)
+    monkeypatch.setattr(sweep, "_GRACE", 0.01)
+
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                "--modules", _p("pkg/gate.py")])
+
+    assert engine.calls == ["terminate", "wait", "terminate", "wait",
+                            "kill", "wait"]
+    assert waits == [0.01, 0.01, None]
 
 
 @pytest.mark.parametrize("raised, told", [
