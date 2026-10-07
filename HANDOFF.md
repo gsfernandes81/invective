@@ -98,6 +98,29 @@ fails in the silent direction invective exists to refuse.
 - Coverage selection without the confirmation re-run of survivors.
 - A cache keyed on the target and the tests only.
 
+### `PYTHONDONTWRITEBYTECODE` in mutant runs: measured, left out
+
+Cosmic Ray runs its tests with `PYTHONDONTWRITEBYTECODE=1`, and issue #1 asked
+whether invective should too, as a second guard behind the mtime stamping
+against a mutant inheriting the previous mutant's `.pyc`. The owner decided
+against it (2026-10-07) on these numbers, taken on a copy of or3 (4 cores,
+nothing else running; the variable was the only difference):
+
+| or3 benchmark | mutants | off, mean | on, mean | cost |
+|---|---|---|---|---|
+| `run` on `cfg.py`, `--only RAISE,CMP,NOT --limit 20`, 3 runs each | 18 | 47.5 s | 53.4 s | +12% |
+| `run` on `tools/farpy.py`, all kinds, 3 runs each | 19 | 19.1 s | 20.3 s | +6% |
+| `sweep` of `cfg.py`, `tools/farpy.py`, `logins.py`, 2 runs each | 22 | 252.6 s | 295.0 s | +17% |
+
+Verdicts and survivors were identical on and off in every run (`cfg.py` 7/18,
+`farpy.py` 9/19). Only the sweep separates clearly; the two `run` rows are
+within noise. The cost is every module a run imports other than the mutant,
+recompiled on every run, so it grows with how much a test imports, and is
+never negative. The stamping already holds on the file where or3's old engine
+went 9/11/9 of 19, and the copy carries no `__pycache__`, so a second guard
+that costs 6-17% of every run is not worth it. Worth revisiting only if a
+filesystem whose mtimes the stamping cannot rely on turns up.
+
 ## Moving from git worktrees to copies
 
 Landed on `main` (`tree.py`). No earlier verdict flips. What the move means
