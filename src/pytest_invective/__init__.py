@@ -9,7 +9,9 @@ It also works from inside each of those runs. When `INVECTIVE_SELECTION`
 names a file of node ids, one a line, the run collects their files and keeps
 those tests and no others. When `INVECTIVE_VERDICT` names a file, the first
 test to fail, and any selected test not found, are written there as the
-session ends. That is how the engine learns which test killed a mutant.
+session ends. That is how the engine learns which test killed a mutant. When
+`INVECTIVE_TARGET` names the mutated module, the verdict also says whether
+the tests loaded that module from somewhere other than the copy they ran in.
 
 **Nothing from `invective` is imported unless `--mutate` is given.** pytest
 before 8.4 loads plugins before a repository's own `pythonpath` setting takes
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -30,6 +33,22 @@ import pytest
 VERDICT = "INVECTIVE_VERDICT"
 #: The environment variable that names the file of node ids a run keeps.
 SELECTION = "INVECTIVE_SELECTION"
+#: The environment variable that names the mutated module, as a path from
+#: the top of the copy with `/` separators.
+TARGET = "INVECTIVE_TARGET"
+
+#: The modules the interpreter and pytest had loaded as this plugin was
+#: imported. The engine asks for the plugin with `-p`, which pytest imports
+#: before its entry-point plugins, `PYTEST_PLUGINS` and every `conftest.py`;
+#: a module in here was loaded by the harness and not by the tests, so it is
+#: not where the tests got the target from. This matters because a pytest
+#: process holds about a hundred bare-name modules of the standard library
+#: (`platform`, `types`, `inspect`, `string`, ...), and a loose target of
+#: the project named like one of them would otherwise be refused naming the
+#: library's file. A plugin given in `PYTEST_ADDOPTS` or the project's own
+#: `addopts` is imported before this one, so whatever it imported is in
+#: here too: `_loaded_elsewhere` says how far that exemption goes.
+_LOADED_BEFORE = frozenset(sys.modules)
 
 _REPORTS = pytest.StashKey[list]()
 _FAILURES = pytest.StashKey[list]()
@@ -92,8 +111,10 @@ def pytest_configure(config):
     # Popped, not read: a run of the suite can start pytest again, and that
     # run must not write over this one's verdict.
     path = os.environ.pop(VERDICT, None)
+    target = os.environ.pop(TARGET, None)
     if path:
-        config.pluginmanager.register(_Verdict(config, path), "invective-verdict")
+        config.pluginmanager.register(_Verdict(config, path, target),
+                                      "invective-verdict")
 
     if not config.getoption("mutate"):
         return
@@ -122,10 +143,13 @@ def _only(config):
 
 
 class _Verdict:
-    """The first test to fail in this run, written where the engine asked."""
+    """The first test to fail in this run, written where the engine asked,
+    with the file the tests loaded the target from when it is not the copy's.
+    """
 
-    def __init__(self, config, path):
+    def __init__(self, config, path, target=None):
         self.config, self.path, self.killer = config, path, ""
+        self.target = target
 
     def pytest_collectreport(self, report):
         self._note(report)
@@ -144,9 +168,113 @@ class _Verdict:
             self.killer = path.replace(os.sep, "/") + sep + rest
 
     def pytest_sessionfinish(self):
+        # At the session's end and from inside the run, not from `sys.path`
+        # up front: what matters is which file the tests actually loaded,
+        # after every conftest, `.pth` line, `pythonpath` setting and import
+        # hook had its say, and only the process that ran them knows.
+        elsewhere = ""
+        if self.target:
+            elsewhere = _loaded_elsewhere(str(self.config.invocation_params.dir),
+                                          self.target)
         with open(self.path, "w", encoding="utf-8") as fh:
             json.dump({"killer": self.killer,
-                       "missing": self.config.stash.get(_MISSING, [])}, fh)
+                       "missing": self.config.stash.get(_MISSING, []),
+                       "elsewhere": elsewhere}, fh)
+
+
+def _loaded_elsewhere(copy, target):
+    """The file the tests loaded *target* from when it is outside *copy*, the
+    directory every run starts in; `""` when they loaded the copy's, or
+    nothing under its name at all.
+
+    *target* is a path from the top of the copy with `/` separators. The
+    name the tests import it by is read from the copy as `invective.sweep`
+    does (this module must not import `invective`, see its docstring): the
+    directories above it that hold an `__init__.py` are its package, so
+    `src/pkg/sub/mod.py` is `pkg.sub.mod` with the anchored path
+    `pkg/sub/mod.py`, and `pkg/__init__.py` is `pkg`. A loose file, with no
+    `__init__.py` beside it, is its bare stem and has no anchored path. A
+    namespace package has no `__init__.py` to be known by, so a target in
+    one is a loose file here and is not checked.
+
+    **The name decides whenever it can.** `sys.modules` is keyed by import
+    name, so the module under the target's name is one lookup: under the
+    copy, nothing is wrong, and that holds when it is a different file of
+    the copy than the target (the tests import `src/pkg` while the target is
+    a copy of the package elsewhere in the tree), which is a decision: that
+    is the run as it was before this check. Any other file is the one named.
+    An editable install's `.pth` line, or a `sys.path` entry, puts the
+    project's own `src` ahead of the copy's exactly this way.
+
+    **A name in `_LOADED_BEFORE` was loaded by the harness, not the tests,
+    and is let be** -- unless the target has an anchored path and the module
+    lies at it outside the copy, `.../pkg/sub/mod.py`, which is the target's
+    own layout somewhere else: a plugin in the project's `addopts` that
+    imports the target is imported before this module, and what it loaded is
+    what the tests got. A loose target keeps the whole exemption, since its
+    bare stem is what the standard library's modules are named by.
+
+    **Under a suffix of the name, only when nothing is under the name.** A
+    `sys.path` entry inside the package (`src/pkg` on the path, so the tests
+    say `import gate`) registers the target under a shorter name. Each proper
+    dotted suffix (`sub.mod`, then `mod`) is looked up, and a module there
+    is the target only when it lies outside the copy at the anchored path.
+    A lookup and not a scan of every module's file for that tail: pytest's
+    own packages give every process `_pytest/config/__init__.py`,
+    `_pytest/main.py` and two hundred more tails a project's module can be
+    named like, and a scan named them for a target the tests never imported.
+    """
+    copy = os.path.normcase(os.path.realpath(copy))
+    inside = os.path.join(copy, "")
+    parts = target.split("/")
+    home = os.path.join(copy, *parts[:-1])
+    package = []
+    # Never past the copy's top: the run starts there, so that is the
+    # directory on `sys.path`, and nothing above it is.
+    while home != copy and os.path.isfile(os.path.join(home, "__init__.py")):
+        package.insert(0, os.path.basename(home))
+        home = os.path.dirname(home)
+    stem, _ext = os.path.splitext(parts[-1])
+    names = package if stem == "__init__" else package + [stem]
+    name = ".".join(names)
+    anchored = (os.path.normcase(os.path.join(*package, parts[-1]))
+                if package else "")
+
+    def found(name):
+        """The resolved file of the module loaded under *name*, or None."""
+        module = sys.modules.get(name)
+        # This plugin, by identity: pytest loads it from wherever invective
+        # is installed, which in a run of invective on its own code is the
+        # checkout, and its mutants are seen by the tests that start pytest
+        # afresh. By `__name__` and not a list, because it is the one module
+        # invective itself asks pytest to load before any conftest can
+        # redirect it; a project's own plugin that is the target is checked
+        # like any other module, and refused when the tests cannot see it.
+        if module is None or module is sys.modules.get(__name__):
+            return None
+        # A `.pyc`, a frozen or built-in module and an extension are not a
+        # file the mutant could be in. Joined to the copy because a relative
+        # `sys.path` entry gives a relative `__file__`, relative to the
+        # directory the run started in.
+        file = getattr(module, "__file__", None)
+        if not isinstance(file, str) or not file.endswith(".py"):
+            return None
+        return os.path.normcase(os.path.realpath(os.path.join(copy, file)))
+
+    file = found(name)
+    if file is not None and (name not in _LOADED_BEFORE
+                             or (anchored and file.endswith(os.sep + anchored))):
+        return "" if file.startswith(inside) else file
+    if anchored:
+        for n in range(1, len(names)):
+            suffix = ".".join(names[n:])
+            if suffix in _LOADED_BEFORE:
+                continue
+            file = found(suffix)
+            if (file is not None and not file.startswith(inside)
+                    and file.endswith(os.sep + anchored)):
+                return file
+    return ""
 
 
 # First: a plugin registered after this one would otherwise be asked first.

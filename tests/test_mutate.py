@@ -31,6 +31,11 @@ def refuse(n, flag, other):
 GATE = os.path.join("pkg", "gate.py")
 GATE_TESTS = ["pkg/tests/test_gate.py"]
 
+#: This checkout's own `src`, for a run that is given a `PYTHONPATH`: the
+#: plugin each run loads has to keep coming from here.
+SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                   "src")
+
 
 def _kinds(source):
     return [k for k, _n, _w in mutate._sites(ast.parse(source))]
@@ -324,6 +329,13 @@ def test_the_mutant_run_asks_for_the_failure_lines_and_its_own_plugin(
     assert seen["env"]["INVECTIVE_VERDICT"].endswith("verdict.json")
     # The stub wrote no verdict, so the run names no killer.
     assert got.killer == ""
+
+    # A forwarded plugin comes after invective's own: the plugin notes the
+    # modules loaded before it, and one a forwarded plugin imports from
+    # outside the copy must not be among them, or it is never named.
+    mutate.run_tests("/nowhere", ["t.py"], 1, None, ("-p", "myplugin"))
+    argv = seen["argv"]
+    assert argv.index("pytest_invective") < argv.index("myplugin"), argv
 
 
 def test_the_killer_is_the_whole_id_whatever_pytest_prints_around_it(
@@ -641,6 +653,155 @@ def test_a_module_outside_the_project_is_refused(tree, tmp_path,
     with pytest.raises(mutate.Refusal) as caught:
         mutate.mutate(tree, str(outside), GATE_TESTS, None, None)
     assert "outside the project" in str(caught.value)
+
+
+#: A project laid out as the ones this check is for: a `src/` the top of the
+#: copy does not reach, so only something put on `sys.path` can import the
+#: package, and tests in a directory with no `__init__.py`, which pytest puts
+#: on the path instead of `src`.
+SRC_LAYOUT = {
+    "src/pkg/__init__.py": "",
+    "src/pkg/gate.py": FILES["pkg/gate.py"],
+    "tests/conftest.py": "",
+    "tests/test_gate.py": FILES["pkg/tests/test_gate.py"],
+}
+
+#: The copy's `src` first, as or3's conftest does it: inside the copy, the
+#: path from the conftest's own file names the copy's `src`.
+FIXED_CONFTEST = ("import os\n"
+                  "import sys\n"
+                  "sys.path.insert(0, os.path.join(os.path.dirname(__file__),"
+                  " '..', 'src'))\n")
+
+
+def _with_on_path(monkeypatch, *entries):
+    """`PYTHONPATH` for the runs: this checkout's `src`, so that each run
+    loads the plugin from here, and *entries*."""
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([SRC, *entries]))
+
+
+@pytest.mark.parametrize("fixed", [False, True])
+def test_a_target_the_tests_import_from_outside_the_copy_is_refused(
+        tmp_path, monkeypatch, fixed):
+    """A project installed editable has every mutant survive, silently: the
+    `.pth` line puts the project's own `src` on `sys.path`, the tests import
+    the package from there, and the mutant written in the copy is never
+    loaded. A `PYTHONPATH` entry stands in for the `.pth` line here, since
+    each lands on the same `sys.path` entry behind the tests directory,
+    which is the whole of what the hole needs.
+
+    The refusal names the file the tests loaded and the copy they should
+    have loaded from. With or3's fix in the conftest, the copy's `src`
+    first, the run goes on and the `raise` is killed by the test of it.
+    """
+    project = os.path.realpath(tmp_path / "project")
+    write_tree(project, SRC_LAYOUT)
+    if fixed:
+        write_tree(project, {"tests/conftest.py": FIXED_CONFTEST})
+    _with_on_path(monkeypatch, os.path.join(project, "src"))
+    target = os.path.join(project, "src", "pkg", "gate.py")
+
+    if not fixed:
+        with pytest.raises(mutate.Refusal) as caught:
+            mutate.mutate(project, target, ["tests/test_gate.py"], ["RAISE"],
+                          None)
+        assert "was imported from %s, not from the copy at " % target in str(
+            caught.value)
+        assert "invective-" in str(caught.value)
+        return
+    report = mutate.mutate(project, target, ["tests/test_gate.py"], ["RAISE"],
+                           None)
+    assert report["killed"] == 1
+    assert [k["killer"] for k in report["kills"]] == [
+        "tests/test_gate.py::test_a_minor_is_refused"]
+
+
+def test_a_target_imported_under_another_name_from_outside_the_copy_is_refused(
+        tmp_path, monkeypatch):
+    """A `sys.path` entry inside the package: the tests say `import gate`,
+    and nothing is loaded under `pkg.gate`, the name the copy gives the
+    target. It is still the project's file, found under the shorter name
+    at the target's own layout, `pkg/gate.py`."""
+    project = os.path.realpath(tmp_path / "project")
+    write_tree(project, SRC_LAYOUT)
+    write_tree(project, {"tests/test_gate.py":
+                         FILES["pkg/tests/test_gate.py"].replace(
+                             "from pkg import gate", "import gate")})
+    _with_on_path(monkeypatch, os.path.join(project, "src", "pkg"))
+    target = os.path.join(project, "src", "pkg", "gate.py")
+
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(project, target, ["tests/test_gate.py"], ["RAISE"], None)
+    assert "was imported from %s, not from the copy" % target in str(
+        caught.value)
+
+
+def test_a_loose_target_named_like_a_module_pytest_already_holds_is_not_refused(
+        tmp_path, monkeypatch):
+    """`platform` is in every pytest process's `sys.modules`, from the
+    standard library, under exactly the name the copy gives this file, and
+    the tests never load it: they run the file in a child interpreter. The
+    standard library's file is not the one the tests loaded the target
+    from, and a check that named it would refuse a project for the name of
+    one of its scripts."""
+    project = os.path.realpath(tmp_path / "project")
+    write_tree(project, {
+        "tools/platform.py": ("import sys\n"
+                              "\n"
+                              "def check(n):\n"
+                              "    if n < 0:\n"
+                              "        raise ValueError('negative')\n"
+                              "    return n\n"
+                              "\n"
+                              "if __name__ == '__main__':\n"
+                              "    print(check(int(sys.argv[1])))\n"),
+        "tests/test_platform.py": (
+            "import subprocess\n"
+            "import sys\n"
+            "\n"
+            "def test_the_count_comes_back():\n"
+            "    done = subprocess.run([sys.executable, 'tools/platform.py',"
+            " '1'], check=True, capture_output=True, text=True)\n"
+            "    assert done.stdout == '1\\n'\n"),
+    })
+    _with_on_path(monkeypatch)
+
+    report = mutate.mutate(project, os.path.join(project, "tools", "platform.py"),
+                           ["tests/test_platform.py"], ["RAISE"], None)
+
+    # The child interpreter does see the mutant; nothing calls `check(-1)`.
+    assert (report["mutants"], report["killed"]) == (1, 0)
+
+
+def test_a_package_named_like_one_of_pytest_s_own_is_not_refused_when_its_tests_never_import_it(
+        tmp_path, monkeypatch):
+    """Every pytest process holds `_pytest.config`, loaded from
+    `_pytest/config/__init__.py`, a file that ends with this target's own
+    path. The tests drive the package through a child interpreter only, so
+    nothing is loaded under `config`, and nothing is the file to name."""
+    project = os.path.realpath(tmp_path / "project")
+    write_tree(project, {
+        "config/__init__.py": ("def load(x):\n"
+                               "    if x < 0:\n"
+                               "        raise ValueError('negative')\n"
+                               "    return x\n"),
+        "tests/test_config.py": (
+            "import os\n"
+            "import subprocess\n"
+            "import sys\n"
+            "\n"
+            "def test_a_value_is_loaded():\n"
+            "    done = subprocess.run([sys.executable, '-c',"
+            " 'import config; print(config.load(1))'], cwd=os.getcwd(),"
+            " check=True, capture_output=True, text=True)\n"
+            "    assert done.stdout == '1\\n'\n"),
+    })
+    _with_on_path(monkeypatch)
+
+    report = mutate.mutate(project, os.path.join(project, "config", "__init__.py"),
+                           ["tests/test_config.py"], ["RAISE"], None)
+
+    assert (report["mutants"], report["killed"]) == (1, 0)
 
 
 def test_a_ref_in_a_repository_with_no_commit_is_refused_with_git_s_reason(

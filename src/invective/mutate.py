@@ -92,6 +92,10 @@ class Verdict(NamedTuple):
     killer: str
     #: The node ids of the selection the run could not find.
     missing: tuple[str, ...] = ()
+    #: The file the tests loaded the target from when it was not the copy's,
+    #: `""` otherwise. A mutant is written in the copy, so a run that says
+    #: this is a run no mutant can reach, and its verdict counts for nothing.
+    elsewhere: str = ""
 
 
 #: pytest can colour its output even when stdout is a pipe, and the tail is
@@ -385,11 +389,17 @@ def _stop(proc: subprocess.Popen) -> None:
 
 
 def run_tests(where: str, tests: list[str], timeout: float,
-              selection: str | None = None, options: tuple[str, ...] = ()
-              ) -> Verdict:
+              selection: str | None = None, options: tuple[str, ...] = (),
+              target: str = "") -> Verdict:
     """The selection, in *where*: *tests* as pytest arguments, and when
     *selection* names a file of node ids, one a line, those tests and no
-    others. *options* come before invective's own.
+    others. *options* come after `-p pytest_invective` and before the rest
+    of invective's own: the plugin notes which modules were loaded before
+    it, and a forwarded `-p` plugin that imports the target has to come
+    after that note for the file it loaded to be the plugin's to name.
+    *target*, the mutated module's path from the top of *where*, is what the
+    plugin checks the tests loaded from the copy; none, and it checks
+    nothing.
 
     **No `-q` here, and that is load-bearing.** The run's working directory is
     the copy, so it reads the project's own pytest
@@ -409,12 +419,15 @@ def run_tests(where: str, tests: list[str], timeout: float,
         env = {**os.environ, pytest_invective.VERDICT: verdict}
         if selection is not None:
             env[pytest_invective.SELECTION] = selection
+        if target:
+            env[pytest_invective.TARGET] = target
         # `-p no:randomly` keeps the order, and so `-x`'s first failure, the
         # same from run to run; `-p no:` of a plugin that is not installed is
-        # a no-op.
+        # a no-op. The `no:` exclusions and `-n 0` are order-free: pytest
+        # applies a `no:` before it imports anything.
         proc = subprocess.Popen(
-            [sys.executable, "-m", "pytest", *options, "-x", "-rf",
-             "-p", "no:randomly", *_NO_WORKERS, "-p", pytest_invective.__name__,
+            [sys.executable, "-m", "pytest", "-p", pytest_invective.__name__,
+             *options, "-x", "-rf", "-p", "no:randomly", *_NO_WORKERS,
              "--no-header", *tests],
             cwd=where, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env, **_OWN_GROUP)
@@ -436,15 +449,17 @@ def run_tests(where: str, tests: list[str], timeout: float,
             with open(verdict, encoding="utf-8") as fh:
                 said = json.load(fh)
             killer, missing = said["killer"], tuple(said["missing"])
+            # `.get`: a verdict an older plugin wrote has no such field.
+            elsewhere = said.get("elsewhere", "")
         except (OSError, ValueError, KeyError):
             # A run that ended before its session did -- pytest could not
             # start, or a mutant broke the plugin itself -- names no test.
-            killer, missing = "", ()
+            killer, missing, elsewhere = "", (), ""
     # Both streams: pytest says why it could not start on stderr.
     out = _ANSI.sub("", stdout + stderr)
     # invective: accept[equivalent: 400 -> 401] any length that holds pytest's last words serves
     return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer,
-                   missing)
+                   missing, elsewhere)
 
 
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
@@ -515,7 +530,27 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                           % (src_rel, ",".join(only or sorted(OPERATORS))))
 
         def run(timeout):
-            return run_tests(where, tests, timeout, listed, options)
+            got = run_tests(where, tests, timeout, listed, options,
+                            src_rel.replace(os.sep, "/"))
+            if got.elsewhere:
+                # **The tests did not load the copy's file, so no mutant
+                # written there can reach them**, and every one would
+                # survive, silently. An editable install's `.pth` line, or a
+                # `sys.path` entry, puts the project's own `src` on the path;
+                # the copy's is there only when something puts it there,
+                # since `python -m pytest` adds the directory it started in,
+                # the copy's top, and that does not reach a `src/`. The
+                # baseline is where this fires; every run is checked because
+                # the check is one field and this is the one place it is read.
+                raise Refusal(
+                    "%s was imported from %s, not from the copy at %s, so no "
+                    "mutant of it can reach the tests. An editable install, "
+                    "or a sys.path entry, points the tests at the project "
+                    "itself; a conftest.py that puts the copy's own "
+                    "directory for it first on sys.path (from its own "
+                    "__file__) makes them import the copy."
+                    % (src_rel, got.elsewhere, where))
+            return got
 
         started = time.time()
         first = run(BASELINE_TIMEOUT)

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import commit, write_tree
+from conftest import FILES, commit, write_tree
 
 #: This checkout's own `src`, ahead of any installed copy, so that the pytest
 #: started here loads the plugin under test.
@@ -257,7 +257,83 @@ def test_the_verdict_is_the_first_test_to_fail(tmp_path):
 
     assert done.returncode == 1, done.stdout + done.stderr
     assert json.loads(verdict.read_text(encoding="utf-8")) == {
-        "killer": "test_two.py::test_first", "missing": []}
+        "killer": "test_two.py::test_first", "missing": [], "elsewhere": ""}
+
+
+#: A package the tests import, as a project lays one out under `src/`.
+PKG = {"src/pkg/__init__.py": "",
+       "src/pkg/gate.py": FILES["pkg/gate.py"]}
+
+#: Passes, and imports nothing of the project's.
+IDLE_TEST = {"tests/test_idle.py": "def test_idle():\n    pass\n"}
+
+
+def _elsewhere(tmp_path, copy, target, *on_path, extra=()):
+    """The verdict's `elsewhere` for a run in `copy/` with *target* given as
+    the mutated module, *on_path* joined to this checkout's `src` as the
+    run's `PYTHONPATH`, the plugin asked for as the engine asks for it."""
+    where = os.path.realpath(tmp_path / "copy")
+    write_tree(where, copy)
+    verdict = tmp_path / "verdict.json"
+    done = pytest_in(
+        where, "-n", "0", "-p", "pytest_invective", *extra, "tests",
+        env={"PYTHONPATH": os.pathsep.join([SRC, *on_path]),
+             "INVECTIVE_VERDICT": str(verdict), "INVECTIVE_TARGET": target})
+    assert done.returncode == 0, done.stdout + done.stderr
+    return json.loads(verdict.read_text(encoding="utf-8"))["elsewhere"]
+
+
+def _file(tmp_path, rel):
+    return os.path.normcase(os.path.realpath(tmp_path / _p(rel)))
+
+
+def test_the_verdict_names_the_target_when_it_was_loaded_elsewhere(tmp_path):
+    """Two trees with the package, and the other one's `src` on the path:
+    the tests import `pkg.gate` from there, and the verdict says so, naming
+    the file. The copy's `__init__.py` is what gives the target that name;
+    without it the target would be a loose `gate`."""
+    write_tree(tmp_path / "other", PKG)
+
+    assert _elsewhere(
+        tmp_path, {**PKG, "tests/test_gate.py": FILES["pkg/tests/test_gate.py"]},
+        "src/pkg/gate.py", str(tmp_path / "other" / "src"),
+    ) == _file(tmp_path, "other/src/pkg/gate.py")
+
+
+def test_the_plugin_itself_is_never_the_module_loaded_elsewhere(tmp_path):
+    """pytest loads the plugin from wherever invective is installed, before
+    any conftest could redirect it, and in a run of invective on its own
+    code that is the checkout: its mutants are seen by the tests that start
+    pytest afresh, and a check that named it would refuse that run."""
+    assert _elsewhere(
+        tmp_path, {"src/pytest_invective/__init__.py": "", **IDLE_TEST},
+        "src/pytest_invective/__init__.py") == ""
+
+
+def test_a_module_loaded_before_the_plugin_is_never_the_one_named(tmp_path):
+    """`platform` is in `sys.modules` before the plugin is imported, from
+    the standard library, under exactly the name the copy gives this loose
+    file, and the tests never load it. The library's file is not where the
+    tests got the target from."""
+    assert _elsewhere(
+        tmp_path, {"tools/platform.py": "def check(n):\n    return n\n",
+                   **IDLE_TEST},
+        "tools/platform.py") == ""
+
+
+def test_a_target_a_plugin_in_addopts_loaded_from_elsewhere_is_still_named(
+        tmp_path):
+    """A plugin in the project's `addopts` is imported before invective's,
+    so what it loaded is among the modules loaded before the plugin, and
+    would be let be as the library's are. Loaded at the target's own layout
+    outside the copy, `pkg/gate.py`, it is the file the tests got."""
+    write_tree(tmp_path / "other", {**PKG, "src/early.py": "import pkg.gate\n"})
+
+    assert _elsewhere(
+        tmp_path, {**PKG, **IDLE_TEST,
+                   "pytest.ini": "[pytest]\naddopts = -p early\n"},
+        "src/pkg/gate.py", str(tmp_path / "other" / "src"),
+    ) == _file(tmp_path, "other/src/pkg/gate.py")
 
 
 def test_a_run_that_breaks_the_project_s_rules_fails_as_a_test_would(repo):
