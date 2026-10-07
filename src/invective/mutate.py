@@ -492,9 +492,15 @@ def stopping_on_sigterm():
     removed would raise inside that removal and cut it short, so later ones
     are ignored until the previous handler is back. SIGKILL remains the way
     to stop a cleanup that hangs, and the copy's marker covers what that
-    leaves. Windows never delivers SIGTERM (`TerminateProcess` ends a process
-    outright), so there the handler is installed and never runs.
+    leaves. A SIGTERM ignored on entry stays ignored, and no handler is
+    installed. Windows never delivers SIGTERM (`TerminateProcess` ends a
+    process outright), so there the handler is installed and never runs.
     """
+    # A signal ignored on entry stays ignored, as the shell's `trap '' TERM`
+    # asked; the marker covers the copy of a run then killed outright.
+    if signal.getsignal(signal.SIGTERM) is signal.SIG_IGN:
+        yield
+        return
     fired = False
 
     def handler(signum, frame):

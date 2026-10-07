@@ -1155,6 +1155,21 @@ def test_a_second_sigterm_while_unwinding_does_not_cut_the_cleanup_short():
     assert signal.getsignal(signal.SIGTERM) == before
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows never delivers SIGTERM")
+def test_a_sigterm_ignored_on_entry_stays_ignored():
+    """A wrapper that ignores SIGTERM (`trap '' TERM`) asked for the run to
+    ignore it too, as every other program under it does."""
+    old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        with mutate.stopping_on_sigterm():
+            assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.05)
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+
 def test_a_previous_handler_python_did_not_install_is_left_alone(monkeypatch):
     """`signal.signal` returns `None` for a handler set from C, and refuses
     `None` as a handler, so putting it back would raise in place of the
