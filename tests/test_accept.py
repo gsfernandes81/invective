@@ -136,17 +136,36 @@ def test_the_project_s_top_is_the_nearest_pyproject_above_the_working_directory(
     assert config.project_root(deep) == os.path.join(top, "a", "b")
 
 
+@pytest.mark.parametrize("name", [".git", ".hg", ".svn"])
+@pytest.mark.parametrize("as_file", [True, False])
 def test_a_repository_s_directory_is_the_top_when_no_pyproject_comes_first(
-        tmp_path):
+        tmp_path, name, as_file):
     """A `pyproject.toml` of a tool's settings in the home directory must not
     make the home directory the project. `.git` is a file in a worktree."""
     home = os.path.realpath(tmp_path)
     proj = os.path.join(home, "proj")
-    write_tree(home, {"pyproject.toml": "", "proj/.git": "gitdir: elsewhere\n",
-                      "proj/pkg/__init__.py": ""})
+    write_tree(home, {"pyproject.toml": "", "proj/pkg/__init__.py": ""})
+    if as_file:
+        write_tree(home, {"proj/" + name: "gitdir: elsewhere\n"})
+    else:
+        os.mkdir(os.path.join(proj, name))
     assert config.project_root(os.path.join(proj, "pkg")) == proj
 
     write_tree(home, {"proj/pyproject.toml": ""})
+    assert config.project_root(os.path.join(proj, "pkg")) == proj
+
+
+@pytest.mark.parametrize("marker", ["pytest.toml", ".pytest.toml",
+                                    "pytest.ini", ".pytest.ini", "tox.ini",
+                                    "setup.cfg", "setup.py"])
+def test_a_file_pytest_takes_for_a_project_s_marks_its_top(tmp_path, marker):
+    """A project with no `pyproject.toml` and no repository, under a home
+    directory whose `pyproject.toml` holds a tool's settings, is its own top:
+    the home directory is not copied, and its secrets with it."""
+    home = os.path.realpath(tmp_path)
+    proj = os.path.join(home, "proj")
+    write_tree(home, {"pyproject.toml": "", "proj/" + marker: "",
+                      "proj/pkg/__init__.py": ""})
     assert config.project_root(os.path.join(proj, "pkg")) == proj
 
 

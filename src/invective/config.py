@@ -9,8 +9,8 @@
 An unknown key is a refusal, so that a misspelt one is not read as absent.
 
 The project they belong to is found here too: `project_root` walks up from
-where a command is started to the directory that `pyproject.toml` is in, so
-a command works from anywhere inside the project.
+where a command is started to the nearest directory pytest would take for a
+project's own, so a command works from anywhere inside the project.
 """
 
 from __future__ import annotations
@@ -37,24 +37,33 @@ _SAID = {bool: "true or false", int: "a whole number", list: "a list"}
 #: `.git` is a file in a worktree or a submodule, and no program is run.
 _REPOSITORY = (".git", ".hg", ".svn")
 
+#: What marks a project's own directory: the files pytest looks for when it
+#: settles on a rootdir (its settings files, and `setup.py` when it finds
+#: none), and `pyproject.toml`. `pytest.toml` and `.pytest.toml` are read by
+#: pytest 9 and later.
+_PROJECT = ("pyproject.toml", "pytest.toml", ".pytest.toml", "pytest.ini",
+            ".pytest.ini", "tox.ini", "setup.cfg", "setup.py")
+
 
 def project_root(start: str | None = None) -> str:
     """The top of the project *start* (by default the working directory) is
-    in: the nearest directory at or above it that holds a `pyproject.toml`,
-    or that is a repository's own directory when that comes first; with
-    neither, *start* itself.
+    in: the nearest directory at or above it that holds one of `_PROJECT`,
+    or that is a repository's own directory; with neither, *start* itself.
 
-    **The nearest marker wins, and a repository's directory ends the walk.**
-    The nearest is what nested projects need: a fixture project inside a
-    repository is the top only from inside it. Without the stop, a
-    `pyproject.toml` that is only a tool's settings in the home directory
-    would make the whole home directory the project, copied into the
-    temporary directory on every run, with nothing saying so.
+    **The nearest marker wins.** The nearest is what nested projects need: a
+    fixture project inside a repository is the top only from inside it. And
+    every file pytest would recognise is a marker, not `pyproject.toml`
+    alone: a project with only a `pytest.ini` under a home directory whose
+    `pyproject.toml` holds a tool's settings would otherwise make the whole
+    home directory the project, copied into the temporary directory on every
+    run, its secrets with it, with nothing saying so. A repository's
+    directory ends the walk for the same reason, for a project that has
+    neither.
     """
     start = os.path.abspath(start if start is not None else os.getcwd())
     here = start
     while True:
-        if (os.path.isfile(os.path.join(here, "pyproject.toml"))
+        if (any(os.path.isfile(os.path.join(here, name)) for name in _PROJECT)
                 or any(os.path.exists(os.path.join(here, name))
                        for name in _REPOSITORY)):
             return here
