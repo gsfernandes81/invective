@@ -240,6 +240,46 @@ def test_a_t_string_site_the_splice_cannot_hold_is_written_mutated(
             if isinstance(n, ast.Interpolation)] == [mutated, "x+1"]
 
 
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
+def test_a_nested_t_string_site_written_whole_is_the_mutant():
+    """An interpolation inside another's expression: the outer one's text is
+    rebuilt from the inner one's, which must be the edited text already, or
+    the file unparsed is the original program and survives every suite."""
+    source = "def f(a, b):\n    return t\"{t'{a<b = }'}\"\n"
+    tree = ast.parse(source)
+    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree))
+                if k == "CMP"]
+    text, spliced = mutate._text_of(source, tree, index)
+    assert not spliced
+    assert [n.str for n in ast.walk(ast.parse(text))
+            if isinstance(n, ast.Interpolation)] == ["t'a<b = {a <= b!r}'",
+                                                     "a <= b"]
+    assert ast.dump(ast.parse(text)) != ast.dump(tree)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
+def test_a_whole_file_that_is_not_the_mutant_is_refused(monkeypatch):
+    """The file unparsed is checked as the splice is: a mutated tree whose
+    interpolation still carries the original text unparses to the original
+    program, and that is refused rather than handed to the tests."""
+    source = 'def f(a, b):\n    return t"{a<b = }"\n'
+    tree = ast.parse(source)
+    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree))
+                if k == "CMP"]
+    apply = mutate._apply
+
+    def stale(tree, index):
+        clone = apply(tree, index)
+        for node in ast.walk(clone):
+            if isinstance(node, ast.Interpolation):
+                node.str = "a<b"
+        return clone
+
+    monkeypatch.setattr(mutate, "_apply", stale)
+    with pytest.raises(mutate.Refusal, match="unparsed is not this mutant"):
+        mutate._text_of(source, tree, index)
+
+
 def test_the_raise_operator_really_removes_the_refusal():
     """The operator class that catches a deleted refusal, driven end to end."""
     tree = ast.parse(SAMPLE)

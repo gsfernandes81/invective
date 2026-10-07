@@ -204,10 +204,13 @@ def _apply(tree: ast.AST, index: int) -> ast.AST:
     # original expression, so it is brought in step for every interpolation
     # the edited node sits in, and for no other: an untouched `{x+1}` keeps
     # its own text, as the splice keeps it. A `raise` is a statement, never
-    # inside one, so the loop finds nothing for it.
+    # inside one, so the loop finds nothing for it. Innermost first: the BFS
+    # of `ast.walk` visits every ancestor before its descendants, and an
+    # outer interpolation's text is written from the inner one's, so the
+    # reverse rebuilds it from text already brought in step.
     if _INTERPOLATION is not None:
         edited = node.operand if kind == "NOT" else node       # type: ignore[attr-defined]
-        for outer in ast.walk(clone):
+        for outer in reversed(list(ast.walk(clone))):
             if (isinstance(outer, _INTERPOLATION)
                     and any(m is edited for m in ast.walk(outer.value))):
                 outer.str = ast.unparse(outer.value)
@@ -363,7 +366,9 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
     file unparsed (`ast.unparse` of the mutated tree), and the report says
     so beside it. A refusal would stop a campaign for one awkward site, and
     skipping the site would make the count of mutants depend on the
-    interpreter.
+    interpreter. The whole file is checked the same way, and one that does
+    not parse back to the mutant is a `Refusal`: written anyway, it would
+    be another program than the report names, most likely the original.
 
     **Before 3.12 `ast.unparse` cannot write some f-strings at all**: a
     string holding a character `repr` escapes, inside an f-string's
@@ -394,11 +399,15 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
         except Exception:
             pass
     try:
-        return ast.unparse(whole), False
+        text = ast.unparse(whole)
     except ValueError as exc:
         raise Refusal("cannot be written inside its node's span, and this "
                       "Python's ast.unparse cannot write the file: %s" % exc
                       ) from exc
+    if _dump(ast.parse(text)) != want:
+        raise Refusal("cannot be written inside its node's span, and the "
+                      "file unparsed is not this mutant")
+    return text, False
 
 
 # --------------------------------------------------------------------------
