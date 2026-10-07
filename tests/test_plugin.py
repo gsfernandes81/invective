@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -215,7 +216,10 @@ def test_without_mutate_the_plugin_leaves_the_run_alone(repo):
 
     assert done.returncode == 0, done.stdout + done.stderr
     assert "2 passed" in done.stdout
-    assert "invective" not in done.stdout.replace("plugins: invective", "")
+    # pytest's header lists the installed plugins, in an order that is the
+    # site directory's and not alphabetical, so the whole line goes.
+    said = re.sub(r"(?m)^plugins: .*$", "", done.stdout)
+    assert "invective" not in said
 
 
 def test_a_kind_of_edit_that_does_not_exist_is_a_usage_error(repo):
