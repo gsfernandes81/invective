@@ -432,7 +432,6 @@ def test_a_ref_given_to_the_sweep_reaches_the_engine(repo, monkeypatch):
     assert cmd[cmd.index("--ref") + 1] == "main"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows never delivers SIGTERM")
 def test_a_terminated_sweep_terminates_the_engine_it_started(repo, monkeypatch):
     """`subprocess.run` kills its child outright on any exception, with the
     engine's copy stranded. The engine is told to stop instead and waited
