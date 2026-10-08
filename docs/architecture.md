@@ -65,8 +65,12 @@ it started. The killer comes from the plugin, which writes it to the file
 
 ## Workers
 
-`mutate._Pool` runs one thread per copy. The main thread makes each mutant's
-text, hands out the work, and prints the results in site order; a run's process
+`mutate._Pool` runs one thread per copy, and every run of a campaign is started
+on one of them: the first copy's baseline and every run `--confirm` makes too.
+The main thread makes each mutant's text, hands out the work, and prints the
+results in site order. It starts no run, because a ^C lands on the main thread,
+and one that lands inside `subprocess.Popen` there, after the process is made
+and before it is handed back, leaves a run that nothing stops. A run's process
 is touched only by the thread that started it.
 
 > **Finding:** (2026-10-08, more-itertools at `81c21a8`, Python 3.14, a 4-vCPU VM,

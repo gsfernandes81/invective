@@ -624,10 +624,11 @@ def run_tests(where: str, tests: list[str], timeout: float,
 
 # --------------------------------------------------------------------------
 # **Workers.** Each has a copy of the project of its own and a thread that
-# runs in it; the main thread makes every mutant's text (`_text_of` sets the
-# process's warning filters aside, so it runs there alone, with every worker
-# held off by `_Hush`), hands the mutants out, and reads, confirms and
-# reports what they came to, in the order of their sites. At one worker it is
+# runs in it, and every run of the campaign is made on one, the baselines and
+# confirmations too. The main thread makes every mutant's text (`_text_of`
+# sets the process's warning filters aside, so it runs there alone, with
+# every worker held off by `_Hush`), hands out the work, and reads, confirms
+# and reports what it came to, in the order of the sites. At one worker it is
 # a serial campaign.
 
 
@@ -863,6 +864,12 @@ class _Pool:
     raised, from one queue they all post to (`take`). A run's process is
     touched only by the thread that started it, and a signal is delivered
     to the main thread only, which tells the runs by the *stop* event.
+
+    **No run is started on the main thread.** A ^C that lands inside
+    `subprocess.Popen` there, once the process is made and before it is
+    handed back, leaves a run that nothing can stop, going on in a copy
+    about to be removed. On a worker, the ^C lands on the main thread, which
+    sets *stop*, and the worker stops the run it started.
     """
 
     def __init__(self, copies: list[Copy], stop: threading.Event,
@@ -937,6 +944,15 @@ class _Pool:
                                   "run came to") from None
             del self.busy[k]
             return k, key, got
+
+    def on(self, k: int, fn: Callable, *args):
+        """`fn(copy, *args)` on worker *k*, with nothing else in flight: what
+        it returned, or what it raised, raised here."""
+        self.give(k, k, fn, *args)
+        _k, _key, got = self.take()
+        if isinstance(got, BaseException):
+            raise got
+        return got
 
     def each(self, fn: Callable) -> list:
         """`fn(copy)` on every copy at once; the results in copy order."""
@@ -1252,7 +1268,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # running; at once, each copy must be green too, and the slowest
         # run is the load every mutant's runs will be under, which the
         # budget is measured from.
-        alone, got = baseline(copies[0])
+        alone, got = pool.on(0, baseline)
         if not got.ok:
             raise Refusal(
                 "the selection is RED on the unmutated tree, so every mutant "
@@ -1457,7 +1473,6 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 if isinstance(got, Outcome) and final(got):
                     _landed(running[n], got)
             raise
-        pool.close()
 
         if unconfirmed:
             # **Asked to, every kill is confirmed with nothing else
@@ -1468,10 +1483,16 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # do. The first run is the whole selection on the original: the
             # mutants' runs there can have left something behind that a test
             # reads, and a copy no longer green on the original would score
-            # a kill for that.
-            confirming = copies[0]
-            confirming.restore()
-            guard = confirming.run(None, alone_budget)
+            # a kill for that. Each run is the first worker's, one at a time.
+            def restored(copy: Copy) -> Verdict:
+                copy.restore()
+                return copy.run(None, alone_budget)
+
+            def again(copy: Copy, mutant: Mutant,
+                      path: str | None = None) -> Verdict:
+                return copy.run(mutant, alone_budget, path)
+
+            guard = pool.on(0, restored)
             if not guard.ok or guard.missing:
                 raise Refusal(
                     "the selection is not green in the first copy once the "
@@ -1493,7 +1514,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     one = os.path.join(box, "killer-%d.txt" % i)
                     with open(one, "w", encoding="utf-8") as fh:
                         fh.write(killer + "\n")
-                    gated, _took = _gate(confirming, one, alone_budget)
+                    gated, _took = pool.on(0, _gate, one, alone_budget)
                     if gated.ok and not gated.missing:
                         usable[killer] = one
             for job, outcome in sorted(unconfirmed):
@@ -1502,7 +1523,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 confirmed = None
                 alone_said = ""
                 if killer in usable:
-                    got = confirming.run(mutant, alone_budget, usable[killer])
+                    got = pool.on(0, again, mutant, usable[killer])
                     if (got.code == ExitCode.TESTS_FAILED
                             and got.killer == killer and not got.missing):
                         confirmed = outcome._replace(confirmed="alone")
@@ -1515,8 +1536,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     # included: this run is the only one with nothing else
                     # running.
                     confirmed = Outcome(
-                        _final(confirming.run(mutant, alone_budget), mutant,
-                               src_rel), confirmed="full")
+                        _final(pool.on(0, again, mutant), mutant, src_rel),
+                        confirmed="full")
                 if alone_said:
                     unreproduced.append({
                         "kind": job.kind, "line": job.line, "change": job.what,
@@ -1524,6 +1545,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                         "again": ("survived" if confirmed.verdict.ok
                                   else "killed")})
                 lands(mutant, confirmed)
+        pool.close()
 
         if reported != len(sites):
             # Unreachable while every mutant ends in an outcome or a

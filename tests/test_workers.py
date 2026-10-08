@@ -26,6 +26,7 @@ from typing import NamedTuple
 import pytest
 from pytest import ExitCode
 
+import pytest_invective
 from invective import config, mutate
 from invective import tree as trees
 
@@ -33,6 +34,7 @@ from conftest import FILES, SRC, commit, git, stop_group, wait_for, write_tree
 from test_mutate import ACCEPTING, NESTED
 
 GATE = os.path.join("pkg", "gate.py")
+GATE_FILE = "pkg/gate.py"
 GATE_TESTS = ["pkg/tests/test_gate.py"]
 MINOR = "pkg/tests/test_gate.py::test_a_minor_is_refused"
 ADULT = "pkg/tests/test_gate.py::test_an_adult_is_admitted"
@@ -1200,6 +1202,61 @@ def test_a_stopped_run_with_two_workers_stops_both_runs_and_removes_both_copies(
             proc.communicate()
         for run in runs:
             stop_group(run)
+
+
+@pytest.mark.parametrize("workers, which, starts", [
+    (1, 1, ("original", "")), (1, 2, ("mutant", "")),
+    (2, 1, ("original", "")), (2, 4, ("mutant", "")),
+    (2, 5, ("original", "")), (2, 6, ("original", "killer-0.txt")),
+    (2, 7, ("mutant", "killer-0.txt"))])
+def test_a_stop_while_a_run_starts_leaves_no_run_behind(
+        tree, monkeypatch, workers, which, starts):
+    """A ^C that lands inside `Popen`, once the process is made and before
+    it is handed back, leaves a run no one can stop on the thread it lands
+    on, which is the main thread: so no run is started there. Here one lands
+    as each kind of run starts, the *which*-th: the first copy's baseline,
+    a mutant's run, and with two workers each run `--confirm` makes (the
+    selection on the first copy restored, the killer alone on the original,
+    then on the mutant). Every run started is ended, and every copy is
+    removed."""
+    real = subprocess.Popen
+    started, said = [], []
+
+    def popen(*args, **kwargs):
+        proc = real(*args, **kwargs)
+        with open(os.path.join(kwargs["cwd"], GATE), encoding="utf-8") as fh:
+            text = fh.read()
+        listed = kwargs["env"].get(pytest_invective.SELECTION, "")
+        started.append((proc, ("original" if text == FILES[GATE_FILE]
+                               else "mutant", os.path.basename(listed))))
+        if len(started) == which:
+            _thread.interrupt_main()
+            # Long enough for the ^C to land before `Popen` has returned.
+            time.sleep(0.5)
+        return proc
+
+    monkeypatch.setattr(mutate.subprocess, "Popen", popen)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS,
+                          ["RAISE"], None, say=said.append, workers=workers,
+                          confirm=True)
+        # The case is the run it says it is.
+        assert started[which - 1][1] == starts
+        for proc, _what in started:
+            assert proc.returncode is not None, "a run was left going"
+            if os.name != "nt":
+                with pytest.raises(ProcessLookupError):
+                    os.killpg(proc.pid, 0)
+    finally:
+        for proc, _what in started:
+            if proc.returncode is None:
+                stop_group(proc.pid)
+                proc.communicate()
+    places = [line.split(None, 1)[1] for line in said
+              if line.startswith("copy:")]
+    assert len(places) == workers
+    assert not any(os.path.exists(where) for where in places)
 
 
 @pytest.mark.parametrize("confirm", [False, True])
