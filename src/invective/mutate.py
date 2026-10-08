@@ -172,59 +172,9 @@ def _sites(tree: ast.AST) -> list[tuple[str, ast.AST, str]]:
 _INTERPOLATION = getattr(ast, "Interpolation", None)
 
 
-def _apply(tree: ast.AST, index: int) -> ast.AST:
-    """A copy of *tree* with site *index* broken, and nothing else touched.
-
-    The edits here and in `_mutated_node` are the same by construction, one
-    made in the whole tree and one in the node alone, and must stay so:
-    `_text_of`'s comparison of the two trees is what catches a drift, by
-    writing every mutant as the whole file.
-    """
-    clone = copy.deepcopy(tree)
-    # Walk the clone in the same order, so the Nth site of the clone is the Nth
-    # site of the original. `ast.walk` is deterministic (a BFS over a fixed
-    # child order), which is what makes this correspondence hold.
-    sites = _sites(clone)
-    kind, node, _what = sites[index]
-    if kind == "CMP":
-        node.ops[0] = _CMP_SWAP[type(node.ops[0])]()          # type: ignore[attr-defined]
-    elif kind == "BOOL":
-        node.op = ast.Or() if isinstance(node.op, ast.And) else ast.And()   # type: ignore[attr-defined]
-    elif kind == "NOT":
-        # Replace the `not X` node in its parent by X. Done by rewriting the
-        # tree rather than by mutating the node, because a UnaryOp cannot
-        # become its own operand in place.
-        clone = _Unwrap(node).visit(clone)                     # type: ignore[arg-type]
-    elif kind == "CONST":
-        if node.value is True or node.value is False:          # type: ignore[attr-defined]
-            node.value = not node.value                        # type: ignore[attr-defined]
-        else:
-            node.value = node.value + 1                        # type: ignore[attr-defined]
-    elif kind == "RAISE":
-        clone = _ToPass(node).visit(clone)                     # type: ignore[arg-type]
-    # **A t-string's interpolation carries its expression's source text**
-    # (3.14's `Interpolation.str`, the template's `.expression` at run
-    # time), which the parser fills and `ast.unparse` writes the
-    # interpolation back from. An edit inside one leaves that text naming the
-    # original expression, so it is brought in step for every interpolation
-    # the edited node sits in, and for no other: an untouched `{x+1}` keeps
-    # its own text, as the splice keeps it. A `raise` is a statement, never
-    # inside one, so the loop finds nothing for it. Innermost first: the BFS
-    # of `ast.walk` visits every ancestor before its descendants, and an
-    # outer interpolation's text is written from the inner one's, so the
-    # reverse rebuilds it from text already brought in step.
-    if _INTERPOLATION is not None:
-        edited = node.operand if kind == "NOT" else node       # type: ignore[attr-defined]
-        for outer in reversed(list(ast.walk(clone))):
-            if (isinstance(outer, _INTERPOLATION)
-                    and any(m is edited for m in ast.walk(outer.value))):
-                outer.str = ast.unparse(outer.value)
-    return ast.fix_missing_locations(clone)
-
-
-def _dump(tree: ast.AST) -> str:
-    """*tree* as `ast.dump` gives it, with each t-string interpolation's
-    source text written as `ast.unparse` writes its expression.
+def _normalised(tree: ast.AST) -> ast.AST:
+    """*tree*, with each t-string interpolation's source text rewritten in
+    place as `ast.unparse` writes its expression.
 
     The text is the source's spelling of an expression the tree already
     holds, so two trees that differ only there are the same program up to
@@ -233,34 +183,110 @@ def _dump(tree: ast.AST) -> str:
     text is written from its inner one's, so the inner is normalised first,
     as `_apply`'s refresh does.
     """
-    if _INTERPOLATION is None:
-        return ast.dump(tree)
-    tree = copy.deepcopy(tree)
-    for node in reversed(list(ast.walk(tree))):
-        if isinstance(node, _INTERPOLATION):
-            node.str = ast.unparse(node.value)
-    return ast.dump(tree)
+    if _INTERPOLATION is not None:
+        for node in reversed(list(ast.walk(tree))):
+            if isinstance(node, _INTERPOLATION):
+                node.str = ast.unparse(node.value)
+    return tree
 
 
-class _Unwrap(ast.NodeTransformer):
-    """`not X` becomes `X`, for one specific node."""
+class _Module:
+    """One target, parsed once: its *source*, its *tree*, its *sites*, and
+    each site's path from the root as `(field, index)` steps, *index* `None`
+    for a field that is not a list (*paths*).
 
-    def __init__(self, target: ast.AST) -> None:
-        self.target = target
+    A path names fields, not nodes, so it leads to the same site in *tree*
+    and in *twin*, which is *tree* with every interpolation's text
+    normalised (`_normalised`), and is *tree* itself before 3.14. Neither
+    is ever edited: every mutant of the file is made from them.
+    """
 
-    def visit_UnaryOp(self, node: ast.UnaryOp):
-        self.generic_visit(node)
-        return node.operand if node is self.target else node
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.tree = ast.parse(source)
+        self.sites = _sites(self.tree)
+        at = {id(node): n for n, (_kind, node, _what) in enumerate(self.sites)}
+        # `None` until the walk reaches the site: a site it never reached
+        # fails in `_apply`, where an empty path would edit the root instead.
+        self.paths: list = [None] * len(self.sites)
+        todo: list[tuple[ast.AST, tuple]] = [(self.tree, ())]
+        while todo:
+            node, path = todo.pop()
+            if id(node) in at:
+                self.paths[at[id(node)]] = path
+            for field, value in ast.iter_fields(node):
+                if isinstance(value, ast.AST):
+                    todo.append((value, path + ((field, None),)))
+                elif isinstance(value, list):
+                    todo.extend((item, path + ((field, i),))
+                                for i, item in enumerate(value)
+                                if isinstance(item, ast.AST))
+        self.twin = (self.tree if _INTERPOLATION is None
+                     else _normalised(copy.deepcopy(self.tree)))
 
 
-class _ToPass(ast.NodeTransformer):
-    """One `raise` becomes `pass`. The refusal that stops refusing."""
+def _apply(module: _Module, index: int, base: ast.AST) -> ast.AST:
+    """*base*, the module's tree or its twin, with site *index* broken and
+    nothing else touched.
 
-    def __init__(self, target: ast.AST) -> None:
-        self.target = target
-
-    def visit_Raise(self, node: ast.Raise):
-        return ast.Pass() if node is self.target else node
+    Only the site's path is copied, and nothing *base* holds is edited:
+    every other mutant of the file is made from it too. The edits here and
+    in `_mutated_node` are the same by construction, one made in the whole
+    tree and one in the node alone, and must stay so: `_text_of`'s
+    comparison of the two trees is what catches a drift, by writing every
+    mutant as the whole file.
+    """
+    kind = module.sites[index][0]
+    path = module.paths[index]
+    held = [base]
+    for field, at in path:
+        value = getattr(held[-1], field)
+        held.append(value if at is None else value[at])
+    node = held.pop()
+    if kind == "CMP":
+        new = copy.copy(node)
+        new.ops = [_CMP_SWAP[type(node.ops[0])]()]             # type: ignore[attr-defined]
+    elif kind == "BOOL":
+        new = copy.copy(node)
+        new.op = ast.Or() if isinstance(node.op, ast.And) else ast.And()   # type: ignore[attr-defined]
+    elif kind == "NOT":
+        # A UnaryOp cannot become its own operand in place, so the operand
+        # takes its slot in the parent.
+        new = node.operand                                     # type: ignore[attr-defined]
+    elif kind == "CONST":
+        new = copy.copy(node)
+        if node.value is True or node.value is False:          # type: ignore[attr-defined]
+            new.value = not node.value                         # type: ignore[attr-defined]
+        else:
+            new.value = node.value + 1                         # type: ignore[attr-defined]
+    elif kind == "RAISE":
+        new = ast.copy_location(ast.Pass(), node)
+    # Each ancestor is copied with its slot on the path replaced, and a list
+    # holding that slot is copied first: *base*'s own list would carry the
+    # edit into every mutant made after this one.
+    for owner, (field, at) in zip(reversed(held), reversed(path)):
+        parent = copy.copy(owner)
+        if at is None:
+            setattr(parent, field, new)
+        else:
+            items = list(getattr(parent, field))
+            items[at] = new
+            setattr(parent, field, items)
+        # **A t-string's interpolation carries its expression's source text**
+        # (3.14's `Interpolation.str`, the template's `.expression` at run
+        # time), which the parser fills and `ast.unparse` writes the
+        # interpolation back from. An edit inside one leaves that text naming
+        # the original expression, so it is brought in step for every
+        # interpolation whose expression holds the edit, and for no other:
+        # an untouched `{x+1}` keeps its own text, as the splice keeps it,
+        # and so does one whose format spec alone holds the edit. The copies
+        # are made from the site up, so an outer interpolation's text is
+        # written from an inner one's already brought in step.
+        if (_INTERPOLATION is not None and field == "value"
+                and isinstance(parent, _INTERPOLATION)):
+            parent.str = ast.unparse(parent.value)
+        new = parent
+    return new
 
 
 # --------------------------------------------------------------------------
@@ -303,15 +329,15 @@ def _report_lines(text: str) -> list[str]:
 _WRAPPED = frozenset(("CMP", "BOOL", "NOT"))
 
 
-def _mutated_node(tree: ast.AST, index: int) -> tuple[str, ast.AST, ast.AST]:
-    """Site *index*: its kind, its node in *tree*, and a copy of that node
-    alone with the kind's edit made to it.
+def _mutated_node(module: _Module, index: int) -> tuple[str, ast.AST, ast.AST]:
+    """Site *index*: its kind, its node in the module's tree, and a copy of
+    that node alone with the kind's edit made to it.
 
     The edits here and in `_apply` are the same by construction and must
     stay so: `_text_of`'s comparison of the two trees is what catches a
     drift, by writing every mutant as the whole file.
     """
-    kind, node, _what = _sites(tree)[index]
+    kind, node, _what = module.sites[index]
     edited = copy.deepcopy(node)
     if kind == "CMP":
         edited.ops[0] = _CMP_SWAP[type(edited.ops[0])]()        # type: ignore[attr-defined]
@@ -363,15 +389,17 @@ def _splice(source: str, node: ast.AST, head: str, tail: str = "") -> str:
 
 def _reparsed(text: str) -> ast.AST:
     """*text* parsed only to be compared, silently: a warning it raises is
-    the target's own, which the parse that found its sites has said once."""
+    the target's own, which the parse that found its sites has said once.
+    The filters set aside are the process's, not the thread's, so this runs
+    on the main thread only."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return ast.parse(text)
 
 
-def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
-    """The mutant's text, and whether it is *source* edited inside the
-    site's span only (True) or the whole file unparsed (False).
+def _text_of(module: _Module, index: int) -> tuple[str, bool]:
+    """The mutant's text, and whether it is the module's source edited
+    inside the site's span only (True) or the whole file unparsed (False).
 
     **The splice is checked, not trusted.** Its result is parsed and
     compared, as a tree, with the mutant `_apply` makes, and must have the
@@ -395,9 +423,11 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
     cannot be written either, this is a `Refusal`: there is no text of this
     mutant to hand the tests.
     """
-    kind, node, edited = _mutated_node(tree, index)
-    whole = _apply(tree, index)
-    want = _dump(whole)
+    source = module.source
+    kind, node, edited = _mutated_node(module, index)
+    # Made from the twin, whose interpolation texts are normalised as each
+    # parse compared with it is below.
+    want = ast.dump(_apply(module, index, module.twin))
     forms = []
     try:
         text = ast.unparse(edited)
@@ -410,11 +440,14 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
     for head, tail in forms:
         try:
             out = _splice(source, node, head, tail)
-            if (_dump(_reparsed(out)) == want
+            if (ast.dump(_normalised(_reparsed(out))) == want
                     and len(_LINE_END.split(out)) == len(_LINE_END.split(source))):
                 return out, True
         except Exception:
             pass
+    # Made from the tree, not the twin, so an interpolation the edit is not
+    # in is written from its own text, as the splice keeps it.
+    whole = _apply(module, index, module.tree)
     try:
         text = ast.unparse(whole)
     except ValueError as exc:
@@ -422,7 +455,7 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
                       "Python's ast.unparse cannot write the file: %s" % exc
                       ) from exc
     try:
-        same = _dump(_reparsed(text)) == want
+        same = ast.dump(_normalised(_reparsed(text))) == want
     except (SyntaxError, ValueError):
         # `ast.unparse` can write what the parser then rejects: 3.14's
         # t-string debug field around a bare lambda.
@@ -735,10 +768,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         with open(path, encoding="utf-8", newline="") as fh:
             source = fh.read()
         lines = _report_lines(source)
-        tree_ = ast.parse(source)
+        module = _Module(source)
         accepts = read_accepts(source, src_rel)
-        every = [(n.lineno, w) for _k, n, w in _sites(tree_)]   # type: ignore[attr-defined]
-        sites = [(i, k, n, w) for i, (k, n, w) in enumerate(_sites(tree_))
+        every = [(n.lineno, w) for _k, n, w in module.sites]   # type: ignore[attr-defined]
+        sites = [(i, k, n, w) for i, (k, n, w) in enumerate(module.sites)
                  if not only or k in only]
         if not sites:
             raise Refusal("no mutation sites in %s for %s"
@@ -836,7 +869,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         for n, (idx, kind, node, what) in enumerate(sites, 1):
             line = node.lineno                                  # type: ignore[attr-defined]
             try:
-                written, spliced = _text_of(source, tree_, idx)
+                written, spliced = _text_of(module, idx)
             except Refusal as exc:
                 raise Refusal("%s:%d %s %s" % (src_rel, line, what, exc)) from exc
             _write(path, written, clock + n)
