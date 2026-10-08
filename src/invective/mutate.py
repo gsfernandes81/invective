@@ -1565,7 +1565,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         idle = list(range(count))
         unconfirmed: list[tuple[Job, Outcome]] = []
         unreproduced: list[dict] = []
-        finished = 0
+        # How many have ended, and how many of those survived with no
+        # acceptance: with one worker, the survivors reported so far.
+        finished = survived = 0
         try:
             while jobs or ahead or running:
                 while idle and (ahead or jobs):
@@ -1587,8 +1589,12 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     # through the rest of the campaign.
                     unconfirmed.append((mutant.job, got))
                 finished += 1
+                survived += got.verdict.ok and not any(
+                    a.covers(mutant.job.line, mutant.job.what)
+                    for a in accepts)
                 if finished % 10 == 0:
-                    say("  ... %d/%d landed" % (finished, len(sites)))
+                    say("  ... %d/%d, %d survived"
+                        % (finished, len(sites), survived))
         except BaseException:
             # What ended while the runs were being stopped stands if it was
             # final; a kill that was not confirmed is dropped, and so is a

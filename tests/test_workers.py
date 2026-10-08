@@ -225,12 +225,14 @@ def test_three_workers_confirming_report_as_one_does_but_for_how(
 
 def test_the_progress_line_counts_the_mutants_that_have_ended(
         tree, monkeypatch):
-    """One worker, a line after every tenth: the copy's, then the count."""
-    run = Campaign(tree, monkeypatch, TARGETS["many"])
+    """One worker, a line after every tenth, as a serial campaign says it:
+    the count, and how many of them survived."""
+    run = Campaign(tree, monkeypatch, TARGETS["many"], said=lambda r: (
+        killed_by(MINOR) if r.text and "[1, 1," in r.text else GREEN))
     run(1, only=["CONST"])
     assert run.lines[:2] == ["copy:      %s" % run.places[0], "workers:   1"]
     assert [ln for ln in run.lines if ln.startswith("  ...")] == [
-        "  ... 10/12 landed"]
+        "  ... 10/12, 9 survived"]
 
 
 # --------------------------------------------------------------------------

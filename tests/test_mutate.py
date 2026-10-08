@@ -1431,7 +1431,7 @@ def test_progress_is_said_after_every_tenth_mutant(repo, monkeypatch, capsys):
     said = [ln.strip() for ln in capsys.readouterr().out.splitlines()
             if ln.strip() == "ran" or ln.startswith("  ...")]
     # the baseline, ten mutants, the line, then the last two
-    assert said == ["ran"] * 11 + ["... 10/12 landed"] + ["ran"] * 2
+    assert said == ["ran"] * 11 + ["... 10/12, 10 survived"] + ["ran"] * 2
 
 
 @pytest.mark.parametrize("selection, code", [
