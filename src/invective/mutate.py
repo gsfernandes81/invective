@@ -260,11 +260,12 @@ class _ToPass(ast.NodeTransformer):
 # --------------------------------------------------------------------------
 # **A mutant is the file with one span edited, not the file unparsed.** The
 # whole file through `ast.unparse` drops every comment, re-wraps every line
-# and moves every line number, so a traceback in a killed run pointed at
-# lines the source does not have, a diff of the mutant was the whole file,
-# and a test that reads the module's own source (`inspect.getsource`, a
-# check on a file's text, a line-number assertion) failed on every mutant
-# for the formatting and not the mutation: a false kill of all of them.
+# and moves every line number: a traceback in a killed run points at lines
+# the source does not have, a diff of the mutant is the whole file, and a
+# test that reads the module's own source (`inspect.getsource`, a check on a
+# file's text, a line-number assertion) fails on every mutant for the
+# formatting and not the mutation, a false kill of all of them. So only the
+# site's span is rewritten, and the rest of the file is its own text.
 
 #: The three endings Python's tokenizer counts as a line break, and nothing
 #: else: not `str.splitlines`, which also splits on `\f`, `\v`, `\x1c`-`\x1e`,
@@ -330,8 +331,10 @@ def _splice(source: str, node: ast.AST, head: str, tail: str = "") -> str:
     number: between *head* and *tail*, which is inside the parenthesis of a
     wrapped expression, where a line break is a continuation, and after
     `pass`, since a blank line is legal at any indentation. They are the
-    span's own endings, not the file's first, so a file of mixed endings has
-    the same count of each in the mutant as it had.
+    span's own endings, not the file's first, given back for the line breaks
+    *head* lacks; a line break *head* carries itself is `\\n` whatever the
+    file's ending, as in a 3.14 interpolation whose expression spans lines,
+    which `ast.unparse` writes from the source text the tokenizer stored.
 
     Positions are the parser's: `col_offset` and `end_col_offset` count
     BYTES of the UTF-8 line, so the edit is made on bytes. `end_col_offset`
@@ -382,10 +385,9 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
     **Before 3.12 `ast.unparse` cannot write some f-strings at all**: a
     string holding a character `repr` escapes, inside an f-string's
     expression, raises `ValueError`, since that grammar has no backslash
-    there.
-    The node's own text is then not tried, and when the whole file cannot
-    be written either, this is a `Refusal`: there is no text of this mutant
-    to hand the tests.
+    there. The node's own text is then not tried, and when the whole file
+    cannot be written either, this is a `Refusal`: there is no text of this
+    mutant to hand the tests.
     """
     kind, node, edited = _mutated_node(tree, index)
     whole = _apply(tree, index)
