@@ -155,18 +155,22 @@ def test_the_project_s_top_is_the_nearest_pyproject_above_the_working_directory(
 
 @pytest.mark.parametrize("name", [".git", ".hg", ".svn"])
 @pytest.mark.parametrize("as_file", [True, False])
-def test_a_repository_s_directory_is_the_top_when_no_pyproject_comes_first(
+def test_a_repository_s_directory_ends_the_walk_and_is_no_top_by_itself(
         tmp_path, name, as_file):
-    """A `pyproject.toml` of a tool's settings in the home directory must not
-    make the home directory the project. `.git` is a file in a worktree."""
+    """A `pyproject.toml` of a tool's settings above a repository never makes
+    that directory the project, and a project with no marker is the
+    directory the command was started in, where its tests import it.
+    `.git` is a file in a worktree."""
     home = os.path.realpath(tmp_path)
     proj = os.path.join(home, "proj")
+    pkg = os.path.join(proj, "pkg")
     write_tree(home, {"pyproject.toml": "", "proj/pkg/__init__.py": ""})
     if as_file:
         write_tree(home, {"proj/" + name: "gitdir: elsewhere\n"})
     else:
         os.mkdir(os.path.join(proj, name))
-    assert config.project_root(os.path.join(proj, "pkg")) == proj
+    assert config.project_root(pkg) == pkg
+    assert config.project_root(proj) == proj
 
     write_tree(home, {"proj/pyproject.toml": ""})
     assert config.project_root(os.path.join(proj, "pkg")) == proj
@@ -193,15 +197,15 @@ def test_the_home_directory_is_the_top_only_from_itself(tmp_path,
     dotfiles repository there, or a marker above it, does not make it or
     anything above it the top of a project below it with no marker of its
     own: that project's top is where the command was started, and the home
-    directory is not copied."""
+    directory is not copied. A dotfiles repository above the home directory
+    ends the walk at the home directory itself."""
     home = os.path.join(os.path.realpath(tmp_path), "home")
     monkeypatch.setenv("HOME", home)
     monkeypatch.setenv("USERPROFILE", home)
     proj = os.path.join(home, "proj")
     write_tree(home, {marker: "[tool.ruff]\n", "proj/gate.py": ""})
     assert config.project_root(proj) == proj
-    top = home if marker != "../.git" else os.path.dirname(home)
-    assert config.project_root(home) == top
+    assert config.project_root(home) == home
 
     write_tree(home, {"proj/pytest.ini": "", "proj/pkg/__init__.py": ""})
     assert config.project_root(os.path.join(proj, "pkg")) == proj

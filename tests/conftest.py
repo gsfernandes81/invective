@@ -136,6 +136,24 @@ WORKSPACE = {
 }
 
 
+#: A service with no file pytest takes for a project's, whose tests import
+#: `app` from the service's own directory, where they are run.
+MARKERLESS = {
+    "api/requirements.txt": "pytest\n",
+    "api/app/__init__.py": "",
+    "api/app/gate.py": ("def admit(age):\n"
+                        "    if age > 5:\n"
+                        "        raise ValueError('too old')\n"
+                        "    return age\n"),
+    "api/tests/test_gate.py": ("import pytest\n"
+                               "from app import gate\n"
+                               "\n"
+                               "def test_too_old_is_refused():\n"
+                               "    with pytest.raises(ValueError):\n"
+                               "        gate.admit(10)\n"),
+}
+
+
 def write_tree(root, files):
     for rel, text in files.items():
         path = os.path.join(root, *rel.split("/"))

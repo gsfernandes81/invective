@@ -37,8 +37,9 @@ _SAID = {bool: "true or false", int: "a whole number", list: "a list"}
 
 
 #: What marks a repository's own directory, the version-control directories
-#: `tree.SKIPPED` leaves out of every copy. Looked for, never asked about:
-#: `.git` is a file in a worktree or a submodule, and no program is run.
+#: `tree.SKIPPED` leaves out of every copy, where `project_root`'s walk ends.
+#: Looked for, never asked about: `.git` is a file in a worktree or a
+#: submodule, and no program is run.
 _REPOSITORY = (".git", ".hg", ".svn")
 
 #: What marks a project's own directory: the files pytest looks for when it
@@ -51,9 +52,9 @@ _PROJECT = ("pyproject.toml", "pytest.toml", ".pytest.toml", "pytest.ini",
 
 def project_root(start: str | None = None) -> str:
     """The top of the project *start* (by default the working directory) is
-    in: the nearest directory at or above it, short of the home directory
-    when *start* is below that, that holds one of `_PROJECT` or that is a
-    repository's own directory; with neither, *start* itself.
+    in: the nearest directory at or above it that holds one of `_PROJECT`;
+    the walk ends at a repository's own directory and short of the home
+    directory, and with no marker by then, *start* itself.
 
     **The nearest marker wins.** The nearest is what nested projects need: a
     fixture project inside a repository is the top only from inside it. And
@@ -62,8 +63,11 @@ def project_root(start: str | None = None) -> str:
     `pyproject.toml` holds a tool's settings would otherwise make the whole
     home directory the project, copied into the temporary directory on every
     run, its secrets with it, with nothing saying so. A repository's
-    directory ends the walk for the same reason, for a project that has
-    neither.
+    directory ends the walk for the same reason, and is no project's top by
+    itself: a project with no marker is the directory the command was
+    started in, as with no repository at all, so a marker-less project
+    inside a repository is measured from its own top, where its tests
+    import it, and is never copied together with everything beside it.
 
     **Never above the home directory.** The home directory is nobody's
     project but its own: a `pyproject.toml` of a tool's settings there, a
@@ -88,10 +92,10 @@ def project_root(start: str | None = None) -> str:
     while True:
         if os.path.normcase(os.path.realpath(here)) == home and here != start:
             return start
-        if (any(os.path.isfile(os.path.join(here, name)) for name in _PROJECT)
-                or any(os.path.exists(os.path.join(here, name))
-                       for name in _REPOSITORY)):
+        if any(os.path.isfile(os.path.join(here, name)) for name in _PROJECT):
             return here
+        if any(os.path.exists(os.path.join(here, name)) for name in _REPOSITORY):
+            return start
         up = os.path.dirname(here)
         if up == here:
             return start

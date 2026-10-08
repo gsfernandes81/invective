@@ -14,8 +14,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from conftest import (FILES, WORKSPACE, commit, no_pytest_settings_above,
-                      write_tree)
+from conftest import (FILES, MARKERLESS, WORKSPACE, commit,
+                      no_pytest_settings_above, write_tree)
 
 #: This checkout's own `src`, ahead of any installed copy, so that the pytest
 #: started here loads the plugin under test.
@@ -199,6 +199,24 @@ def test_mutate_from_a_subdirectory_copies_the_whole_project(repo, tmp_path):
     assert gate["target"] == _p("pkg/gate.py")
     assert gate["tests"] == [MINOR, ADULT]
     assert (gate["mutants"], gate["killed"]) == (1, 1)
+
+
+def test_a_project_without_a_marker_inside_a_repository_is_its_own_top(
+        tmp_path):
+    """A repository's directory is no project's top by itself: a service of
+    a monorepo with no marker is copied from where pytest was started, where
+    its tests import it, and not as the whole repository."""
+    no_pytest_settings_above(tmp_path)
+    mr = os.path.realpath(tmp_path / "mr")
+    write_tree(mr, {".git/HEAD": "ref: refs/heads/main\n", **MARKERLESS})
+    api = os.path.join(mr, "api")
+
+    done = pytest_in(api, "--mutate", "app/gate.py", "--mutate-only",
+                     "RAISE", "tests")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "project:   %s" % api in done.stdout
+    assert "1/1 killed (100.0%)" in done.stdout
 
 
 def test_mutate_whose_pytest_settings_are_above_the_project_is_refused(

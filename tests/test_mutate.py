@@ -17,12 +17,12 @@ import warnings
 import pytest
 from pytest import ExitCode
 
-from invective import mutate
+from invective import config, mutate
 from invective import tree as trees
 from invective.tree import git_ref, working_tree
 
-from conftest import (FILES, WORKSPACE, commit, git, slow_run,
-                      write_tree)
+from conftest import (FILES, MARKERLESS, WORKSPACE, commit, git,
+                      no_pytest_settings_above, slow_run, write_tree)
 
 SAMPLE = '''
 def refuse(n, flag, other):
@@ -898,6 +898,26 @@ def test_a_settings_file_below_the_top_stops_every_run_s_search_there(
 
     assert "1/1 killed (100.0%)" in capsys.readouterr().out
     assert not settings_above_the_copy.exists()
+
+
+def test_a_project_without_a_marker_inside_a_repository_is_measured_from_its_top(
+        tmp_path, monkeypatch, capsys):
+    """A repository's directory is no project's top by itself: started in a
+    service of a monorepo that has no marker, the run copies the service, not
+    the repository, and its tests import it as they do when run there."""
+    no_pytest_settings_above(tmp_path)
+    mr = os.path.realpath(tmp_path / "mr")
+    api = os.path.join(mr, "api")
+    write_tree(mr, {".git/HEAD": "ref: refs/heads/main\n", **MARKERLESS})
+    monkeypatch.chdir(api)
+
+    assert config.project_root(api) == api
+    assert mutate.main(["--target", "app/gate.py", "--tests", "tests",
+                        "--only", "RAISE"]) == 0
+
+    out = capsys.readouterr().out
+    assert "project:   %s" % api in out
+    assert "1/1 killed (100.0%)" in out
 
 
 def test_an_operator_that_does_not_exist_is_refused_by_name(repo, capsys):
