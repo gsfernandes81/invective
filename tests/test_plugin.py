@@ -527,7 +527,8 @@ NOT_AT_LAYOUT = "other/lib/sub/mod.py"
 
 #: The names those modules are put under, emptied first, so that nothing
 #: this process holds answers for them.
-NAMES = ("pkg", "pkg.sub", "pkg.sub.mod", "sub", "sub.mod", "mod")
+NAMES = ("pkg", "pkg.sub", "pkg.sub.mod", "sub", "sub.mod", "mod",
+         "packaging")
 
 
 def _decide(tmp_path, monkeypatch, target, loaded, before=(), copy=NESTED,
@@ -705,6 +706,21 @@ def test_a_name_another_package_holds_is_cleared_by_the_copy_s_own_file(
     assert _decide(tmp_path, monkeypatch, HANDLERS, loaded,
                    copy=UNDER_A_NAMESPACE) == (
         _file(tmp_path, "other/lib/logging/handlers.py") if named else "")
+
+
+@pytest.mark.parametrize("file, named", [
+    ("other/lib/packaging/__init__.py", None),
+    ("other/lib/packaging.py", True),
+], ids=["a-package", "a-module-file"])
+def test_a_loose_target_is_not_the_package_the_tests_import_under_its_name(
+        tmp_path, monkeypatch, file, named):
+    """`tools/packaging.py` and the third-party package `packaging` share a
+    name, but a package's `__init__.py` is no file the loose module could
+    be, so the tests' import of it says nothing of the target; another
+    module file under the name is the target loaded from elsewhere."""
+    assert _decide(tmp_path, monkeypatch, "tools/packaging.py",
+                   {"packaging": file}, copy={"tools/packaging.py": ""}) == (
+        _file(tmp_path, file) if named else "")
 
 
 def test_a_package_below_a_namespace_named_like_the_library_s_runs(tmp_path):

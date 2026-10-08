@@ -295,6 +295,13 @@ def _loaded_elsewhere(copy, target):
 
     def decide():
         file = found(name)
+        # A loose target is a module file, so a package's `__init__.py`
+        # under its bare name is another package's, which the tests
+        # imported and the loose file is not.
+        if (file is not None and not package
+                and os.path.normcase(os.path.basename(file))
+                != os.path.normcase(parts[-1])):
+            file = None
         if file is not None:
             key = os.path.normcase(file)
             if (name not in _LOADED_BEFORE
