@@ -364,6 +364,12 @@ def _sweep(args, root):
                     print("      (could not read %s's own report)" % module)
         summary = re.search(r"(\d+)/(\d+) killed \(([\d.]+)%\), (\d+) survived", body)
         if not summary:
+            # A refusal is one sentence the engine chose and a person has to
+            # read whole; any other last line is only cut to a display width.
+            said_lines = body.strip().splitlines() or ["no output"]
+            refusal = next((ln for ln in said_lines
+                            if ln.startswith("refused:")), None)
+
             # "no mutation sites" and "RED baseline" are answers ABOUT the
             # module; anything else is this driver failing to get an answer
             # at all, and the two must not print the same way -- a bare "?"
@@ -376,11 +382,6 @@ def _sweep(args, root):
             # body` is true of "occurred", "required" and "ignored", so a
             # traceback from a driver that could not start was labelled a red
             # baseline.
-            # A refusal is one sentence the engine chose and a person has to
-            # read whole; any other last line is only cut to a display width.
-            said_lines = body.strip().splitlines() or ["no output"]
-            refusal = next((ln for ln in said_lines
-                            if ln.startswith("refused:")), None)
             note = "no mutation sites" if "no mutation sites" in body else \
                    ("RED baseline" if "is RED on the unmutated tree" in body else
                     "DRIVER FAILED rc=%d: %s" % (
