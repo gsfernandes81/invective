@@ -599,7 +599,11 @@ def run_tests(where: str, tests: list[str], timeout: float,
         try:
             stdout, stderr = _wait(proc, timeout, stop)
         except subprocess.TimeoutExpired:
-            process.stop(proc)
+            # Out of the hush, as the wait was: the stop waits on the run
+            # too, up to `process.STOP_GRACE` when something it started
+            # holds its output, and a text can be made meanwhile.
+            with _Hush.aside():
+                process.stop(proc)
             # A mutant that hangs is a mutant the suite noticed, in the least
             # helpful way available. Counted as killed and said out loud,
             # because a timeout that is silently a pass would flatter the

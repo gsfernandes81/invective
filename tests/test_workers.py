@@ -660,6 +660,50 @@ def test_a_worker_s_real_run_is_waited_on_out_of_the_hush(tmp_path):
         workers.join(30)
 
 
+def test_a_worker_stops_its_timed_out_run_out_of_the_hush(tmp_path,
+                                                        monkeypatch):
+    """Stopping a run that ran out of time can take `process.STOP_GRACE`,
+    when something it started holds its output: a text is made meanwhile."""
+    stopping, done = threading.Event(), threading.Event()
+    real = mutate.process.stop
+
+    def stop(proc):
+        stopping.set()
+        assert done.wait(10)
+        real(proc)
+
+    def wait(proc, timeout, stop):
+        raise subprocess.TimeoutExpired("pytest", timeout)
+
+    monkeypatch.setattr(mutate.process, "stop", stop)
+    monkeypatch.setattr(mutate, "_wait", wait)
+    hush, got = mutate._Hush(threading.Event()), []
+
+    def worker():
+        with hush.shared():
+            got.append(mutate.run_tests(str(tmp_path), ["t.py"], 1,
+                                        stop=threading.Event()))
+
+    workers = threading.Thread(target=worker, daemon=True)
+    workers.start()
+    try:
+        assert stopping.wait(10)
+        made = []
+
+        def text():
+            with hush.alone():
+                made.append(True)
+
+        texts = threading.Thread(target=text, daemon=True)
+        texts.start()
+        texts.join(3)
+        assert made == [True], "the text waited for the run to be stopped"
+    finally:
+        done.set()
+        workers.join(30)
+    assert [verdict.code for verdict in got] == [mutate.TIMED_OUT]
+
+
 #: How many warnings each run gives.
 WARNINGS = 40
 
