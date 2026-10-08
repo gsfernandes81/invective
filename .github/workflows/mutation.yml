@@ -32,6 +32,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # tests/test_settings.py is in no job: it runs whole campaigns,
+          # about a minute for each mutant.
           # The gate's checks are with the acceptances', and the link
           # refusals with the copy's.
           - module: src/invective/mutate.py

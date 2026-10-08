@@ -1773,7 +1773,8 @@ def test_a_ref_given_to_the_command_is_the_tree_it_runs_on(repo, capsys):
 def test_a_ref_s_runs_read_the_ref_s_own_settings_file(repo, capsys):
     """The ref's `pytest.ini` makes an xfail strict, which only it fails on
     the mutant; the working tree has moved the setting into
-    `pyproject.toml`. Each run in the ref's tree is given the ref's file."""
+    `pyproject.toml`. Each run in the ref's tree finds the ref's file by
+    pytest's own search."""
     commit(repo, {
         "pytest.ini": "[pytest]\nxfail_strict = true\n",
         "pyproject.toml": "[project]\nname = 'p'\n",
