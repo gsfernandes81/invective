@@ -240,15 +240,19 @@ def test_a_live_owner_s_copy_is_never_removed(tmp_path):
     because the first passes vacuously where there is no reaper at all."""
     # SIGHUP at its default, which ends the process, whatever the suite was
     # started under (`nohup`): the probe is checked below by its owner
-    # surviving it, and an ignored signal 1 would survive as well as 0.
+    # surviving it, and an ignored signal 1 would survive as well as 0. It
+    # says when the reset is done, and the probe waits for that: before it,
+    # the interpreter is still starting with the inherited disposition.
     live = subprocess.Popen([sys.executable, "-c", (
         "import signal, time\n"
         "if hasattr(signal, 'SIGHUP'):\n"
         "    signal.signal(signal.SIGHUP, signal.SIG_DFL)\n"
-        "time.sleep(60)")])
+        "print('ready', flush=True)\n"
+        "time.sleep(60)")], stdout=subprocess.PIPE)
     gone = subprocess.Popen([sys.executable, "-c", ""])
     gone.wait()
     try:
+        assert live.stdout.readline().strip() == b"ready"
         for name, pid in (("invective-aaaaaaaa", live.pid),
                           ("invective-bbbbbbbb", gone.pid)):
             os.mkdir(tmp_path / name)
@@ -272,6 +276,7 @@ def test_a_live_owner_s_copy_is_never_removed(tmp_path):
     finally:
         live.kill()
         live.wait()
+        live.stdout.close()
 
 
 def test_the_copy_is_marked_with_its_owner_before_it_is_filled(tmp_path,
