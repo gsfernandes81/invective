@@ -529,8 +529,11 @@ def _wait(proc: subprocess.Popen, timeout: float,
         if stop.is_set():
             raise Stopped
         try:
-            return proc.communicate(
-                timeout=max(0.0, min(_POLL, end - time.monotonic())))
+            # A worker waits on its run out of the hush, which is what lets
+            # the main thread make texts while the runs go on.
+            with _Hush.aside():
+                return proc.communicate(
+                    timeout=max(0.0, min(_POLL, end - time.monotonic())))
         except subprocess.TimeoutExpired:
             # Asked again, `communicate` loses nothing it had read.
             if time.monotonic() >= end:
@@ -622,9 +625,10 @@ def run_tests(where: str, tests: list[str], timeout: float,
 # --------------------------------------------------------------------------
 # **Workers.** Each has a copy of the project of its own and a thread that
 # runs in it; the main thread makes every mutant's text (`_text_of` sets the
-# process's warning filters aside, so it runs there and nowhere else), hands
-# the mutants out, and reads, confirms and reports what they came to, in the
-# order of their sites. At one worker it is a serial campaign.
+# process's warning filters aside, so it runs there alone, with every worker
+# held off by `_Hush`), hands the mutants out, and reads, confirms and
+# reports what they came to, in the order of their sites. At one worker it is
+# a serial campaign.
 
 
 class Job(NamedTuple):
@@ -769,6 +773,87 @@ class Copy:
         return when
 
 
+class _Hush:
+    """Workers held off while the main thread makes a mutant's text.
+
+    `_reparsed` sets the process's warning filters aside, so while it runs
+    no other thread may warn: its warning would be lost, as an ignored one.
+    A worker could warn anywhere in its task (a `ResourceWarning` from an
+    object it lets go, a `DeprecationWarning` from a library, whatever an
+    attempt runs), so rather than hold every one of those to never warn,
+    each worker's task runs inside `shared`, which any number of workers
+    hold at once, and the main thread makes a text inside `alone`, which
+    waits until no worker holds `shared` and keeps new ones out. A worker
+    steps `aside` only while it waits for its run's process to end, which
+    warns nothing, and is where it spends its time: so the texts are still
+    made while the runs go on.
+    """
+
+    # The hush a thread holds `shared`, if any, for `aside` to find.
+    _held = threading.local()
+
+    def __init__(self) -> None:
+        self._turn = threading.Condition()
+        self._sharing = 0
+        self._alone = False
+        self._asking = 0
+
+    def _wait(self, held_off: Callable[[], bool]) -> None:
+        # In short spells, so that a ^C reaches the main thread on Windows.
+        while held_off():
+            self._turn.wait(_POLL)
+
+    @contextlib.contextmanager
+    def shared(self):
+        with self._turn:
+            # A text asked for goes first: workers never starve it.
+            self._wait(lambda: self._alone or self._asking)
+            self._sharing += 1
+        _Hush._held.hush = self
+        try:
+            yield
+        finally:
+            _Hush._held.hush = None
+            with self._turn:
+                self._sharing -= 1
+                self._turn.notify_all()
+
+    @contextlib.contextmanager
+    def alone(self):
+        with self._turn:
+            self._asking += 1
+            try:
+                self._wait(lambda: self._alone or self._sharing)
+            finally:
+                self._asking -= 1
+            self._alone = True
+        try:
+            yield
+        finally:
+            with self._turn:
+                self._alone = False
+                self._turn.notify_all()
+
+    @staticmethod
+    @contextlib.contextmanager
+    def aside():
+        """Out of the hush this thread holds `shared`, if any, for the
+        body, and back in after it."""
+        hush = getattr(_Hush._held, "hush", None)
+        if hush is None:
+            yield
+            return
+        with hush._turn:
+            hush._sharing -= 1
+            hush._turn.notify_all()
+        try:
+            yield
+        finally:
+            with hush._turn:
+                hush._wait(lambda: hush._alone or hush._asking)
+                hush._sharing += 1
+
+
 class _Pool:
     """A thread for each copy, the only one to run in it, started at once
     and ended by `close`, or by `halt` when the campaign is stopping.
@@ -783,6 +868,8 @@ class _Pool:
     def __init__(self, copies: list[Copy], stop: threading.Event,
                  say: Callable[[str], object]) -> None:
         self.copies, self.stop, self.say = copies, stop, say
+        #: What the main thread makes a text inside (`_Hush`).
+        self.hush = _Hush()
         self.posts: queue.Queue = queue.Queue()
         self.inboxes: list[queue.Queue] = [queue.Queue() for _ in copies]
         #: The key of each worker's task in flight.
@@ -804,7 +891,8 @@ class _Pool:
                 return
             key, fn, args = task
             try:
-                got = fn(copy, *args)
+                with self.hush.shared():
+                    got = fn(copy, *args)
             except BaseException as exc:
                 # Posted, never lost with the thread: the main thread
                 # raises it, or a stop it set is what it says.
@@ -1188,7 +1276,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
 
         def made(job: Job) -> Mutant:
             try:
-                text, spliced = _text_of(module, job.idx)
+                # No worker warns while the warning filters are aside.
+                with pool.hush.alone():
+                    text, spliced = _text_of(module, job.idx)
             except Refusal as exc:
                 raise Refusal("%s:%d %s %s"
                               % (src_rel, job.line, job.what, exc)) from exc

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from types import SimpleNamespace
 from typing import NamedTuple
 
@@ -393,6 +394,111 @@ def test_mutants_are_made_on_the_main_thread_only(tree, monkeypatch):
     # Each mutant once in the pool, and each kill once more to confirm it.
     assert len(threads) == report["mutants"] + report["killed"]
     assert set(threads) == {threading.main_thread()}
+
+
+def test_a_worker_waiting_on_its_run_lets_a_text_be_made(tmp_path):
+    """Out of the hush while it waits on its run, and back in only once the
+    text being made is done: the texts are made while the runs go on."""
+    hush = mutate._Hush()
+    waiting, done, back = threading.Event(), threading.Event(), []
+
+    def worker():
+        with hush.shared():
+            with mutate._Hush.aside():
+                waiting.set()
+                assert done.wait(10)
+            back.append(list(made))
+
+    def text():
+        with hush.alone():
+            made.append("text")
+            done.set()
+            time.sleep(0.3)
+            made.append("after")
+
+    made = []
+    workers = threading.Thread(target=worker, daemon=True)
+    workers.start()
+    assert waiting.wait(10)
+    texts = threading.Thread(target=text, daemon=True)
+    texts.start()
+    texts.join(5)
+    workers.join(5)
+    assert not texts.is_alive(), "the text waited for a worker's run"
+    # The worker came back once the text was made, not halfway through.
+    assert back == [["text", "after"]]
+
+
+def test_a_worker_s_real_run_is_waited_on_out_of_the_hush(tmp_path):
+    """A text is made while a worker's run goes on: waiting on its process,
+    the worker is out of the hush."""
+    started = tmp_path / "started"
+    (tmp_path / "test_slow.py").write_text(
+        "import pathlib, time\n"
+        "\n"
+        "def test_slow():\n"
+        "    pathlib.Path(%r).write_text('x')\n"
+        "    time.sleep(5)\n" % str(started), encoding="utf-8")
+    hush, stop = mutate._Hush(), threading.Event()
+
+    def worker():
+        with hush.shared():
+            try:
+                mutate.run_tests(str(tmp_path), ["test_slow.py"], 60,
+                                 stop=stop)
+            except mutate.Stopped:
+                pass
+
+    workers = threading.Thread(target=worker, daemon=True)
+    workers.start()
+    try:
+        wait_for(str(started))
+        made = []
+
+        def text():
+            with hush.alone():
+                made.append(True)
+
+        texts = threading.Thread(target=text, daemon=True)
+        texts.start()
+        texts.join(3)
+        assert made == [True], "the text waited for the run to end"
+    finally:
+        stop.set()
+        workers.join(30)
+
+
+#: How many warnings each run gives.
+WARNINGS = 40
+
+
+def test_no_worker_warns_while_a_text_is_made(tree, monkeypatch):
+    """A text's parse sets the process's warning filters aside, and a
+    warning a worker gives then would be lost, ignored. Every run here warns
+    over and over while the texts are made, slowly: every warning is
+    heard."""
+    real = mutate.ast.parse
+
+    def parse(*args, **kwargs):
+        time.sleep(0.01)
+        return real(*args, **kwargs)
+
+    def said(run):
+        if run.text is not None:
+            for _ in range(WARNINGS):
+                warnings.warn("from a run", UserWarning)
+                time.sleep(0.002)
+        return GREEN
+
+    run = Campaign(tree, monkeypatch, TARGETS["many"], said)
+    monkeypatch.setattr(mutate.ast, "parse", parse)
+    with warnings.catch_warnings(record=True) as heard:
+        warnings.simplefilter("always")
+        report = run(3)
+    assert report["mutants"] == 12
+    runs = len([r for r in run.runs if r.text is not None])
+    assert len([w for w in heard if str(w.message) == "from a run"]) == (
+        WARNINGS * runs)
 
 
 def test_each_copy_s_writes_are_stamped_at_rising_seconds(tree, monkeypatch):
