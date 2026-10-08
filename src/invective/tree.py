@@ -152,8 +152,9 @@ def _remove(where: str) -> None:
 def _discard(root: str, where: str) -> None:
     """Remove the copy *where* that `git_ref` made of *root*, and the entry
     git keeps of its worktree, locked or not. Says nothing and raises
-    nothing: it runs on the way out of a run whose own outcome is the one to
-    report, and where there may be no git."""
+    nothing -- but for a stop that lands during it, which is re-raised once
+    the copy is gone: it runs on the way out of a run whose own outcome is
+    the one to report, and where there may be no git."""
     # invective: accept[equivalent: True -> False] git says nothing here a person needs
     quietly = {"capture_output": True, "text": True}
     # `remove` goes first, while the directory exists: git registers the real
