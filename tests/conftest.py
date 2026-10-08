@@ -182,11 +182,11 @@ def commit(root, files=None):
 # file with nothing set: the nearest marker, and the project's top, is its own
 # directory, and pytest's search for settings stops there, whatever lies above
 # the temporary directory (a `--basetemp` inside a checkout, or a temporary
-# directory under a home directory that holds one). A test that builds a tree
-# of its own does the same, or calls `no_pytest_settings_above`: the one
-# requirement the suite keeps is that no pytest settings file is above the
-# temporary directory, which the default under the system temporary directory
-# satisfies.
+# directory under a home directory that holds one). A test whose subject is a
+# tree with no settings file calls `no_pytest_settings_above`; the rest rely on
+# the one requirement the suite keeps: that no pytest settings file is above
+# the temporary directory, which the default under the system temporary
+# directory satisfies.
 def no_pytest_settings_above(path):
     """Skip the test when pytest, started in *path*, would read a settings
     file from a directory above it: the test is about a tree with none."""
