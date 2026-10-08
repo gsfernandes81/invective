@@ -167,6 +167,11 @@ def covering(root, module, sources, tests_dir):
             % (ns, re.escape(dotted.rsplit(".", 1)[0]), re.escape(stem))]
         attr = r"(?<![\w.])%s%s\." % (ns, re.escape(dotted))
         (anywhere if "." in dotted else near_only).append(attr)
+        # A `from` statement naming a submodule loads the package, as
+        # `import NAME.sub` does, so it counts anywhere. Anchored to the
+        # start of the statement: `from email.utils.x import` and
+        # `from .utils.text import` are not the project's.
+        anywhere.append(r"^\s*from\s+%s%s\.\w" % (ns, re.escape(dotted)))
     else:
         near_only += [r"^\s*import\s+%s\b" % re.escape(stem),
                       r"^\s*from\s+%s\s+import" % re.escape(stem),

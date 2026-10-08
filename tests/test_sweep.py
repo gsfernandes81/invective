@@ -220,6 +220,28 @@ def test_a_top_level_package_is_not_covered_by_a_library_module_ending_in_its_na
     write_tree(root, {"tests/unit/test_u.py": "import os, utils\n"})
     assert sweep.covering(root, _p("src/utils/__init__.py"), ["src"],
                           "tests") == [_p("tests/unit/test_u.py")]
+    write_tree(root, {"tests/unit/test_u.py": "import os as o, utils\n"})
+    assert sweep.covering(root, _p("src/utils/__init__.py"), ["src"],
+                          "tests") == [_p("tests/unit/test_u.py")]
+
+
+def test_a_from_statement_naming_a_submodule_covers_the_package_anywhere(
+        tmp_path):
+    """`from pkg.gate import x` loads `pkg/__init__.py` as `import pkg.gate`
+    does, so a test file in any subdirectory of the tests covers it."""
+    root = str(tmp_path)
+    write_tree(root, {"src/pkg/__init__.py": "x = 1\n",
+                      "src/pkg/gate.py": "x = 1\n",
+                      "tests/unit/test_from.py": "from pkg.gate import x\n"})
+
+    assert sweep.covering(root, _p("src/pkg/__init__.py"), ["src"],
+                          "tests") == [_p("tests/unit/test_from.py")]
+    # The statement must start the line and name the package itself.
+    for other in ("from email.pkg.x import y", "from .pkg.gate import x",
+                  "# from pkg.gate import x", "from django.pkg.gate import x"):
+        write_tree(root, {"tests/unit/test_from.py": other + "\n"})
+        assert sweep.covering(root, _p("src/pkg/__init__.py"), ["src"],
+                              "tests") == [], other
 
 
 def _top_level_rules(root, module, sources):
@@ -342,6 +364,10 @@ _LOADS = {
     ("from acme.gate import core", "src/acme/gate/core.py"),
     ("from acme.gate.core import x", "src/acme/gate/core.py"),
     ("from src.acme.gate.core import x", "src/acme/gate/core.py"),
+    # A `from` statement naming a submodule loads the package as well.
+    ("from acme.gate.core import x", "src/acme/gate/__init__.py"),
+    ("from src.acme.gate.core import x", "src/acme/gate/__init__.py"),
+    ("from utils.text import slugify", "src/utils/__init__.py"),
 }
 
 #: The one shape of the dotted attribute rule that matches without loading
