@@ -995,7 +995,7 @@ def _with_on_path(monkeypatch, *entries):
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([SRC, *entries]))
 
 
-@pytest.mark.parametrize("fixed", [False, True])
+@pytest.mark.parametrize("fixed", [None, "conftest", "pythonpath"])
 def test_a_target_the_tests_import_from_outside_the_copy_is_refused(
         tmp_path, monkeypatch, fixed):
     """A project installed editable has every mutant survive, silently: the
@@ -1006,28 +1006,37 @@ def test_a_target_the_tests_import_from_outside_the_copy_is_refused(
     which is the whole of what the hole needs.
 
     The refusal names the file the tests loaded and the copy they should
-    have loaded from. With a conftest that puts the copy's `src` first,
-    the run goes on and the `raise` is killed by the test of it.
+    have loaded from, and the two fixes it offers: with a conftest that
+    puts the copy's `src` first, or with pytest's `pythonpath` setting
+    naming `src`, the run goes on and the `raise` is killed by the test of
+    it.
     """
     project = os.path.realpath(tmp_path / "project")
     write_tree(project, SRC_LAYOUT)
-    if fixed:
+    if fixed == "conftest":
         write_tree(project, {"tests/conftest.py": FIXED_CONFTEST})
+    elif fixed == "pythonpath":
+        write_tree(project, {"pyproject.toml": "[tool.pytest.ini_options]\n"
+                                               "pythonpath = ['src']\n"})
     _with_on_path(monkeypatch, os.path.join(project, "src"))
     target = os.path.join(project, "src", "pkg", "gate.py")
 
-    if not fixed:
+    if fixed is None:
         with pytest.raises(mutate.Refusal) as caught:
             mutate.mutate(project, target, ["tests/test_gate.py"], ["RAISE"],
                           None)
         assert "was imported from %s, not from the copy at " % target in str(
             caught.value)
         assert "invective-" in str(caught.value)
-        # The conftest fix cannot help when a plugin imported it first.
+        assert "pytest's `pythonpath` setting naming the directory" in str(
+            caught.value)
+        # A plugin that imported it first is ahead of the conftest fix, and
+        # on a recent pytest behind the setting.
         assert str(caught.value).endswith(
-            "unless a plugin pytest loads before any conftest (an entry "
-            "point, PYTEST_PLUGINS, a -p in addopts) imported it first; then "
-            "the mutants are out of reach of this suite.")
+            "A plugin pytest loads before any conftest (an entry point, "
+            "PYTEST_PLUGINS, a -p in addopts) that imports it first is ahead "
+            "of a conftest; only the `pythonpath` setting, on pytest 8.4 or "
+            "later, is ahead of such a plugin.")
         return
     report = mutate.mutate(project, target, ["tests/test_gate.py"], ["RAISE"],
                            None)

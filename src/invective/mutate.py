@@ -765,19 +765,26 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 # `sys.path` entry, puts the project's own `src` on the path;
                 # the copy's is there only when something puts it there,
                 # since `python -m pytest` adds the directory it started in,
-                # the copy's top, and that does not reach a `src/`. The
-                # baseline is where this fires; every run is checked because
-                # the check is one field and this is the one place it is read.
+                # the copy's top, and that does not reach a `src/`. pytest's
+                # `pythonpath` setting does: each run reads it from the
+                # settings file in the copy, and so from the copy's rootdir,
+                # and pytest 8.4 and later apply it before loading any
+                # plugin, which a conftest comes after. The baseline is
+                # where this fires; every run is checked because the check
+                # is one field and this is the one place it is read.
                 raise Refusal(
                     "%s was imported from %s, not from the copy at %s, so no "
                     "mutant of it can reach the tests. An editable install, "
                     "or a sys.path entry, points the tests at the project "
-                    "itself; a conftest.py that puts the directory of the "
-                    "copy's own `src` first on sys.path, computed from its "
-                    "own __file__, makes them import the copy, unless a "
-                    "plugin pytest loads before any conftest (an entry point, "
-                    "PYTEST_PLUGINS, a -p in addopts) imported it first; then "
-                    "the mutants are out of reach of this suite."
+                    "itself; pytest's `pythonpath` setting naming the "
+                    "directory the package is in (`src`), or a conftest.py "
+                    "that puts the directory of the copy's own `src` first "
+                    "on sys.path, computed from its own __file__, makes them "
+                    "import the copy. A plugin pytest loads before any "
+                    "conftest (an entry point, PYTEST_PLUGINS, a -p in "
+                    "addopts) that imports it first is ahead of a conftest; "
+                    "only the `pythonpath` setting, on pytest 8.4 or later, "
+                    "is ahead of such a plugin."
                     % (src_rel, got.elsewhere, where))
             return got
 
