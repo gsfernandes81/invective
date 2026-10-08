@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import os
 import shutil
@@ -13,7 +15,7 @@ import time
 
 import pytest
 
-from invective import mutate
+from invective import mutate, process
 from invective import tree as trees
 
 from conftest import (commit, git, slow_run, stop_group, wait_ended,
@@ -328,6 +330,7 @@ def test_a_ref_s_copy_is_marked_before_git_fills_it(repo, monkeypatch):
     assert seen == [True]
 
 
+
 def test_a_copy_killed_while_it_is_removed_is_left_under_a_name_the_reaper_removes(
         tmp_path, monkeypatch):
     """Removing a large tree takes seconds and may delete the marker first,
@@ -403,11 +406,11 @@ def test_a_ref_stopped_during_the_checkout_leaves_no_copy_and_no_worktree(
         if args[:2] == ("worktree", "add"):
             # As git leaves it when the stop lands before it has finished.
             git(repo, "worktree", "lock", args[3])
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         return out
 
     monkeypatch.setattr(trees, "_git", stopped_after_the_add)
-    with pytest.raises(mutate._Terminated):
+    with pytest.raises(process.Terminated):
         with trees.git_ref(repo, "HEAD"):
             pass
 
@@ -438,11 +441,11 @@ def test_a_ref_stopped_during_the_checkout_through_a_linked_temp_dir_leaves_no_w
         out = real(root, *args)
         if args[:2] == ("worktree", "add"):
             git(repo, "worktree", "lock", args[3])
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         return out
 
     monkeypatch.setattr(trees, "_git", stopped_after_the_add)
-    with pytest.raises(mutate._Terminated):
+    with pytest.raises(process.Terminated):
         with trees.git_ref(repo, "HEAD"):
             pass
 
@@ -545,6 +548,15 @@ def test_a_ref_begins_by_removing_the_copies_of_dead_owners(repo, tmp_path):
 
     with trees.git_ref(repo, "HEAD"):
         assert not dead.exists()
+
+
+
+def test_git_imports_nothing_when_it_runs():
+    """Its process group and its stop are `process`'s, imported with this
+    module: a local import there runs on every git command."""
+    body = ast.parse(inspect.getsource(trees._git))
+    assert not [node for node in ast.walk(body)
+                if isinstance(node, (ast.Import, ast.ImportFrom))]
 
 
 @pytest.mark.parametrize("name", ["invective-leak1234",
@@ -686,14 +698,14 @@ def test_a_ref_stopped_during_the_checkout_stops_what_git_started(
         # The stop lands once the filler is running, however slowly the
         # processes before it started.
         if filler_pid.exists() and filler_pid.read_text():
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         signal.setitimer(signal.ITIMER_REAL, 0.1)
 
     previous = signal.signal(signal.SIGALRM, stop)
     filler = None
     try:
         signal.setitimer(signal.ITIMER_REAL, 0.5)
-        with pytest.raises(mutate._Terminated):
+        with pytest.raises(process.Terminated):
             with trees.git_ref(repo, "HEAD"):
                 pass
         filler = int(filler_pid.read_text())
@@ -727,7 +739,7 @@ def test_a_stop_during_the_removal_of_the_copy_goes_on_once_the_copy_is_gone(
     def rmtree(path, ignore_errors=False):
         calls.append(path)
         if len(calls) == 1:
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         # The pass after the stop is as quiet as the first: a file that will
         # not go does not replace the stop with an error of its own.
         if not ignore_errors:
@@ -735,7 +747,7 @@ def test_a_stop_during_the_removal_of_the_copy_goes_on_once_the_copy_is_gone(
         return real(path, ignore_errors=True)
 
     monkeypatch.setattr(trees.shutil, "rmtree", rmtree)
-    with pytest.raises(mutate._Terminated):
+    with pytest.raises(process.Terminated):
         with trees.working_tree(root):
             pass
     assert _left(tmp_path) == []
@@ -747,11 +759,11 @@ def test_a_stop_during_the_removal_of_the_worktree_still_removes_the_copy(
 
     def run(argv, *args, **kwargs):
         if "remove" in argv:
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         return real(argv, *args, **kwargs)
 
     monkeypatch.setattr(trees.subprocess, "run", run)
-    with pytest.raises(mutate._Terminated):
+    with pytest.raises(process.Terminated):
         with trees.git_ref(repo, "HEAD"):
             pass
     assert _left(tmp_path) == []

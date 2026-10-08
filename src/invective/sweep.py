@@ -28,8 +28,9 @@ import tempfile
 from invective.config import (check_pytest_settings, project_root,
                               relative_to_root)
 from invective.errors import Refusal
-from invective.mutate import (_STOP_GRACE, UNREACHED, _Terminated, _exit_by,
-                              stopping_on_sigterm)
+from invective.mutate import UNREACHED
+from invective.process import (STOP_GRACE, Terminated, exit_by,
+                               stopping_on_sigterm)
 from invective.tree import git_ref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -214,7 +215,7 @@ def covering(root, module, sources, tests_dir):
 
 #: How long an engine told to stop is given to unwind: its own grace for the
 #: run it stops, and the copy's removal on top.
-_GRACE = 2 * _STOP_GRACE  # invective: accept[equivalent: 2 -> 3] any bound past the engine's own grace serves
+_GRACE = 2 * STOP_GRACE  # invective: accept[equivalent: 2 -> 3] any bound past the engine's own grace serves
 
 
 def _engine(cmd, cwd):
@@ -223,7 +224,7 @@ def _engine(cmd, cwd):
     **Not `subprocess.run`, which on any exception kills its child outright,
     copy and all.** When this process is stopped while the engine runs, the
     engine is told, waited for, and only then is the exception let go: a
-    SIGTERM to the sweep, which `main`'s handler raises as `_Terminated`
+    SIGTERM to the sweep, which `main`'s handler raises as `Terminated`
     wherever it lands, is forwarded as one the engine unwinds on, and the
     copy is gone before the sweep is. `communicate` itself
     catches an interrupt, the subclass included, waits a quarter second for
@@ -234,11 +235,11 @@ def _engine(cmd, cwd):
                             stderr=subprocess.PIPE, text=True)
     try:
         stdout, stderr = proc.communicate()
-    # `_Terminated` is a `KeyboardInterrupt`, so this clause has to come
+    # `Terminated` is a `KeyboardInterrupt`, so this clause has to come
     # before that one: the other way round a SIGTERM to the sweep would fall
     # into the wait-only branch, the engine would never be told, and after
     # the wait it would be killed outright with its copy stranded.
-    except _Terminated:
+    except Terminated:
         proc.terminate()
         _finish(proc)
         raise
@@ -329,9 +330,9 @@ def main(argv=None):
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
-    except _Terminated as exc:
+    except Terminated as exc:
         # The ref's tree is gone; now die by the signal, as `run` does.
-        _exit_by(exc)
+        exit_by(exc)
     # **The handler covers the whole sweep, not only an engine's run.** A
     # SIGTERM between engines -- the walk for the next module's tests, a
     # row being printed, the JSON being written -- would otherwise take the
@@ -340,10 +341,10 @@ def main(argv=None):
     try:
         with stopping_on_sigterm():
             return _sweep(args, root)
-    except _Terminated as exc:
+    except Terminated as exc:
         # Any engine that was running is gone and its copy with it; now
         # write out what was printed and die by the signal, as `run` does.
-        _exit_by(exc)
+        exit_by(exc)
 
 
 def _settle(args, root):

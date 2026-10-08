@@ -62,7 +62,7 @@ cleared before the copy is removed.
 
 ## Signals
 
-A run stopped by ^C or SIGTERM removes its copy (`mutate.stopping_on_sigterm`
+A run stopped by ^C or SIGTERM removes its copy (`process.stopping_on_sigterm`
 turns the signal into an interrupt that unwinds through the copy's
 `finally`). A second SIGTERM during the cleanup is ignored, so the removal
 is not cut short; SIGKILL is the way to stop a cleanup that hangs, and the

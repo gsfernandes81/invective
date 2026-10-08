@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 
 from invective.errors import Refusal
+from invective.process import OWN_GROUP, stop
 
 #: Directories never copied: version control, caches, and the tools' own
 #: working space. A virtual environment is left out as well, whatever its
@@ -185,13 +186,11 @@ def _git(root: str, *args: str) -> str:
     """What git prints for *args*, run in *root*'s repository; a Refusal
     when it fails or there is no git. Stopped on the way out with everything
     it started, as a run is."""
-    # Here and not at the top: mutate imports this module.
-    from invective.mutate import _OWN_GROUP, _stop
     try:
         proc = subprocess.Popen(["git", "-C", root, *args],
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True,
-                                **_OWN_GROUP)
+                                **OWN_GROUP)
     except FileNotFoundError as exc:
         raise Refusal("a run on a git ref needs git, and there is no `git` "
                       "on the PATH") from exc
@@ -201,7 +200,7 @@ def _git(root: str, *args: str) -> str:
         # A SIGTERM or ^C. `git worktree add` fills the tree from a child,
         # `git reset --hard`, which killing git alone would leave writing
         # into the copy while it is removed, and running after the run.
-        _stop(proc)
+        stop(proc)
         raise
     if proc.returncode != 0:
         raise Refusal("git %s failed: %s" % (args[0], err.strip()))
