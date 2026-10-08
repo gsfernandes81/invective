@@ -215,7 +215,8 @@ def _engine(cmd, cwd):
     **Not `subprocess.run`, which on any exception kills its child outright,
     copy and all.** When this process is stopped while the engine runs, the
     engine is told, waited for, and only then is the exception let go: a
-    SIGTERM to the sweep is forwarded as one the engine unwinds on, and the
+    SIGTERM to the sweep, which `main`'s handler raises as `_Terminated`
+    wherever it lands, is forwarded as one the engine unwinds on, and the
     copy is gone before the sweep is. `communicate` itself
     catches an interrupt, the subclass included, waits a quarter second for
     the child and re-raises, so a SIGTERM takes that much longer per level
@@ -224,8 +225,7 @@ def _engine(cmd, cwd):
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
     try:
-        with stopping_on_sigterm():
-            stdout, stderr = proc.communicate()
+        stdout, stderr = proc.communicate()
     # `_Terminated` is a `KeyboardInterrupt`, so this clause has to come
     # before that one: the other way round a SIGTERM to the sweep would fall
     # into the wait-only branch, the engine would never be told, and after
@@ -324,11 +324,17 @@ def main(argv=None):
     except _Terminated as exc:
         # The ref's tree is gone; now die by the signal, as `run` does.
         _exit_by(exc)
+    # **The handler covers the whole sweep, not only an engine's run.** A
+    # SIGTERM between engines -- the walk for the next module's tests, a
+    # row being printed, the JSON being written -- would otherwise take the
+    # default action, and the rows printed to a file or a pipe so far would
+    # die in the buffer with the process.
     try:
-        return _sweep(args, root)
+        with stopping_on_sigterm():
+            return _sweep(args, root)
     except _Terminated as exc:
-        # The engine that was running is gone and its copy with it; now die
-        # by the signal, as `run` does.
+        # Any engine that was running is gone and its copy with it; now
+        # write out what was printed and die by the signal, as `run` does.
         _exit_by(exc)
 
 

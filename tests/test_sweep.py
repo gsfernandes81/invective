@@ -767,6 +767,41 @@ def test_a_terminated_sweep_terminates_the_engine_it_started(repo, monkeypatch):
     assert died == [signal.SIGTERM]
 
 
+def test_a_sigterm_between_engines_still_ends_the_sweep_by_the_signal(
+        repo, monkeypatch, capsys):
+    """Finding the next module's tests takes seconds on a large suite, and
+    no engine is running then. A SIGTERM there still goes through the
+    sweep's exit by the signal, which writes out the rows printed so far:
+    with the default action they would die in the buffer of a file or a
+    pipe. The handler is called directly, as the signal would call it, so
+    no signal reaches the process running the test."""
+    real = sweep.covering
+    calls = []
+
+    def covering(*args):
+        calls.append(args)
+        if len(calls) == 2:
+            handler = signal.getsignal(signal.SIGTERM)
+            assert callable(handler), handler
+            handler(signal.SIGTERM, None)
+        return real(*args)
+
+    monkeypatch.setattr(sweep, "covering", covering)
+    engine = _Engine(0, stdout="1/1 killed (100.0%), 0 survived\n")
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
+    died = []
+    monkeypatch.setattr(sweep, "_exit_by", lambda exc: died.append(exc.signum))
+
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                "--modules", _p("pkg/gate.py"), _p("pkg/sub/deep.py")])
+
+    assert died == [signal.SIGTERM]
+    assert len(engine.commands) == 1
+    said = capsys.readouterr().out
+    assert re.search(r"^%s +1/1 " % re.escape(_p("pkg/gate.py")), said, re.M)
+    assert _p("pkg/sub/deep.py") not in said
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows never delivers SIGTERM")
 def test_a_sweep_sent_sigterm_stops_its_engine_and_dies_by_the_signal(
         tmp_path):
