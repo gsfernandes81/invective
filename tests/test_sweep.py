@@ -204,6 +204,24 @@ def test_a_top_level_package_is_not_covered_by_a_library_module_ending_in_its_na
         _p("tests/test_app.py")]
 
 
+def test_a_package_at_the_project_s_top_is_imported_with_no_prefix(tmp_path):
+    """A relative import in the tests names a package of the tests' own:
+    `from ..app.core` in `tests/unit/` is `tests.app.core`, never the
+    project's `app/core.py`."""
+    root = str(tmp_path)
+    write_tree(root, {
+        "app/__init__.py": "",
+        "app/core.py": "x = 1\n",
+        "tests/__init__.py": "",
+        "tests/unit/__init__.py": "",
+        "tests/unit/test_rel.py": "from ..app.core import x\n",
+        "tests/unit/test_abs.py": "from app.core import x\n",
+    })
+
+    assert sweep.covering(root, _p("app/core.py"), ["."], "tests") == [
+        _p("tests/unit/test_abs.py")]
+
+
 def test_a_file_named_after_a_module_elsewhere_is_another_module_s(tmp_path):
     """`models.py` and `test_models.py` recur in every app of a mirrored
     layout. The file named after a module covers it at the top of the tests
