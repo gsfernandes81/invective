@@ -521,6 +521,8 @@ def test_the_project_being_measured_is_never_reaped(tree, tmp_path, name):
     project = _dead_owners_copy(tmp_path, name)
     shutil.copytree(tree, project, dirs_exist_ok=True)
     other = _dead_owners_copy(tmp_path, "invective-bbbbbbbb")
+    # A sibling whose name is a prefix of the project's is not the project.
+    prefix = _dead_owners_copy(tmp_path, name[:-1])
 
     with trees.working_tree(str(project)) as where:
         assert os.path.isfile(os.path.join(where, "pkg", "gate.py"))
@@ -528,6 +530,7 @@ def test_the_project_being_measured_is_never_reaped(tree, tmp_path, name):
     assert os.path.isfile(project / "pkg" / "gate.py")
     # The reaper still did its work on everything else.
     assert not other.exists()
+    assert not prefix.exists()
 
 
 def test_the_project_being_measured_is_never_reaped_from_inside_it(
