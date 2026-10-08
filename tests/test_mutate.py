@@ -1001,6 +1001,11 @@ def test_a_target_the_tests_import_from_outside_the_copy_is_refused(
         assert "was imported from %s, not from the copy at " % target in str(
             caught.value)
         assert "invective-" in str(caught.value)
+        # The conftest fix cannot help when a plugin imported it first.
+        assert str(caught.value).endswith(
+            "unless a plugin pytest loads before any conftest (an entry "
+            "point, PYTEST_PLUGINS, a -p in addopts) imported it first; then "
+            "the mutants are out of reach of this suite.")
         return
     report = mutate.mutate(project, target, ["tests/test_gate.py"], ["RAISE"],
                            None)

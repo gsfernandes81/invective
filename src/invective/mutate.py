@@ -768,7 +768,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "or a sys.path entry, points the tests at the project "
                     "itself; a conftest.py that puts the directory of the "
                     "copy's own `src` first on sys.path, computed from its "
-                    "own __file__, makes them import the copy."
+                    "own __file__, makes them import the copy, unless a "
+                    "plugin pytest loads before any conftest (an entry point, "
+                    "PYTEST_PLUGINS, a -p in addopts) imported it first; then "
+                    "the mutants are out of reach of this suite."
                     % (src_rel, got.elsewhere, where))
             return got
 
