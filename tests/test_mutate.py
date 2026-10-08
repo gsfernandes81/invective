@@ -1665,12 +1665,15 @@ def test_a_process_that_left_the_run_s_group_does_not_hold_invective(
         "def test_escape():\n"
         "    subprocess.Popen([sys.executable, '-c', %r], "
         "start_new_session=True)\n"
-        "    time.sleep(60)\n" % escaped, encoding="utf-8")
+        "    while not os.path.exists(%r):\n"
+        "        time.sleep(0.01)\n"
+        "    time.sleep(60)\n" % (escaped, str(pid_file)), encoding="utf-8")
 
     started = time.monotonic()
     try:
-        got = mutate.run_tests(str(tmp_path), ["test_escape.py"], timeout=2)
+        got = mutate.run_tests(str(tmp_path), ["test_escape.py"], timeout=3)
 
+        assert pid_file.exists(), "the test never got as far as starting it"
         assert got.code == mutate.TIMED_OUT
         assert time.monotonic() - started < 15, "waited on the escaped process"
     finally:
