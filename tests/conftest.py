@@ -220,7 +220,8 @@ def no_pytest_settings_above(path):
     """Skip the test when pytest, started in *path*, would read a settings
     file from a directory above it: the test is about a tree with none."""
     from invective import config
-    found = config._pytest_reads(os.path.realpath(path))
+    found = next(filter(None, map(config._stop,
+                                  config._up(os.path.realpath(path)))), None)
     if found is not None and config._holds_settings(found):
         pytest.skip("%s is above the temporary directory and holds pytest "
                     "settings" % found)

@@ -54,8 +54,9 @@ from pytest import ExitCode
 
 import pytest_invective
 from invective.accept import read as read_accepts
-from invective.config import (Config, load as load_config, project_root,
-                              pytest_settings, relative_to_root)
+from invective.config import (Config, check_pytest_settings,
+                              load as load_config, project_root,
+                              relative_to_root)
 from invective.errors import Refusal
 from invective.tree import git_ref, working_tree
 
@@ -583,10 +584,11 @@ def run_tests(where: str, tests: list[str], timeout: float,
               target: str = "") -> Verdict:
     """The selection, in *where*: *tests* as pytest arguments, and when
     *selection* names a file of node ids, one a line, those tests and no
-    others. *options* come after `-p pytest_invective` and before the rest
-    of invective's own: the plugin notes which modules were loaded before
-    it, and a forwarded `-p` plugin that imports the target has to come
-    after that note for the file it loaded to be the plugin's to name.
+    others, *tests* then deciding only where pytest's search for its
+    settings starts. *options* come after `-p pytest_invective` and before
+    the rest of invective's own: the plugin notes which modules were loaded
+    before it, and a forwarded `-p` plugin that imports the target has to
+    come after that note for the file it loaded to be the plugin's to name.
     *target*, the mutated module's path from the top of *where*, is what the
     plugin checks the tests loaded from the copy; none, and it checks
     nothing.
@@ -609,6 +611,7 @@ def run_tests(where: str, tests: list[str], timeout: float,
         env = {**os.environ, pytest_invective.VERDICT: verdict}
         if selection is not None:
             env[pytest_invective.SELECTION] = selection
+            env[pytest_invective.TYPED] = str(len(tests))
         if target:
             env[pytest_invective.TARGET] = target
         # `-p no:randomly` keeps the order, and so `-x`'s first failure, the
@@ -655,18 +658,17 @@ def run_tests(where: str, tests: list[str], timeout: float,
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
            limit: int | None, say=print, ref: str | None = None,
            exclude: tuple[str, ...] = (), selection: list[str] | None = None,
-           options: tuple[str, ...] = (), read: str | None = None,
-           given: bool = False) -> dict:
+           options: tuple[str, ...] = ()) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
     The mutants are written in a copy of *root* as it stands, *exclude* left
     out of it (`tree.working_tree`), or with *ref* in a worktree of that
     commit (`tree.git_ref`). *selection* is a list of node ids to run
-    instead of whatever *tests* collects, and *options* go to every run's
-    pytest, with the settings file `config.pytest_settings` settles on for
-    the tree: the one pytest reads there for *tests*, or *read*, the one a
-    pytest that read it names (*given* with `-c`). *say* receives each line
-    of progress as it happens.
+    instead of whatever *tests* collects, *tests* then only steering
+    pytest's search for its settings, and *options* go to every run's
+    pytest. A campaign whose runs would not go by the project's pytest
+    settings is refused (`config.check_pytest_settings`). *say* receives
+    each line of progress as it happens.
     """
     try:
         src_rel = relative_to_root(target, root)
@@ -685,8 +687,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
              else working_tree(root, exclude)) as where:
         # Settled before anything is said of the campaign: a run that could
         # not go by the project's settings is refused as itself.
-        options = (*options, *pytest_settings(
-            root, where, tests, ref=bool(ref), read=read, given=given))
+        # A run given its settings file with `-c`, as `pytest --mutate`
+        # forwards one, searches for none.
+        if "-c" not in options:
+            check_pytest_settings(root, where, tests, ref=bool(ref))
         listed = None
         if selection is not None:
             # One node id a line, in a file of invective's own: a selection

@@ -24,7 +24,8 @@ import subprocess
 import sys
 import tempfile
 
-from invective.config import project_root, pytest_settings, relative_to_root
+from invective.config import (check_pytest_settings, project_root,
+                              relative_to_root)
 from invective.errors import Refusal
 from invective.mutate import _STOP_GRACE, _Terminated, _exit_by, stopping_on_sigterm
 from invective.tree import git_ref
@@ -346,16 +347,15 @@ def main(argv=None):
 def _settle(args, root):
     """Refuse the sweep, once rather than as a `?` for each module, when
     every module's engine would refuse the pytest settings its runs would go
-    by (`config.pytest_settings`), decided on the tree the engines' mutants
-    are run in: on a ref the ref's own, made once for this; on the files as
-    they stand, those files, which every engine's copy is made of. What a
-    copy leaves out, or what is above the temporary directory, each engine
-    refuses on its own."""
+    by (`config.check_pytest_settings`), decided on the tree the engines'
+    mutants are run in: on a ref the ref's own, made once for this; on the
+    files as they stand, those files, which every engine's copy is made
+    of."""
     if not args.ref:
-        pytest_settings(root, root, [args.tests_dir])
+        check_pytest_settings(root, root, [args.tests_dir])
         return
     with stopping_on_sigterm(), git_ref(root, args.ref) as where:
-        pytest_settings(root, where, [args.tests_dir], ref=True)
+        check_pytest_settings(root, where, [args.tests_dir], ref=True)
 
 
 def _sweep(args, root):

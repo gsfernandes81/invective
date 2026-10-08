@@ -241,20 +241,23 @@ def test_mutate_whose_pytest_settings_are_above_the_project_is_refused(
     assert "1/1 killed (100.0%)" in done.stdout
 
 
-def test_a_settings_file_given_outside_the_project_is_refused(tree, tmp_path):
-    """`-c` skips pytest's search, so a file outside the project given with
-    it is what this run goes by, even when it sets nothing; no copy holds
-    it, and every mutant's run would go by the project's own settings."""
-    given = tmp_path / "elsewhere" / "pytest.ini"
-    write_tree(str(tmp_path), {"elsewhere/pytest.ini": "[pytest]\n"})
+def test_a_settings_file_given_outside_the_project_is_read_by_every_run(
+        tmp_path):
+    """`-c` skips pytest's search, so the file given is what this run goes
+    by, outside the project too: every mutant's run is given the same file,
+    whose strict xfail alone kills the mutant."""
+    project = os.path.realpath(tmp_path / "proj")
+    write_tree(project, {rel: text for rel, text in BELOW_THE_TOP.items()
+                         if rel != "tests/pytest.ini"})
+    given = os.path.realpath(tmp_path / "elsewhere" / "strict.ini")
+    write_tree(str(tmp_path), {"elsewhere/strict.ini":
+                               "[pytest]\nxfail_strict = true\n"})
 
-    done = pytest_in(tree, "-c", str(given), "--mutate=pkg/gate.py",
-                     "--mutate-only", "RAISE", "pkg/tests/test_gate.py")
+    done = pytest_in(project, "-c", given, "--mutate=pkg/gate.py",
+                     "--mutate-only", "RAISE", "tests")
 
-    assert done.returncode == 2, done.stdout + done.stderr
-    assert ("refused: pytest's settings file %s, given with -c, is outside "
-            "the project at %s" % (given, tree)) in done.stdout
-    assert "copy:" not in done.stdout
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed (100.0%)" in done.stdout
 
 
 def test_a_settings_file_found_above_the_project_that_sets_nothing_is_let_be(
@@ -274,25 +277,6 @@ def test_a_settings_file_found_above_the_project_that_sets_nothing_is_let_be(
         tmp_path) in done.stdout
     assert done.returncode == 0, done.stdout + done.stderr
     assert "1/1 killed (100.0%)" in done.stdout
-
-
-def test_settings_above_the_copy_of_a_project_with_none_are_refused(
-        settings_above_the_copy, tmp_path):
-    """pytest read no settings file here, so it has none to name to the
-    runs, and each would read the one above the temporary directory the
-    copy is in: the run is refused, naming it, before any test runs."""
-    proj = os.path.realpath(tmp_path / "proj")
-    write_tree(proj, {rel: text for rel, text in FILES.items()
-                      if rel != "pyproject.toml"})
-    os.mkdir(os.path.join(proj, ".git"))
-
-    done = pytest_in(proj, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
-                     "pkg/tests/test_gate.py")
-
-    assert done.returncode == 2, done.stdout + done.stderr
-    assert "refused: pytest reads %s, above the copy" % os.path.join(
-        str(tmp_path), "above", "pytest.ini") in done.stdout
-    assert not settings_above_the_copy.exists()
 
 
 #: A project whose pytest settings sit below its top, in `tests/`: pytest
@@ -318,10 +302,11 @@ BELOW_THE_TOP = {
 @pytest.mark.parametrize("given", [[], ["-c", _p("tests/pytest.ini")]],
                          ids=["found", "given"])
 def test_settings_below_the_top_reach_every_mutant_s_run(tmp_path, given):
-    """Each run starts at the top of the copy with only node ids to go by,
-    so without the file this pytest read it would read the top's
-    `pyproject.toml`, the xfail would not be strict, and the mutant would
-    survive.
+    """Each run starts at the top of the copy and collects the selection's
+    files, but its search for settings starts where this pytest's did, from
+    `tests`, or reads the file given with `-c`; from the top it would read
+    the top's `pyproject.toml`, the xfail would not be strict, and the
+    mutant would survive.
 
     `--mutate=pkg/gate.py` and not `--mutate pkg/gate.py`: pytest settles
     its settings before it knows the plugin's options, so it takes a
@@ -335,6 +320,73 @@ def test_settings_below_the_top_reach_every_mutant_s_run(tmp_path, given):
 
     assert done.returncode == 0, done.stdout + done.stderr
     assert "1/1 killed" in done.stdout
+
+
+#: A project whose tests directory holds a file that kills the gate's
+#: `>= 65` mutant as it is imported, and a test directory whose
+#: `conftest.py` marks every mutant's run that imports it.
+UNSELECTED = {
+    "pyproject.toml": "[project]\nname = 'p'\n[tool.pytest.ini_options]\n",
+    "pkg/__init__.py": "",
+    "pkg/gate.py": ("def admit(age, member):\n"
+                    "    if age < 18:\n"
+                    "        raise ValueError('under age')\n"
+                    "    if member and age >= 65:\n"
+                    "        return 'senior'\n"
+                    "    return 'adult'\n"),
+    "tests/test_gate.py": ("from pkg import gate\n"
+                           "\n"
+                           "def test_adult():\n"
+                           "    assert gate.admit(30, False) == 'adult'\n"),
+    "tests/test_other.py": ("from pkg import gate\n"
+                            "assert gate.admit(65, True) == 'senior'\n"
+                            "\n"
+                            "def test_other():\n"
+                            "    pass\n"),
+    "tests/test_dir/conftest.py": (
+        "import os, pathlib\n"
+        "if os.environ.get('INVECTIVE_VERDICT'):\n"
+        "    pathlib.Path(os.environ['MARK']).write_text('imported')\n"),
+    "tests/test_dir/test_more.py": "def test_more():\n    pass\n",
+}
+
+
+@pytest.mark.parametrize("paths", [
+    ["tests", "--ignore=tests/test_other.py"],
+    ["tests", "-k", "test_adult"],
+    ["tests/test_gate.py", "tests/test_other.py", "-k", "test_adult"],
+], ids=["ignored", "deselected-directory", "deselected-file"])
+def test_every_mutant_s_run_collects_the_selection_alone(tmp_path, paths):
+    """The paths this pytest was given start each run's search for
+    settings, and no more: a file the selection leaves out is not collected
+    to kill a mutant, nor a `conftest.py` imported for a directory that
+    holds no test of it."""
+    project = os.path.realpath(tmp_path / "proj")
+    write_tree(project, UNSELECTED)
+    mark = tmp_path / "imported.txt"
+
+    done = pytest_in(project, "--mutate=pkg/gate.py", "--mutate-only", "CMP",
+                     *paths, env={"MARK": str(mark)})
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "0/2 killed" in done.stdout
+    assert not mark.exists()
+
+
+def test_each_run_s_search_starts_from_the_paths_this_one_s_did():
+    """The paths among the arguments that are there, as typed; with none,
+    pytest searched from the directory it was started in."""
+    here = os.path.join(SRC, "..")
+
+    def searched(typed):
+        return _plugin_here()._searched_from(SimpleNamespace(
+            option=SimpleNamespace(file_or_dir=typed),
+            invocation_params=SimpleNamespace(dir=here)))
+
+    assert searched(["tests", "nowhere.py", "tests/test_cli.py::test_x"]) == [
+        "tests", "tests/test_cli.py::test_x"]
+    assert searched(["nowhere.py"]) == [here]
+    assert searched([]) == [here]
 
 
 def test_mutate_inside_a_mutant_s_own_run_is_a_usage_error(repo, tmp_path):
@@ -837,18 +889,39 @@ def test_a_ref_that_lacks_a_selected_test_is_refused(repo):
     assert "test_added_since" in done.stdout
 
 
-def test_a_settings_file_the_tree_lacks_is_refused_for_that(repo):
+def test_a_ref_s_runs_go_by_the_ref_s_settings_as_invective_run_s_do(
+        repo, tmp_path):
     """An uncommitted `pytest.ini`, which this pytest read and the ref does
-    not hold: every run would die loading it, and a refusal that called that
-    a red baseline would send a person to fix tests that pass."""
-    write_tree(repo, {"pkg/tests/pytest.ini": "[pytest]\nxfail_strict = true\n"})
+    not hold: every run goes by the settings the ref holds, as `invective
+    run --ref` does, so both give the same score, and the mutant only the
+    uncommitted strict xfail would kill survives."""
+    commit(repo, {"pkg/tests/test_strict.py": (
+        "import pytest\n"
+        "from pkg import gate\n"
+        "\n"
+        "@pytest.mark.xfail(raises=ValueError)\n"
+        "def test_a_minor_fails():\n"
+        "    gate.admit(10, False)\n")})
+    write_tree(repo, {"pkg/tests/pytest.ini":
+                      "[pytest]\nxfail_strict = true\n"})
+    out = tmp_path / "plugin.json"
 
     done = pytest_in(repo, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
-                     "--mutate-ref", "HEAD", "pkg/tests")
+                     "--mutate-ref", "HEAD", "--mutate-json", str(out),
+                     "pkg/tests/test_strict.py")
 
-    assert done.returncode == 2, done.stdout + done.stderr
-    assert _p("pkg/tests/pytest.ini") in done.stdout
-    assert "is RED on the unmutated tree" not in done.stdout
+    assert done.returncode == 0, done.stdout + done.stderr
+    ran = subprocess.run(
+        [sys.executable, "-m", "invective", "run", "--target", "pkg/gate.py",
+         "--tests", "pkg/tests/test_strict.py", "--only", "RAISE", "--ref",
+         "HEAD", "--json",
+         str(tmp_path / "run.json")], cwd=repo, capture_output=True,
+        text=True, timeout=300, env={**os.environ, "PYTHONPATH": SRC})
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    (plugin,) = json.loads(out.read_text(encoding="utf-8"))
+    run = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    assert (plugin["killed"], plugin["mutants"]) == (
+        run["killed"], run["mutants"]) == (0, 1)
 
 
 def test_a_ref_s_settings_above_the_project_in_its_repository_are_read(

@@ -10,7 +10,6 @@ import re
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import warnings
 
@@ -867,70 +866,11 @@ def _beside(tmp_path, monkeypatch, files):
     return proj
 
 
-def test_a_project_without_a_pytest_table_has_its_runs_read_its_pyproject(
-        settings_above_the_copy, tmp_path, monkeypatch, capsys):
-    """pytest falls back on the nearest `pyproject.toml` only after looking
-    in every directory above for a settings file of its own, so a run
-    started in the copy would read one above the temporary directory, and
-    that directory's `conftest.py`. Given the `pyproject.toml` the run
-    started here reads, every run stops there."""
-    _beside(tmp_path, monkeypatch, {"pyproject.toml": "[project]\nname = 'p'\n"})
-
-    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
-                        "--only", "RAISE"]) == 0
-
-    assert "1/1 killed (100.0%)" in capsys.readouterr().out
-    assert not settings_above_the_copy.exists()
-
-
-def test_settings_above_the_copy_of_a_project_with_none_are_refused(
-        settings_above_the_copy, tmp_path, monkeypatch, capsys):
-    """A project pytest reads no settings file in has none to give its runs,
-    so what they would read above the copy refuses the run, named."""
-    proj = _beside(tmp_path, monkeypatch, {"pyproject.toml": ""})
-    os.remove(os.path.join(proj, "pyproject.toml"))
-    os.mkdir(os.path.join(proj, ".git"))
-
-    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
-                        "--only", "RAISE"]) == 2
-
-    err = capsys.readouterr().err
-    assert "refused: pytest reads %s, above the copy" % os.path.join(
-        str(tmp_path), "above", "pytest.ini") in err
-    assert not settings_above_the_copy.exists()
-
-
-def test_settings_above_a_copy_reached_through_a_link_are_refused(
-        settings_above_the_copy, tmp_path, monkeypatch, capsys):
-    """pytest's search climbs the directories its working directory is
-    really in, so with the temporary directory reached through a link, what
-    is above the link's target is what every run would read."""
-    link = tmp_path / "link"
-    try:
-        os.symlink(tmp_path / "above" / "tmp", link, target_is_directory=True)
-    except OSError:
-        pytest.skip("no symlinks")
-    monkeypatch.setattr(tempfile, "tempdir", str(link))
-    for name in ("TMPDIR", "TEMP", "TMP"):
-        monkeypatch.setenv(name, str(link))
-    proj = _beside(tmp_path, monkeypatch, {"pyproject.toml": ""})
-    os.remove(os.path.join(proj, "pyproject.toml"))
-    os.mkdir(os.path.join(proj, ".git"))
-
-    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
-                        "--only", "RAISE"]) == 2
-
-    err = capsys.readouterr().err
-    assert "refused: pytest reads %s, above the copy" % os.path.join(
-        os.path.realpath(tmp_path), "above", "pytest.ini") in err
-    assert not settings_above_the_copy.exists()
-
-
 def test_a_settings_file_below_the_top_stops_every_run_s_search_there(
         settings_above_the_copy, tmp_path, monkeypatch, capsys):
-    """The tests' own `pytest.ini`, below the top, is named to every run,
-    whose search then ends there and never reaches what is above the copy;
-    the project's `pyproject.toml` holds no table that would stop it."""
+    """The tests' own `pytest.ini`, below the top, ends every run's search,
+    which starts from the tests' paths and never reaches what is above the
+    copy; the project's `pyproject.toml` holds no table that would stop it."""
     _beside(tmp_path, monkeypatch, {
         "pyproject.toml": "[project]\nname = 'p'\n",
         "pkg/tests/pytest.ini": "[pytest]\n"})
@@ -1594,15 +1534,15 @@ def test_a_baseline_that_runs_out_of_time_is_refused_for_that(repo, monkeypatch)
     assert "RED" not in str(caught.value)
 
 
-@pytest.mark.parametrize("ini, held", [
-    (os.path.join("pkg", "tests", "pytest.ini"), False),
-    ("pyproject.toml", True)])
-def test_a_forwarded_settings_file_the_tree_lacks_is_refused_for_that(
-        repo, monkeypatch, ini, held):
-    """The settings file a pytest read is named to every run with `-c`, so
-    one the tree does not hold would fail each run before a test is
-    collected: refused as itself, with no run made, and not as a red
-    baseline. One the tree holds is handed on."""
+def test_a_run_given_its_settings_file_is_not_searched_for_one(tmp_path,
+                                                               monkeypatch):
+    """`-c` skips pytest's search, so the workspace's settings above the
+    member, refused for a search that would reach them, are not read and
+    the campaign goes on to its baseline."""
+    no_pytest_settings_above(tmp_path)
+    top = os.path.realpath(tmp_path / "ws")
+    write_tree(top, WORKSPACE)
+    member = os.path.join(top, "m")
     runs = []
 
     def timed_out(where, tests, timeout, selection, options, target):
@@ -1612,15 +1552,17 @@ def test_a_forwarded_settings_file_the_tree_lacks_is_refused_for_that(
     monkeypatch.setattr(mutate, "run_tests", timed_out)
 
     with pytest.raises(mutate.Refusal) as caught:
-        mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"],
-                      None, read=os.path.join(repo, ini))
-    if held:
-        assert runs == [("-c", ini)]
-        assert "took longer than" in str(caught.value)
-    else:
-        assert runs == []
-        assert ("pytest read its settings from %s, which the tree" % ini
-                in str(caught.value))
+        mutate.mutate(member, os.path.join(member, GATE), ["tests"],
+                      ["RAISE"], None)
+    assert str(caught.value).startswith("pytest reads %s," % os.path.join(
+        top, "pyproject.toml"))
+    assert runs == []
+
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(member, os.path.join(member, GATE), ["tests"],
+                      ["RAISE"], None, options=("-c", "pyproject.toml"))
+    assert "took longer than" in str(caught.value)
+    assert runs == [("-c", "pyproject.toml")]
 
 
 def test_kills_by_time_are_said_apart_from_the_rest():
@@ -1825,22 +1767,6 @@ def test_a_ref_s_runs_read_the_ref_s_own_settings_file(repo, capsys):
                         "pkg/tests/test_strict.py", "--only", "RAISE",
                         "--ref", old]) == 0
     assert "1/1 killed (100.0%)" in capsys.readouterr().out
-
-
-def test_a_settings_file_the_copy_leaves_out_is_refused(tree, monkeypatch,
-                                                        capsys):
-    """The run started here reads `pytest.ini`, which `exclude` leaves out
-    of the copy: every run in there would go by the `pyproject.toml`."""
-    write_tree(tree, {"pytest.ini": "[pytest]\nxfail_strict = true\n",
-                      "pyproject.toml": ("[tool.pytest.ini_options]\n"
-                                         "[tool.invective]\n"
-                                         "exclude = ['pytest.ini']\n")})
-    monkeypatch.chdir(tree)
-
-    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
-                        "--only", "RAISE"]) == 2
-    assert ("refused: pytest read its settings from pytest.ini, which the "
-            "tree" in capsys.readouterr().err)
 
 
 def test_a_selected_test_the_tree_does_not_have_is_refused(tree):

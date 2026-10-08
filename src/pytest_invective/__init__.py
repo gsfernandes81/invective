@@ -7,11 +7,13 @@ Without `--mutate` the plugin does nothing.
 
 It also works from inside each of those runs. When `INVECTIVE_SELECTION`
 names a file of node ids, one a line, the run collects their files and keeps
-those tests and no others. When `INVECTIVE_VERDICT` names a file, the first
-test to fail, and any selected test not found, are written there as the
-session ends. That is how the engine learns which test killed a mutant. When
-`INVECTIVE_TARGET` names the mutated module, the verdict also says whether
-the tests loaded that module from somewhere other than the copy they ran in.
+those tests and no others; the last `INVECTIVE_TYPED` arguments of its
+command line then only start pytest's search for settings. When
+`INVECTIVE_VERDICT` names a file, the first test to fail, and any selected
+test not found, are written there as the session ends. That is how the
+engine learns which test killed a mutant. When `INVECTIVE_TARGET` names the
+mutated module, the verdict also says whether the tests loaded that module
+from somewhere other than the copy they ran in.
 
 **Nothing from `invective` is imported unless `--mutate` is given.** pytest
 before 8.4 loads plugins before a repository's own `pythonpath` setting takes
@@ -37,6 +39,10 @@ SELECTION = "INVECTIVE_SELECTION"
 #: The environment variable that names the mutated module, as a path from
 #: the top of the copy with `/` separators.
 TARGET = "INVECTIVE_TARGET"
+#: The environment variable that holds how many arguments at the end of a
+#: selection's run are paths pytest's search for settings starts from, and
+#: not tests to collect.
+TYPED = "INVECTIVE_TYPED"
 
 #: The modules the interpreter and pytest had loaded as this plugin was
 #: imported. The engine asks for the plugin with `-p`, which pytest imports
@@ -97,6 +103,14 @@ def pytest_load_initial_conftests(early_config, parser, args):
     with open(path, encoding="utf-8") as fh:
         wanted = fh.read().splitlines()
     early_config.stash[_WANTED] = wanted
+    # pytest has found its settings from the paths the run was given. They
+    # are dropped before it loads a `conftest.py` for them or collects them:
+    # the run stands for one that collected the selection alone.
+    typed = int(os.environ.pop(TYPED, "0"))
+    if typed:
+        del args[-typed:]
+        given = early_config.known_args_namespace
+        given.file_or_dir = given.file_or_dir[:-typed]
     # Their files, to collect; `pytest_collection_modifyitems` keeps the tests.
     args.extend(dict.fromkeys(node.partition("::")[0] for node in wanted))
 
@@ -394,21 +408,23 @@ def pytest_runtestloop(session):
                                  "nothing to notice a mutant")
         rules = settings.load(root)
         selection = [_node(item, root) for item in session.items]
-        # Every run starts at the top of the copy with node ids for its only
-        # paths, so it would never find a settings file below the top
-        # (`tests/pytest.ini` found from `pytest tests`, or one given with
-        # `-c`) and would go by the top's. The file this pytest read is
-        # named to each instead, as the tree the mutants are run in holds
-        # it, which also makes its directory the rootdir, as it was here.
-        ini = config.inipath
+        # Every run starts at the top of the copy and collects the
+        # selection's files. Its pytest's search for settings starts where
+        # this one's did, from the same paths given from the top, and a
+        # file named with `-c` is given from the top too, so that one
+        # inside the project is the tree's own.
+        here = str(config.invocation_params.dir)
+        typed = mutate.rewrite_tests(_searched_from(config), here, root)
+        options = _forwarded(config)
+        if config.option.inifilename:
+            options += ("-c", *mutate.rewrite_tests(
+                [config.option.inifilename], here, root))
         for target in targets:
             report = mutate.mutate(
-                root, target, [], _only(config),
+                root, target, typed, _only(config),
                 config.getoption("mutate_limit"), say=say,
                 ref=config.getoption("mutate_ref"), exclude=rules.exclude,
-                selection=selection, options=_forwarded(config),
-                read=None if ini is None else str(ini),
-                given=bool(config.option.inifilename))
+                selection=selection, options=options)
             reports.append(report)
             failures.extend("%s: %s" % (report["target"], failure)
                             for failure in mutate.gate(report, rules))
@@ -432,6 +448,16 @@ def pytest_runtestloop(session):
     session.testsfailed += len(failures)
     # invective: accept[equivalent: True -> False] pluggy stops at any result that is not None
     return True
+
+
+def _searched_from(config):
+    """The paths pytest's search for settings started from: those among the
+    run's arguments that are there, as typed, or with none the directory it
+    was started in."""
+    here = str(config.invocation_params.dir)
+    return [arg for arg in config.option.file_or_dir
+            if os.path.exists(os.path.join(here, arg.partition("::")[0]))
+            ] or [here]
 
 
 _ENGINE_S = frozenset({"terminal", "xdist", "xdist.plugin", __name__})

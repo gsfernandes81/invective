@@ -12,18 +12,18 @@ The project they belong to is found here too: `project_root` walks up from
 where a command is started to the nearest directory pytest would take for a
 project's own, so a command works from anywhere inside the project.
 
-So are pytest's own settings, in one decision every command makes about the
-tree its mutants are run in (`pytest_settings`): which settings file every
-run there is given, searched for as far as the tree's top (the project's
-for a copy, the repository's for a ref's tree, `repository_top`), or the
-refusal of a run whose settings, or a `conftest.py` pytest loads for them,
-the tree does not hold (`pytest_file_left_out`, `outside_refusal`).
+So is whether pytest's own settings reach the mutants' runs
+(`check_pytest_settings`): every run goes by what pytest's search finds in
+the tree the mutants are run in, and a run whose project reads settings, or
+a `conftest.py`, from above its top, where no such tree reaches, is refused.
 """
 
 from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Iterator, Sequence
+from itertools import islice
 from typing import NamedTuple
 
 # pytest's own reader of `.ini` and `.cfg` files, so that one reads here as
@@ -86,8 +86,8 @@ def project_root(start: str | None = None) -> str:
     a copy of the top, so pytest's settings, and a `conftest.py` it loads
     because its rootdir is above the top, are left behind when they are
     above it: each run would go by other settings, and a mutant only they
-    kill would survive. `pytest_settings` refuses such a run, naming the
-    file.
+    kill would survive. `check_pytest_settings` refuses such a run, naming
+    the file.
     """
     start = os.path.abspath(start if start is not None else os.getcwd())
     # On Windows a drive letter or a name may be spelt in either case. Both
@@ -95,32 +95,23 @@ def project_root(start: str | None = None) -> str:
     # directory, which is physical, and `~` may reach the same directory
     # through a link.
     home = os.path.normcase(os.path.realpath(os.path.expanduser("~")))
-    here = start
-    while True:
+    for here in _up(start):
         if os.path.normcase(os.path.realpath(here)) == home and here != start:
             return start
         if any(os.path.isfile(os.path.join(here, name)) for name in _PROJECT):
             return here
         if any(os.path.exists(os.path.join(here, name)) for name in _REPOSITORY):
             return start
-        up = os.path.dirname(here)
-        if up == here:
-            return start
-        here = up
+    return start
 
 
 def repository_top(path: str) -> str | None:
     """The nearest directory at or above *path* that is a repository's own,
     one of `_REPOSITORY` in it (a worktree holds `.git` as a file); None
     when there is none."""
-    here = os.path.abspath(path)
-    while True:
-        if any(os.path.exists(os.path.join(here, name)) for name in _REPOSITORY):
-            return here
-        up = os.path.dirname(here)
-        if up == here:
-            return None
-        here = up
+    return next((here for here in _up(os.path.abspath(path))
+                 if any(os.path.exists(os.path.join(here, name))
+                        for name in _REPOSITORY)), None)
 
 
 def _inside(path: str, root: str) -> str | None:
@@ -165,8 +156,9 @@ _SETTINGS = ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini",
 def _holds_settings(path: str) -> bool | None:
     """Whether pytest finds settings in *path*, one of `_SETTINGS`: None when
     it is no settings file to pytest and the search goes on past it, False
-    when pytest stops at it and finds nothing set, True when it sets
-    something. A file pytest cannot read is True: pytest stops on it too.
+    when pytest stops at it and finds nothing set that can change what a run
+    says, True when it does. A file pytest cannot read is True: pytest stops
+    on it too.
     """
     name = os.path.basename(path)
     try:
@@ -174,252 +166,135 @@ def _holds_settings(path: str) -> bool | None:
             with open(path, "rb") as fh:
                 data = tomllib.load(fh)
             if name != "pyproject.toml":
-                return bool(data.get("pytest"))
+                return _sets(data.get("pytest"))
             table = data.get("tool", {}).get("pytest")
             # `[tool.pytest.ini_options]`, even empty, or `[tool.pytest]`'s
             # own keys (pytest 9) make it pytest's.
             if not isinstance(table, dict) or not table:
                 return None
-            own = [key for key in table if key != "ini_options"]
-            return bool(own) or bool(table.get("ini_options"))
+            own = {key: value for key, value in table.items()
+                   if key != "ini_options"}
+            return _sets(own) or _sets(table.get("ini_options"))
         ini = iniconfig.IniConfig(path)
         section = "tool:pytest" if name == "setup.cfg" else "pytest"
         if section in ini.sections:
-            return bool(ini.sections[section])
+            return _sets(dict(ini.sections[section]))
         return False if name in ("pytest.ini", ".pytest.ini") else None
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError,
             iniconfig.ParseError):
         return True
 
 
-def _pytest_reads(start: str, top: str | None = None) -> str | None:
-    """The settings file pytest reads when its search starts at *start*:
-    the first of `_SETTINGS` on the way up that is pytest's, or with none
-    the nearest `pyproject.toml`, where pytest puts its rootdir instead.
+def _sets(table: object) -> bool:
+    """Whether a table of pytest's settings sets anything but `markers`.
 
-    The way up ends at *top*, a directory at or above *start*, when one is
-    given, as it does in a tree with nothing above it; *top*'s own files are
-    looked at."""
-    here, nearest_pyproject = start, None
-    # On Windows the same directory may be spelt in either case.
-    end = None if top is None else os.path.normcase(top)
+    `markers` only registers marks' names. Without it an unregistered mark
+    warns, and under strict markers, or with warnings made errors, it fails
+    collection, so every run, the baseline first, is red and refused: it
+    never changes a verdict silently. Every other setting can."""
+    if isinstance(table, dict):
+        return bool(table.keys() - {"markers"})
+    return bool(table)
+
+
+def _up(start: str, end: str | None = None) -> Iterator[str]:
+    """The directories from *start* up to *end*, both included, or to the
+    root of the filesystem."""
+    here = start
     while True:
-        for name in _SETTINGS:
-            path = os.path.join(here, name)
-            if not os.path.isfile(path):
-                continue
-            if name == "pyproject.toml" and nearest_pyproject is None:
-                nearest_pyproject = path
-            if _holds_settings(path) is not None:
-                return path
+        yield here
         up = os.path.dirname(here)
-        if up == here or os.path.normcase(here) == end:
-            return nearest_pyproject
+        # On Windows the same directory may be spelt in either case.
+        if up == here or (end is not None and
+                          os.path.normcase(here) == os.path.normcase(end)):
+            return
         here = up
 
 
-def pytest_file_left_out(top: str, inifile: str | None) -> str | None:
-    """The file a pytest whose settings file is *inifile* reads and a copy of
-    the tree at *top* has not: *inifile* itself when it is outside *top* and
-    sets something, or a `conftest.py` between it and *top*, which pytest
-    loads because its rootdir is up there; None when there is neither, and
-    every run in the copy is the run started here.
-    """
-    if inifile is None:
-        return None
-    try:
-        relative_to_root(inifile, top)
-        return None
-    except ValueError:
-        pass
-    if _holds_settings(inifile):
-        return inifile
-    # Settings that set nothing still move pytest's rootdir, and with it how
-    # far up it loads `conftest.py`: from the settings file's directory down,
-    # and only there. The copy's own are copied.
-    rootdir = os.path.dirname(os.path.abspath(inifile))
-    here = os.path.dirname(os.path.abspath(top))
-    try:
-        relative_to_root(here, rootdir)
-    except ValueError:
-        return None
-    while True:
-        conftest = os.path.join(here, "conftest.py")
-        if os.path.isfile(conftest):
-            return conftest
-        up = os.path.dirname(here)
-        if here == rootdir or up == here:
-            return None
-        here = up
+def _stop(here: str) -> str | None:
+    """The file in the directory *here* at which pytest's search for its
+    settings ends; None when the search goes on past it."""
+    paths = (os.path.join(here, name) for name in _SETTINGS)
+    return next((path for path in paths if os.path.isfile(path)
+                 and _holds_settings(path) is not None), None)
 
 
-def pytest_reads(root: str, args: tuple[str, ...] | list[str],
-                 within: str) -> str | None:
-    """The settings file pytest finds in the tree whose top is *within*, a
-    directory at or above *root*, for a run with *args*, as given from
-    *root*: `_pytest_reads` from where pytest starts its search, the deepest
-    directory every path among them is under, or *root* with none, as far
-    as *within*."""
+def _start(where: str, args: Sequence[str]) -> str:
+    """Where pytest's search for settings starts for a run in *where* with
+    *args*: the deepest directory every path among them is under, or with
+    none, or one that leads out of *where*, *where* itself."""
     dirs = []
     for arg in args:
-        if arg.startswith("-"):
-            continue
-        path = os.path.join(root, arg.partition("::")[0])
-        if os.path.isdir(path):
-            dirs.append(os.path.abspath(path))
-        elif os.path.exists(path):
-            dirs.append(os.path.dirname(os.path.abspath(path)))
-    start = os.path.abspath(root)
+        path = os.path.abspath(os.path.join(where, arg.partition("::")[0]))
+        if not arg.startswith("-") and os.path.exists(path):
+            dirs.append(path if os.path.isdir(path) else os.path.dirname(path))
     try:
-        if dirs:
-            common = os.path.commonpath(dirs)
-            relative_to_root(common, root)
-            start = common
+        common = os.path.commonpath(dirs) if dirs else where
     except ValueError:
-        # A path out of the project (on Windows, on another drive) is
-        # refused on its own account; pytest's search is the one from here.
-        start = os.path.abspath(root)
-    return _pytest_reads(start, os.path.abspath(within))
+        # On Windows, a path on another drive.
+        return where
+    return common if _inside(common, where) is not None else where
 
 
-def _read_above(top: str, inside: str | None) -> str | None:
-    """The settings file pytest reads above *top* when its search found
-    *inside* (None for nothing) on its way up to *top*: the first file above
-    that stops its search, or with nothing found below, the `pyproject.toml`
-    it falls back on; None when it reads *inside*."""
-    if inside is not None and _holds_settings(inside) is not None:
-        return None
-    above = _pytest_reads(os.path.dirname(top))
-    if above is not None and (inside is None
-                              or _holds_settings(above) is not None):
-        return above
-    return None
+def _read_above(top: str, fallback: bool) -> str | None:
+    """What pytest reads above the directory *top*, its search having found
+    nothing below that ends it, that can change what a run says: the
+    settings file that ends the search up there, when it sets something;
+    or else the first `conftest.py` on the way up to pytest's rootdir, the
+    directory of that file, or with none of the nearest `pyproject.toml`
+    unless *fallback* says the tree holds a nearer one. None when there is
+    neither."""
+    conftest = loaded = None
+    for here in islice(_up(top), 1, None):
+        if conftest is None and os.path.isfile(os.path.join(here,
+                                                            "conftest.py")):
+            conftest = os.path.join(here, "conftest.py")
+        stop = _stop(here)
+        if stop is not None:
+            return stop if _holds_settings(stop) else conftest
+        if not fallback and os.path.isfile(os.path.join(here,
+                                                        "pyproject.toml")):
+            fallback, loaded = True, conftest
+    return loaded
 
 
-def pytest_config_above(root: str, args: tuple[str, ...] | list[str] = ()
-                        ) -> str | None:
-    """`pytest_file_left_out` for a run of pytest with *args*, as given from
-    *root*, whose search goes on above *root*."""
-    return pytest_file_left_out(root, _read_above(
-        root, pytest_reads(root, args, within=root)))
+def check_pytest_settings(root: str, where: str, args: Sequence[str] = (),
+                          ref: bool = False) -> None:
+    """Refuse, naming the file, a campaign whose runs would go by other
+    pytest settings than the project's own pytest does, so that a mutant
+    only those settings kill would be reported as a survivor.
 
-
-def pytest_settings(root: str, where: str,
-                    args: tuple[str, ...] | list[str] = (), ref: bool = False,
-                    read: str | None = None, given: bool = False
-                    ) -> tuple[str, ...]:
-    """The `-c` every run in *where* is given, the tree the mutants of the
-    project at *root* are run in, at the project's place in it: a copy of
-    *root*, or with *ref* a ref's worktree. A `Refusal` naming the file when
-    the runs there could not go by the settings the run started here goes
-    by, and a mutant only those kill would be reported as a survivor.
-
-    **The tree's top bounds it**: *root* for a copy, and for a ref the top
-    of the repository *root* is in, which the worktree's top stands for. A
-    file inside the tree is given to every run, from the project's place
-    and with `..` when it is above it, so that each run reads it and its
-    search ends there; started in the copy, the search would otherwise go on
-    above the temporary directory. A file above the tree's top is in no
-    tree: refused when it, or a `conftest.py` its rootdir brings in, would
-    matter (`pytest_file_left_out`), and let be when not.
-
-    **The file the run started here reads** is *read* when a pytest that
-    read it says so (`pytest --mutate`'s own; *given* when it was named with
-    `-c`, which decides the run even when it sets nothing). Otherwise it is
-    found as pytest finds it for a run with *args*, as given from the
-    project: for a copy in the files as they stand, so that a file the copy
-    leaves out is refused and not replaced by another one the copy holds;
-    for a ref in the ref's own tree, as the ref's own pytest reads it; above
-    the tree's top, in the files as they stand around it.
-
-    With no file to give, every run's search goes on above *where*, and a
-    file there that would matter refuses the run too.
+    Each run is pytest's own, started with *args* at the project's place
+    in *where*, the tree the mutants of the project at *root* are run in: a
+    copy of *root*, or with *ref* a ref's worktree, whose top stands for the
+    top of the repository *root* is in. invective names no settings file to
+    it, and its search for one is pytest's: when a file in the tree ends
+    it, nothing outside the tree is read. When none does, the project's own
+    pytest goes on above the project's top (the repository's, for a ref),
+    where no tree reaches: a settings file there that sets something, or a
+    `conftest.py` pytest loads because its rootdir is there, refuses.
     """
     top = (repository_top(root) if ref else None) or root
-    option = outside = None
-    if read is None:
-        tree = where if ref else root
-        inside = pytest_reads(tree, args, within=os.path.normpath(
-            os.path.join(tree, os.path.relpath(top, root))))
-        if inside is not None:
-            option = os.path.relpath(inside, tree)
-        outside = _read_above(top, inside)
-    else:
-        try:
-            option = os.path.relpath(
-                os.path.join(top, relative_to_root(read, top)), root)
-        except ValueError:
-            outside = read
-    if outside is not None:
-        if given:
-            whose = (("the repository", "ref's tree", "ref's") if ref else
-                     ("the project", "copy", "project's"))
-            raise Refusal("pytest's settings file %s, given with -c, is "
-                          "outside %s at %s: no %s holds it, and every "
-                          "mutant's run would read the %s own settings "
-                          "instead" % (outside, whose[0], top, whose[1],
-                                       whose[2]))
-        left_out = pytest_file_left_out(top, outside)
-        if left_out:
-            raise outside_refusal(left_out, top, ref)
-    if option is None:
-        # With no file to name, nothing in the tree stops a run's search: it
-        # goes on above the copy, into the temporary directory's ancestors,
-        # where a settings file, or a `conftest.py` its rootdir brings in,
-        # would decide every run, the baseline's too. pytest's search starts
-        # from its working directory as the kernel spells it, so through a
-        # temporary directory reached by a link it climbs the target's.
-        left_out = pytest_config_above(os.path.realpath(where))
-        if left_out:
-            raise Refusal(
-                "pytest reads %s, above the copy the mutants are run in at "
-                "%s, so every run in there would go by it; give the project "
-                "pytest settings of its own (an empty "
-                "[tool.pytest.ini_options] table in pyproject.toml is "
-                "enough), or a temporary directory with nothing above it"
-                % (left_out, where))
-        return ()
-    # A file the tree lacks fails every run in pytest's config load: a
-    # baseline that reads as red when no test failed.
-    if not os.path.isfile(os.path.join(where, option)):
-        raise Refusal(
-            "pytest read its settings from %s, which the tree the mutants "
-            "are made in does not hold (excluded, ignored by git, or not in "
-            "the ref), so no run in there can go by the settings this one "
-            "did" % option)
-    return ("-c", option)
-
-
-def outside_refusal(left_out: str, root: str, ref: bool = False) -> Refusal:
-    """The refusal of a run whose pytest reads *left_out*, which the tree the
-    mutants are run in does not hold: a copy of the project at *root*, or
-    with *ref* a ref's tree, *root* then being the top of its repository.
-    Every mutant's run would go by other settings than the run started
-    here, and a mutant only they kill would be reported as a survivor."""
-    above, tree, into = (
+    tree = os.path.normpath(os.path.join(where, os.path.relpath(top, root)))
+    fallback = False
+    for here in _up(_start(where, args), tree):
+        if _stop(here) is not None:
+            return
+        fallback = fallback or os.path.isfile(os.path.join(here,
+                                                           "pyproject.toml"))
+    left = _read_above(top, fallback)
+    if left is None:
+        return
+    above, held, into = (
         ("the top of the repository", "the ref's tree", "the repository")
         if ref else ("the project's top", "the copy", "the project"))
     said = ("pytest reads %s, which is above %s %s, so %s the mutants are run "
             "in does not hold it and every run in there would go by other "
-            "settings; " % (left_out, above, root, tree))
-    if os.path.basename(left_out) == "conftest.py":
-        # Running from its directory would copy whatever is above it too.
-        return Refusal(said + "move it into %s, or give the project pytest "
-                       "settings of its own, which stop pytest there" % into)
-    there = os.path.normcase(os.path.realpath(os.path.dirname(left_out)))
-    home = os.path.normcase(os.path.realpath(os.path.expanduser("~")))
-    # The home directory is nobody's project, and a copy made from it, or
-    # from a directory above it, would carry everything in it. A root of the
-    # filesystem is never offered either: on Windows a drive's root need not
-    # hold the home directory (`D:\` while it is on `C:`), and a copy of it
-    # is a copy of the whole drive. A ref's tree is its repository's from
-    # wherever invective is run, so running it elsewhere changes nothing.
-    if (ref or os.path.dirname(there) == there
-            or _inside(home, there) is not None):
-        return Refusal(said + "move them into %s" % into)
-    return Refusal(said + "move them into the project, or run invective from "
-                   "%s, so that the copy is made from there"
-                   % os.path.dirname(left_out))
+            "settings; " % (left, above, top, held))
+    if os.path.basename(left) == "conftest.py":
+        raise Refusal(said + "move it into %s, or give the project pytest "
+                      "settings of its own, which stop pytest there" % into)
+    raise Refusal(said + "move them into %s" % into)
 
 
 def load(root: str) -> Config:
