@@ -287,6 +287,12 @@ def outside_refusal(left_out: str, root: str) -> Refusal:
         # Running from its directory would copy whatever is above it too.
         return Refusal(said + "move it into the project, or give the project "
                        "pytest settings of its own, which stop pytest there")
+    there = os.path.normcase(os.path.realpath(os.path.dirname(left_out)))
+    home = os.path.normcase(os.path.realpath(os.path.expanduser("~")))
+    # The home directory is nobody's project, and a copy made from it, or
+    # from a directory above it, would carry everything in it.
+    if home == there or home.startswith(there + os.sep):
+        return Refusal(said + "move them into the project")
     return Refusal(said + "move them into the project, or run invective from "
                    "%s, so that the copy is made from there"
                    % os.path.dirname(left_out))

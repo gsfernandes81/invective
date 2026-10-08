@@ -332,6 +332,27 @@ def test_a_settings_file_above_the_top_is_given_to_no_run(tmp_path):
     assert config.pytest_settings_option(os.path.join(top, "m")) == ()
 
 
+def test_the_home_directory_is_not_offered_as_where_to_run_from(
+        tmp_path, monkeypatch):
+    """Running from the home directory would copy all of it into the temporary
+    directory, keys and `.env` files with it; a workspace below it is the
+    place to run from."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    home = str(config.outside_refusal(str(tmp_path / "pyproject.toml"),
+                                      str(tmp_path / "proj")))
+    above = str(config.outside_refusal(
+        str(tmp_path.parent / "pyproject.toml"), str(tmp_path / "proj")))
+    ws = str(config.outside_refusal(str(tmp_path / "ws" / "pyproject.toml"),
+                                    str(tmp_path / "ws" / "proj")))
+
+    assert "run invective from" not in home
+    assert "move them into the project" in home
+    assert "run invective from" not in above
+    assert "run invective from %s," % (tmp_path / "ws") in ws
+
+
 def test_a_conftest_pytest_loads_above_the_project_s_top_is_named(tmp_path):
     """Settings that set nothing still put pytest's rootdir above the top,
     and pytest loads every `conftest.py` from there down, which the copy
