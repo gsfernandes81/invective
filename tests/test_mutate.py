@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import io
 import json
 import os
@@ -80,29 +81,27 @@ def test_a_docstring_is_never_a_mutation_site():
 def test_the_reported_line_is_the_line_that_was_broken():
     """`_apply` must break the site `_sites` named, or the report lies.
 
-    The two walk separate trees -- the original for reporting, a deep copy for
-    mutating -- and they correspond only because `ast.walk` is deterministic.
-    If that ever stops being true the report still looks perfectly plausible
-    and points at the wrong lines, which is worse than no report.
+    `_sites` names the node, and the module's path for it leads `_apply` to
+    it. If the two ever stop meeting, the report still looks perfectly
+    plausible and points at the wrong lines, which is worse than no report.
     """
-    tree = ast.parse(SAMPLE)
-    sites = mutate._sites(tree)
-    idx = next(i for i, (k, _n, _w) in enumerate(sites) if k == "RAISE")
-    mutated = ast.unparse(mutate._apply(tree, idx))
+    module = mutate._Module(SAMPLE)
+    idx = next(i for i, (k, _n, _w) in enumerate(module.sites) if k == "RAISE")
+    mutated = ast.unparse(mutate._apply(module, idx, module.tree))
     assert "raise ValueError" not in mutated
     # and the original is untouched: the caller reuses it for every mutant
-    assert "raise ValueError" in ast.unparse(tree)
+    assert "raise ValueError" in ast.unparse(module.tree)
 
 
 def test_one_mutant_changes_exactly_one_thing():
-    tree = ast.parse(SAMPLE)
-    base = ast.unparse(tree)
+    module = mutate._Module(SAMPLE)
+    base = ast.unparse(module.tree)
     seen = set()
-    for i in range(len(mutate._sites(tree))):
-        out = ast.unparse(mutate._apply(tree, i))
+    for i in range(len(module.sites)):
+        out = ast.unparse(mutate._apply(module, i, module.tree))
         assert out != base, "site %d changed nothing" % i
         seen.add(out)
-    assert len(seen) == len(mutate._sites(tree)), "two sites collided"
+    assert len(seen) == len(module.sites), "two sites collided"
 
 
 @pytest.mark.parametrize("source, kind, change, mutant", [
@@ -122,25 +121,24 @@ def test_a_mutant_is_the_change_its_description_names(source, kind, change,
     Each source holds exactly one site, so a site that went missing, or one
     that turned into another kind, shows up as well as a wrong rewrite.
     """
-    tree = ast.parse(source)
+    module = mutate._Module(source)
 
-    assert [(k, w) for k, _n, w in mutate._sites(tree)] == [(kind, change)]
-    assert ast.unparse(mutate._apply(tree, 0)) == mutant
+    assert [(k, w) for k, _n, w in module.sites] == [(kind, change)]
+    assert ast.unparse(mutate._apply(module, 0, module.tree)) == mutant
     # And written into the source, the mutant is that text, bare, inside the
     # site's span: the one place the exact spelling of every kind is pinned.
-    assert mutate._text_of(source, tree, 0) == (mutant, True)
+    assert mutate._text_of(module, 0) == (mutant, True)
 
 
 def test_a_nested_bool_op_is_wrapped_so_it_stays_nested():
     """`a or b or c` is one flat `or`, a different tree from `(a or b) or c`
     with the same meaning; the bare text is wrong here, and the splice must
     notice and write the parenthesised form rather than fall back."""
-    tree = ast.parse("x = a and b or c\n")
+    module = mutate._Module("x = a and b or c\n")
 
     # The outer `or` is site 0, the inner `and` site 1.
-    assert [w for _k, _n, w in mutate._sites(tree)] == ["Or -> And", "And -> Or"]
-    assert mutate._text_of("x = a and b or c\n", tree, 1) == (
-        "x = (a or b) or c\n", True)
+    assert [w for _k, _n, w in module.sites] == ["Or -> And", "And -> Or"]
+    assert mutate._text_of(module, 1) == ("x = (a or b) or c\n", True)
 
 
 #: Formatting `ast.unparse` loses: a comment on a mutated line, odd spacing,
@@ -170,13 +168,13 @@ def test_a_mutant_differs_from_its_source_only_inside_the_node_s_span(ending):
     and a lone `\\r` is a line to it too.
     """
     source = FORMATTED.replace("\n", ending)
-    tree = ast.parse(source)
+    module = mutate._Module(source)
     before = mutate._LINE_END.split(source)[::2]
-    sites = mutate._sites(tree)
+    sites = module.sites
     assert len(sites) == 8, [k for k, _n, _w in sites]
 
     for index, (kind, node, what) in enumerate(sites):
-        text, spliced = mutate._text_of(source, tree, index)
+        text, spliced = mutate._text_of(module, index)
         assert spliced, (kind, what)
         after = mutate._LINE_END.split(text)[::2]
         assert len(after) == len(before), (kind, what)
@@ -187,9 +185,10 @@ def test_a_mutant_differs_from_its_source_only_inside_the_node_s_span(ending):
         last = before[node.end_lineno - 1].encode()[node.end_col_offset:]
         assert after[node.lineno - 1].encode().startswith(first)
         assert after[node.end_lineno - 1].encode().endswith(last)
-        assert ast.dump(ast.parse(text)) == ast.dump(mutate._apply(tree, index))
+        assert ast.dump(ast.parse(text)) == ast.dump(
+            mutate._apply(module, index, module.tree))
         # A mutant is never its original.
-        assert ast.dump(ast.parse(text)) != ast.dump(tree), (kind, what)
+        assert ast.dump(ast.parse(text)) != ast.dump(module.tree), (kind, what)
 
 
 #: A t-string: a compare, an untouched `{x+1}` whose own constant is a site
@@ -206,12 +205,12 @@ def test_a_site_inside_a_t_string_is_spliced_and_mutated():
     and the whole file written instead is rebuilt from the stale text, so
     the mutant is the original program and survives every suite.
     """
-    tree = ast.parse(TEMPLATE)
+    module = mutate._Module(TEMPLATE)
     texts = {}
-    for index, (kind, _node, what) in enumerate(mutate._sites(tree)):
-        text, spliced = mutate._text_of(TEMPLATE, tree, index)
+    for index, (kind, _node, what) in enumerate(module.sites):
+        text, spliced = mutate._text_of(module, index)
         assert spliced, (kind, what)
-        assert ast.dump(ast.parse(text)) != ast.dump(tree), (kind, what)
+        assert ast.dump(ast.parse(text)) != ast.dump(module.tree), (kind, what)
         texts.setdefault((kind, what), []).append(text.split("\n")[1])
     line = '    return t"{a < b} {x+1} {1} {not a} {True!r:>{3}}"'
     assert texts == {
@@ -234,10 +233,9 @@ def test_a_t_string_site_the_splice_cannot_hold_is_written_mutated(
     original one rebuilt from the text the parser gave it, while the
     untouched `{x+1}` beside it keeps its own text."""
     source = 'def f(a, b, x):\n    return t"{%s = } {x+1}"\n' % expression
-    tree = ast.parse(source)
-    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree))
-                if k == kind]
-    text, spliced = mutate._text_of(source, tree, index)
+    module = mutate._Module(source)
+    (index,) = [i for i, (k, _n, _w) in enumerate(module.sites) if k == kind]
+    text, spliced = mutate._text_of(module, index)
     assert not spliced
     assert [n.str for n in ast.walk(ast.parse(text))
             if isinstance(n, ast.Interpolation)] == [mutated, "x+1"]
@@ -249,15 +247,14 @@ def test_a_nested_t_string_site_written_whole_is_the_mutant():
     rebuilt from the inner one's, which must be the edited text already, or
     the file unparsed is the original program and survives every suite."""
     source = "def f(a, b):\n    return t\"{t'{a<b = }'}\"\n"
-    tree = ast.parse(source)
-    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree))
-                if k == "CMP"]
-    text, spliced = mutate._text_of(source, tree, index)
+    module = mutate._Module(source)
+    (index,) = [i for i, (k, _n, _w) in enumerate(module.sites) if k == "CMP"]
+    text, spliced = mutate._text_of(module, index)
     assert not spliced
     assert [n.str for n in ast.walk(ast.parse(text))
             if isinstance(n, ast.Interpolation)] == ["t'a<b = {a <= b!r}'",
                                                      "a <= b"]
-    assert ast.dump(ast.parse(text)) != ast.dump(tree)
+    assert ast.dump(ast.parse(text)) != ast.dump(module.tree)
 
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
@@ -267,10 +264,10 @@ def test_a_site_inside_a_nested_t_string_is_spliced():
     as `_apply` does: from the inner's raw `x+2` the two would differ only
     in that spacing, and the mutant would be the whole file unparsed."""
     source = "def f(x):\n    return t\"{t'{x+1}'}\"\n"
-    tree = ast.parse(source)
-    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree))
+    module = mutate._Module(source)
+    (index,) = [i for i, (k, _n, _w) in enumerate(module.sites)
                 if k == "CONST"]
-    text, spliced = mutate._text_of(source, tree, index)
+    text, spliced = mutate._text_of(module, index)
     assert spliced is True
     assert text == source.replace("x+1", "x+2")
 
@@ -284,11 +281,10 @@ def test_every_site_below_a_non_ascii_line_is_spliced():
               '    if age < 18:\n'
               '        raise ValueError("under age")\n'
               '    return True\n')
-    tree = ast.parse(source)
-    sites = list(mutate._sites(tree))
-    assert sites
-    for index, site in enumerate(sites):
-        assert mutate._text_of(source, tree, index)[1] is True, site
+    module = mutate._Module(source)
+    assert module.sites
+    for index, site in enumerate(module.sites):
+        assert mutate._text_of(module, index)[1] is True, site
 
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
@@ -298,20 +294,18 @@ def test_a_wrapped_site_after_a_multiline_interpolation_is_spliced():
     the span's, less the ones the head already carries, or the line count
     is wrong and the whole file is written instead."""
     source = 'def f(a, b, c):\n    return t"""{a <\n b}""" and c\n'
-    tree = ast.parse(source)
-    assert mutate._text_of(source, tree, 0) == (
+    assert mutate._text_of(mutate._Module(source), 0) == (
         source.replace(" and c", " or c"), True)
 
 
 def test_a_splice_that_changes_the_line_count_is_not_held(monkeypatch):
     """A splice that parses to the mutant but adds a line moves every line
     after it, so it is not the mutant of the report: the whole file is."""
-    source = "x = a < b\ny = 1\n"
-    tree = ast.parse(source)
+    module = mutate._Module("x = a < b\ny = 1\n")
     splice = mutate._splice
     monkeypatch.setattr(mutate, "_splice",
                         lambda *args: splice(*args) + "\n")
-    assert mutate._text_of(source, tree, 0)[1] is False
+    assert mutate._text_of(module, 0)[1] is False
 
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
@@ -319,22 +313,21 @@ def test_a_whole_file_that_is_not_the_mutant_is_refused(monkeypatch):
     """The file unparsed is checked as the splice is: a mutated tree whose
     interpolation still carries the original text unparses to the original
     program, and that is refused rather than handed to the tests."""
-    source = 'def f(a, b):\n    return t"{a<b = }"\n'
-    tree = ast.parse(source)
-    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree))
-                if k == "CMP"]
+    module = mutate._Module('def f(a, b):\n    return t"{a<b = }"\n')
+    (index,) = [i for i, (k, _n, _w) in enumerate(module.sites) if k == "CMP"]
     apply = mutate._apply
 
-    def stale(tree, index):
-        clone = apply(tree, index)
-        for node in ast.walk(clone):
-            if isinstance(node, ast.Interpolation):
-                node.str = "a<b"
+    def stale(module, index, base):
+        clone = apply(module, index, base)
+        if base is module.tree:
+            for node in ast.walk(clone):
+                if isinstance(node, ast.Interpolation):
+                    node.str = "a<b"
         return clone
 
     monkeypatch.setattr(mutate, "_apply", stale)
     with pytest.raises(mutate.Refusal, match="unparsed is not this mutant"):
-        mutate._text_of(source, tree, index)
+        mutate._text_of(module, index)
 
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
@@ -344,31 +337,197 @@ def test_a_whole_file_the_parser_rejects_is_refused_not_raised():
     that is not its mutant, not a `SyntaxError` out of the run."""
     source = 'def f(a):\n    return t"{(lambda: a < 1)=}"\n'
     with pytest.raises(mutate.Refusal, match="unparsed is not this mutant"):
-        mutate._text_of(source, ast.parse(source), 0)
+        mutate._text_of(mutate._Module(source), 0)
 
 
 def test_not_is_wrapped_so_its_removal_stays_inside_its_span():
     """`not (a or b)` without its `not` is the parenthesised `or` and not the
     bare one `ast.unparse` writes, so the comment and the line numbers around
     it are kept only if `not` is among the wrapped kinds."""
-    source = "x = y and not (a or b)  # kept\n"
-    tree = ast.parse(source)
+    module = mutate._Module("x = y and not (a or b)  # kept\n")
 
-    assert [w for _k, _n, w in mutate._sites(tree)] == [
+    assert [w for _k, _n, w in module.sites] == [
         "And -> Or", "not X -> X", "Or -> And"]
-    assert mutate._text_of(source, tree, 1) == (
+    assert mutate._text_of(module, 1) == (
         "x = y and (a or b)  # kept\n", True)
 
 
 def test_the_raise_operator_really_removes_the_refusal():
     """The operator class that catches a deleted refusal, driven end to end."""
-    tree = ast.parse(SAMPLE)
-    idx = next(i for i, (k, _n, _w) in enumerate(mutate._sites(tree))
-               if k == "RAISE")
+    module = mutate._Module(SAMPLE)
+    idx = next(i for i, (k, _n, _w) in enumerate(module.sites) if k == "RAISE")
+    mutant = mutate._apply(module, idx, module.tree)
     ns = {}
-    exec(compile(mutate._apply(tree, idx), "<mutant>", "exec"), ns)
+    exec(compile(mutant, "<mutant>", "exec"), ns)
     # The refusal is gone, so the call that should have raised falls through.
     assert ns["refuse"](1, True, False) is True
+
+
+#: Every kind, each reached through fields and lists alike: a `not` inside a
+#: `BoolOp`, a `raise` in a body inside a body, a compare in an `elif`, and
+#: constants in a default, a subscript and a tuple.
+NESTED = ("def f(a, b, c=1):\n"
+          "    for x in a:\n"
+          "        with c:\n"
+          "            if x < 0:\n"
+          "                raise ValueError(x)\n"
+          "            elif b and not x or c[2] >= 3:\n"
+          "                try:\n"
+          "                    raise KeyError\n"
+          "                except (TypeError, KeyError):\n"
+          "                    return [y is None for y in (x, True)]\n"
+          "    return {k: not v for k, v in a if k != 0}\n")
+
+#: The interpolations whose text `_apply` brings in step, and the ones it
+#: leaves: one inside another's expression, three deep with a debug field,
+#: a `not` that is an expression whole, a constant in a format spec (whose
+#: interpolation's own `x+1` is not the edit's), and an untouched `{x+1}`
+#: beside each.
+NESTED_TEMPLATE = (
+    "def g(a, b, x):\n"
+    "    return (t\"{t'{a<b}'} {x+1}\", t\"{x+1:>{3}} {not a}\",\n"
+    "            t\"{t'{t\"{x == 1 = }\"}'} {a and not b} {x+1}\")\n")
+
+ALL_NESTED = [NESTED, pytest.param(NESTED_TEMPLATE, marks=pytest.mark.skipif(
+    sys.version_info < (3, 14), reason="t-strings"))]
+
+
+class _Unwrap(ast.NodeTransformer):
+    def __init__(self, target):
+        self.target = target
+
+    def visit_UnaryOp(self, node):
+        self.generic_visit(node)
+        return node.operand if node is self.target else node
+
+
+class _ToPass(ast.NodeTransformer):
+    def __init__(self, target):
+        self.target = target
+
+    def visit_Raise(self, node):
+        return ast.Pass() if node is self.target else node
+
+
+def _apply_to_a_copy(tree, index):
+    """Site *index* of *tree* broken in a deep copy of the whole tree, found
+    there by a walk of its own, with every interpolation whose expression
+    holds the edit given its text back: the mutant `_apply` must make
+    without the copy."""
+    clone = copy.deepcopy(tree)
+    kind, node, _what = mutate._sites(clone)[index]
+    if kind == "CMP":
+        node.ops[0] = mutate._CMP_SWAP[type(node.ops[0])]()
+    elif kind == "BOOL":
+        node.op = ast.Or() if isinstance(node.op, ast.And) else ast.And()
+    elif kind == "NOT":
+        clone = _Unwrap(node).visit(clone)
+    elif kind == "CONST":
+        if node.value is True or node.value is False:
+            node.value = not node.value
+        else:
+            node.value = node.value + 1
+    elif kind == "RAISE":
+        clone = _ToPass(node).visit(clone)
+    if sys.version_info >= (3, 14):
+        edited = node.operand if kind == "NOT" else node
+        for outer in reversed(list(ast.walk(clone))):
+            if (isinstance(outer, ast.Interpolation)
+                    and any(m is edited for m in ast.walk(outer.value))):
+                outer.str = ast.unparse(outer.value)
+    return ast.fix_missing_locations(clone)
+
+
+@pytest.mark.parametrize("source", ALL_NESTED)
+def test_a_mutant_is_the_whole_tree_copied_and_broken(source):
+    """`_apply` copies the site's path alone, and must make the tree a copy
+    of the whole file broken at the site is, from the tree and the twin
+    both: a path that leads to another node, an edit made to the wrong copy,
+    or an interpolation's text refreshed that holds no edit (the format
+    spec's) is a mutant that is not the one the report names."""
+    module = mutate._Module(source)
+    if source is NESTED:
+        assert {k for k, _n, _w in module.sites} == set(mutate.OPERATORS)
+    for index in range(len(module.sites)):
+        for base in (module.tree, module.twin):
+            assert ast.dump(mutate._apply(module, index, base)) == ast.dump(
+                _apply_to_a_copy(base, index)), module.sites[index]
+
+
+@pytest.mark.parametrize("source", ALL_NESTED)
+def test_no_mutant_edits_the_trees_every_mutant_is_made_from(source):
+    """Every mutant of a file is made from its one tree and its one twin,
+    and shares with them every node off its path: an edit of a list or a
+    node they hold carries one mutant's edit into each one after it."""
+    module = mutate._Module(source)
+    before = [ast.dump(t, include_attributes=True)
+              for t in (module.tree, module.twin)]
+    for index in range(len(module.sites)):
+        mutate._text_of(module, index)
+        mutate._apply(module, index, module.tree)
+    assert [ast.dump(t, include_attributes=True)
+            for t in (module.tree, module.twin)] == before
+
+
+def test_no_mutant_copies_the_whole_tree(monkeypatch):
+    """A copy of the whole tree for each mutant is most of what its text
+    costs on a large file, so only the site's path is copied."""
+    module = mutate._Module(NESTED)
+    deepcopy = copy.deepcopy
+    given = []
+
+    def spy(x, *args):
+        given.append(x)
+        return deepcopy(x, *args)
+
+    monkeypatch.setattr(copy, "deepcopy", spy)
+    for index in range(len(module.sites)):
+        mutate._text_of(module, index)
+    # Only a site's own node is deep-copied, never an ancestor: a class or a
+    # function around the site is most of the tree on many a file.
+    nodes = [node for _kind, node, _what in module.sites]
+    assert given and all(any(x is node for node in nodes) for x in given)
+
+
+def test_a_campaign_walks_its_target_for_sites_once(tree, monkeypatch):
+    """The sites, and each one's path, are found once for the campaign: a
+    walk for each mutant costs as much as its text on a large file."""
+    write_tree(tree, {"pkg/gate.py": NESTED})
+    sites = mutate._sites
+    walked = []
+    monkeypatch.setattr(mutate, "_sites",
+                        lambda tree_: walked.append(tree_) or sites(tree_))
+    monkeypatch.setattr(mutate, "run_tests",
+                        lambda *a, **k: mutate.Verdict(True, 0, "", ""))
+    report = mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None)
+    assert report["mutants"] > 1
+    assert len(walked) == 1
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
+def test_a_t_string_mutant_is_compared_with_the_twin():
+    """The splice's parse has every interpolation's text normalised, so the
+    mutant it is compared with is made from the twin, whose texts are too.
+    Made from the tree, the untouched `{x+1}` keeps its raw text, no splice
+    of the compare matches it, and the whole file is refused."""
+    module = mutate._Module('def f(a, b, x):\n    return t"{a<b} {x+1}"\n')
+    (index,) = [i for i, (k, _n, _w) in enumerate(module.sites) if k == "CMP"]
+    assert mutate._text_of(module, index) == (
+        module.source.replace("a<b", "a <= b"), True)
+
+
+def test_a_campaign_leaves_the_warning_filters_as_it_found_them(
+        tree, monkeypatch):
+    """Each mutant's parse is silenced by setting the process's warning
+    filters aside and back: a filter left behind would silence, for the rest
+    of the process, warnings that are not invective's to hide."""
+    monkeypatch.setattr(mutate, "run_tests",
+                        lambda *a, **k: mutate.Verdict(True, 0, "", ""))
+    filters = warnings.filters
+    before = list(filters)
+    report = mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None)
+    assert report["mutants"]
+    assert warnings.filters is filters and warnings.filters == before
 
 
 def test_a_red_baseline_is_a_refusal_and_not_a_perfect_score(repo, monkeypatch):
@@ -725,11 +884,11 @@ def test_a_site_the_splice_cannot_hold_falls_back_to_the_whole_file_and_says_so(
     closing lines.
     """
     source = "def f():\n    raise E(\n        1); y = 3\n"
-    tree_ = ast.parse(source)
-    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree_))
+    module = mutate._Module(source)
+    (index,) = [i for i, (k, _n, _w) in enumerate(module.sites)
                 if k == "RAISE"]
-    assert mutate._text_of(source, tree_, index) == (
-        ast.unparse(mutate._apply(tree_, index)), False)
+    assert mutate._text_of(module, index) == (
+        ast.unparse(mutate._apply(module, index, module.tree)), False)
 
     write_tree(tree, {"pkg/gate.py": source})
     monkeypatch.setattr(mutate, "run_tests",
@@ -760,17 +919,16 @@ def test_a_site_this_python_cannot_write_is_refused_and_not_a_traceback():
     """3.12 and later write both compares inside their spans. Before, the
     outer one's own text cannot be written, and the whole file cannot be
     either, so each site is a `Refusal` and never the `ValueError`."""
-    tree = ast.parse(UNWRITABLE)
-    sites = mutate._sites(tree)
-    assert [k for k, _n, _w in sites] == ["CMP", "CMP"]
-    for index in range(len(sites)):
+    module = mutate._Module(UNWRITABLE)
+    assert [k for k, _n, _w in module.sites] == ["CMP", "CMP"]
+    for index in range(len(module.sites)):
         if sys.version_info >= (3, 12):
-            text, spliced = mutate._text_of(UNWRITABLE, tree, index)
+            text, spliced = mutate._text_of(module, index)
             assert spliced and ast.dump(ast.parse(text)) == ast.dump(
-                mutate._apply(tree, index))
+                mutate._apply(module, index, module.tree))
         else:
             with pytest.raises(mutate.Refusal) as caught:
-                mutate._text_of(UNWRITABLE, tree, index)
+                mutate._text_of(module, index)
             assert "ast.unparse cannot write the file" in str(caught.value)
 
 
