@@ -451,6 +451,176 @@ def test_a_worker_waiting_on_its_run_lets_a_text_be_made(tmp_path):
     assert back == [["text", "after"]]
 
 
+def test_an_exception_as_a_text_s_turn_begins_leaves_the_workers_free():
+    """An exception as `alone` lets its lock go, once it is the text's
+    turn, ends the text before it is made, and does not leave every worker
+    held off for ever."""
+    hush = mutate._Hush()
+    raised = []
+
+    class Turn(threading.Condition):
+        def __exit__(self, *exc):
+            super().__exit__(*exc)
+            if hush._alone and not raised:
+                raised.append(True)
+                raise KeyboardInterrupt
+
+    hush._turn = Turn()
+    with pytest.raises(KeyboardInterrupt):
+        with hush.alone():
+            pytest.fail("the text was made")
+    assert raised and not hush._alone
+    entered = threading.Event()
+
+    def worker():
+        with hush.shared():
+            entered.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    assert entered.wait(5), "a worker is held off for ever"
+
+
+def test_a_worker_held_off_gives_up_once_the_campaign_is_stopping():
+    """While a text is being made, a worker that would start its task, or
+    come back from waiting on its run, waits; once the campaign is stopping
+    it gives up, raising `Stopped`, so a halt never waits on a text. What
+    the hush counts is still right once the text is done."""
+    stop = threading.Event()
+    hush = mutate._Hush(stop)
+    got = {}
+    aside, back, inside, done = (threading.Event() for _ in range(4))
+
+    def first():
+        try:
+            with hush.shared():
+                with mutate._Hush.aside():
+                    aside.set()
+                    assert back.wait(10)
+                got["first"] = "back in"
+        except mutate.Stopped:
+            got["first"] = "stopped"
+
+    def second():
+        try:
+            with hush.shared():
+                got["second"] = "in"
+        except mutate.Stopped:
+            got["second"] = "stopped"
+
+    def text():
+        with hush.alone():
+            inside.set()
+            assert done.wait(10)
+
+    threads = [threading.Thread(target=first, daemon=True)]
+    threads[0].start()
+    try:
+        assert aside.wait(10)
+        threads.append(threading.Thread(target=text, daemon=True))
+        threads[-1].start()
+        assert inside.wait(10)
+        back.set()
+        threads.append(threading.Thread(target=second, daemon=True))
+        threads[-1].start()
+        time.sleep(0.5)
+        assert got == {}, "a worker went on while a text was made"
+        stop.set()
+        for thread in (threads[0], threads[2]):
+            thread.join(5)
+        assert got == {"first": "stopped", "second": "stopped"}
+    finally:
+        back.set()
+        done.set()
+        for thread in threads:
+            thread.join(5)
+    assert (hush._sharing, hush._alone, hush._asking) == (0, False, 0)
+
+
+#: A campaign, run in a process of its own, with a ^C landing on the main
+#: thread at the start of a lock's `__exit__`, before the release, where
+#: 3.12 and later can land one: the handler is called there, as Python calls
+#: it. Each run waits out of the hush, as a real one does, and says green.
+#: `hush` lands it as a text's turn begins while a run goes on, and `queue`
+#: as the main thread reads a post.
+LANDING = """\
+import os, signal, sys, threading, time
+from invective import mutate
+
+top, at = sys.argv[1:]
+fired, running = [], []
+
+
+class Turn(threading.Condition):
+    def __init__(self, lock=None, when=lambda: True):
+        super().__init__(lock)
+        self.when = when
+
+    def __exit__(self, *exc):
+        if (not fired and threading.current_thread() is threading.main_thread()
+                and self.when()):
+            fired.append(True)
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+        return super().__exit__(*exc)
+
+
+if at == "hush":
+    real_hush = mutate._Hush.__init__
+
+    def hush(self, *args):
+        real_hush(self, *args)
+        self._turn = Turn(when=lambda: self._alone and running)
+
+    mutate._Hush.__init__ = hush
+else:
+    real_pool = mutate._Pool.__init__
+
+    def pool(self, *args):
+        real_pool(self, *args)
+        self.posts.not_empty = Turn(self.posts.mutex)
+
+    mutate._Pool.__init__ = pool
+
+
+def run_tests(where, tests, timeout, selection=None, options=(), target="",
+              stop=None):
+    with mutate._Hush.aside():
+        running.append(where)
+        time.sleep(0.2)
+        running.remove(where)
+    return mutate.Verdict(True, 0, "", "")
+
+
+mutate.run_tests = run_tests
+said = []
+try:
+    mutate.mutate(top, os.path.join(top, "pkg", "gate.py"),
+                  ["pkg/tests/test_gate.py"], None, None, say=said.append,
+                  workers=2)
+except KeyboardInterrupt:
+    print("interrupted")
+print("landed" if fired else "never landed")
+print("left" if any(os.path.exists(line.split(None, 1)[1]) for line in said
+                    if line.startswith("copy:")) else "removed")
+"""
+
+
+@pytest.mark.parametrize("at", ["hush", "queue"])
+def test_a_stop_landing_as_a_lock_is_let_go_is_raised_with_none_held(
+        tree, at):
+    """Raised where it lands, the ^C would leave the lock held, and the halt
+    would wait for ever on a worker that needs it. Held while the workers
+    run, it is raised where the main thread waits, with no lock held: the
+    campaign stops, and its copies are removed."""
+    try:
+        done = subprocess.run([sys.executable, "-c", LANDING, tree, at],
+                              capture_output=True, text=True, timeout=60,
+                              env={**os.environ, "PYTHONPATH": SRC})
+    except subprocess.TimeoutExpired:
+        pytest.fail("the campaign waited for ever on a lock")
+    assert done.stdout.split() == ["interrupted", "landed", "removed"], (
+        done.stdout, done.stderr)
+
+
 def test_a_worker_s_real_run_is_waited_on_out_of_the_hush(tmp_path):
     """A text is made while a worker's run goes on: waiting on its process,
     the worker is out of the hush."""
@@ -936,10 +1106,25 @@ def test_the_pool_gives_each_its_results_in_order(tmp_path):
     assert not any(thread.is_alive() for thread in pool.threads)
 
 
+class _Unheld:
+    """No signal held: each raises where it lands."""
+
+    def check(self):
+        pass
+
+    def end(self):
+        pass
+
+
+@pytest.mark.parametrize("held", [True, False])
 def test_a_stop_during_the_halt_goes_on_once_every_worker_has_ended(
-        tmp_path):
+        tmp_path, monkeypatch, held):
     """A second ^C while the workers are being stopped would otherwise
-    leave a run going in a copy about to be removed."""
+    leave a run going in a copy about to be removed. Held, it is raised
+    once they have ended; raised where it lands, the halt holds it until
+    then."""
+    if not held:
+        monkeypatch.setattr(mutate, "_Held", _Unheld)
     copies = _copies(tmp_path, 1)
     stop = threading.Event()
     pool = mutate._Pool(copies, stop, print)

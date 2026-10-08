@@ -44,6 +44,7 @@ import json
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -795,58 +796,78 @@ class _Hush:
     steps `aside` only while it waits for its run's process to end, which
     warns nothing, and is where it spends its time: so the texts are still
     made while the runs go on.
+
+    A worker held off gives up once *stop* is set, raising `Stopped`, so a
+    halt never waits on a text; the main thread, held off, calls *check*,
+    which raises a signal held meanwhile (`_Held.check`).
     """
 
     # The hush a thread holds `shared`, if any, for `aside` to find.
     _held = threading.local()
 
-    def __init__(self) -> None:
+    def __init__(self, stop: threading.Event | None = None,
+                 check: Callable[[], None] | None = None) -> None:
         self._turn = threading.Condition()
         self._sharing = 0
         self._alone = False
         self._asking = 0
+        self._stop, self._check = stop, check
 
-    def _wait(self, held_off: Callable[[], bool]) -> None:
-        # In short spells, so that a ^C reaches the main thread on Windows.
+    def _wait(self, held_off: Callable[[], bool], worker: bool) -> None:
+        # In short spells, so that a ^C reaches the main thread on Windows
+        # and a stop reaches a worker.
         while held_off():
+            if not worker:
+                if self._check is not None:
+                    self._check()
+            elif self._stop is not None and self._stop.is_set():
+                raise Stopped
             self._turn.wait(_POLL)
 
     @contextlib.contextmanager
     def shared(self):
         with self._turn:
             # A text asked for goes first: workers never starve it.
-            self._wait(lambda: self._alone or self._asking)
+            self._wait(lambda: self._alone or self._asking, worker=True)
             self._sharing += 1
         _Hush._held.hush = self
         try:
             yield
         finally:
-            _Hush._held.hush = None
-            with self._turn:
-                self._sharing -= 1
-                self._turn.notify_all()
+            # Not when `aside` gave the hush up on a stop: it is not held.
+            if getattr(_Hush._held, "hush", None) is self:
+                _Hush._held.hush = None
+                with self._turn:
+                    self._sharing -= 1
+                    self._turn.notify_all()
 
     @contextlib.contextmanager
     def alone(self):
-        with self._turn:
-            self._asking += 1
-            try:
-                self._wait(lambda: self._alone or self._sharing)
-            finally:
-                self._asking -= 1
-            self._alone = True
+        held = False
         try:
+            with self._turn:
+                self._asking += 1
+                try:
+                    self._wait(lambda: self._alone or self._sharing,
+                               worker=False)
+                finally:
+                    self._asking -= 1
+                # Inside the `try`: an exception as the lock is let go
+                # must not leave the workers held off for ever.
+                self._alone = held = True
             yield
         finally:
-            with self._turn:
-                self._alone = False
-                self._turn.notify_all()
+            if held:
+                with self._turn:
+                    self._alone = False
+                    self._turn.notify_all()
 
     @staticmethod
     @contextlib.contextmanager
     def aside():
         """Out of the hush this thread holds `shared`, if any, for the
-        body, and back in after it."""
+        body, and back in after it, unless the campaign is stopping: then
+        `Stopped`, and the hush is no longer held."""
         hush = getattr(_Hush._held, "hush", None)
         if hush is None:
             yield
@@ -854,12 +875,78 @@ class _Hush:
         with hush._turn:
             hush._sharing -= 1
             hush._turn.notify_all()
+        _Hush._held.hush = None
         try:
             yield
         finally:
             with hush._turn:
-                hush._wait(lambda: hush._alone or hush._asking)
+                hush._wait(lambda: hush._alone or hush._asking, worker=True)
                 hush._sharing += 1
+            _Hush._held.hush = hush
+
+
+#: The signals a handler of invective's can be standing in for while the
+#: workers run: a ^C, and the SIGTERM `process.stopping_on_sigterm` raises.
+_HELD = (signal.SIGINT, signal.SIGTERM)
+
+
+class _Held:
+    """SIGINT and SIGTERM held, from the start of the workers to their end:
+    each is noted where it lands, and raised where the main thread asks
+    for it (`check`), or once the workers have ended (`end`), by calling
+    the handler that was there, so it raises what it would have raised.
+
+    **A signal raises on the main thread wherever it is running Python**,
+    and on 3.12 and later that includes the start of a lock's `__exit__`.
+    A ^C landing there, after the body of a `with` on a
+    `threading.Condition` (the hush's, a queue's, an event's) and before
+    the release, leaves the lock held, and a worker that then needs it, to
+    post, to come back from `aside` or to end, waits for ever, and the halt
+    with it. Raised where the main thread asks, a signal finds no lock held.
+
+    Only a handler Python runs is held, and only on the main thread, the
+    one a handler can be set from: a signal ignored, or ending the process
+    by default, is left as it is, and another thread is reached by none.
+    """
+
+    def __init__(self) -> None:
+        self._saved: dict = {}
+        self._noted: collections.deque = collections.deque()
+        try:
+            for signum in _HELD:
+                handler = signal.getsignal(signum)
+                if not callable(handler):
+                    continue
+                # Saved first: one put back that was never replaced is
+                # put back as it was.
+                self._saved[signum] = handler
+                try:
+                    signal.signal(signum, self._note)
+                except ValueError:
+                    del self._saved[signum]
+                    break
+        except BaseException:
+            self.end()
+            raise
+
+    def _note(self, signum: int, frame) -> None:
+        self._noted.append((signum, frame))
+
+    def check(self) -> None:
+        """Raise what a signal noted would have raised where it landed."""
+        while self._noted:
+            signum, frame = self._noted.popleft()
+            self._saved[signum](signum, frame)
+
+    def end(self) -> None:
+        """Put each handler back, then raise what a signal noted meanwhile
+        would have raised."""
+        saved, self._saved = self._saved, {}
+        for signum, handler in saved.items():
+            signal.signal(signum, handler)
+        while self._noted:
+            signum, frame = self._noted.popleft()
+            saved[signum](signum, frame)
 
 
 class _Pool:
@@ -872,6 +959,10 @@ class _Pool:
     touched only by the thread that started it, and a signal is delivered
     to the main thread only, which tells the runs by the *stop* event.
 
+    From the start to `close` or `halt`, SIGINT and SIGTERM are held
+    (`_Held`), and raised where the main thread waits (`take`, and a text
+    held off by the hush).
+
     **No run is started on the main thread.** A ^C that lands inside
     `subprocess.Popen` there, once the process is made and before it is
     handed back, leaves a run that nothing can stop, going on in a copy
@@ -882,8 +973,10 @@ class _Pool:
     def __init__(self, copies: list[Copy], stop: threading.Event,
                  say: Callable[[str], object]) -> None:
         self.copies, self.stop, self.say = copies, stop, say
+        #: Before any worker starts: a signal is held from then on.
+        self.signals = _Held()
         #: What the main thread makes a text inside (`_Hush`).
-        self.hush = _Hush()
+        self.hush = _Hush(stop, self.signals.check)
         self.posts: queue.Queue = queue.Queue()
         self.inboxes: list[queue.Queue] = [queue.Queue() for _ in copies]
         #: The key of each worker's task in flight.
@@ -932,13 +1025,14 @@ class _Pool:
     def take(self) -> tuple[int, object, object]:
         """The next task done: (worker, key, its result or what it raised).
 
-        Waited for in short spells, so that a ^C reaches the main thread
-        on Windows too, and so that a worker that has ended is noticed: one
-        that ended with nothing posted is a `Refusal`, never a wait without
-        end. The queue is read once more before that, for a post made just
-        before the end.
+        Waited for in short spells, so that a signal held meanwhile is
+        raised here, a ^C on Windows too, and so that a worker that has
+        ended is noticed: one that ended with nothing posted is a `Refusal`,
+        never a wait without end. The queue is read once more before that,
+        for a post made just before the end.
         """
         while True:
+            self.signals.check()
             try:
                 k, key, got = self.posts.get(timeout=_POLL)
             except queue.Empty:
@@ -998,21 +1092,32 @@ class _Pool:
         self._ended = True
         for inbox in self.inboxes:
             inbox.put(None)
-        for thread in self.threads:
-            thread.join()
+        try:
+            for thread in self.threads:
+                thread.join()
+        finally:
+            self.signals.end()
 
     def halt(self) -> list[tuple[int, object, object]]:
         """Stop every run in flight, end every worker, and give back what
         was posted meanwhile (`left`).
 
-        The joins are in short spells, so a ^C still reaches the main
-        thread; a stop (^C, or the SIGTERM `stopping_on_sigterm` turns into
-        one) that lands here goes on only once every worker has ended, as
-        `tree._remove` lets one go on only once the copy is gone.
+        A signal that lands here is held (`_Held`), and raised once every
+        worker has ended, as `tree._remove` lets one go on only once the
+        copy is gone. One raised here all the same (^C, or the SIGTERM
+        `stopping_on_sigterm` turns into one) goes on only then too, and
+        the joins are in short spells, so that it does.
         """
         if self._ended:
             return self.left
         self._ended = True
+        try:
+            self._halt()
+        finally:
+            self.signals.end()
+        return self.left
+
+    def _halt(self) -> None:
         interrupted, told = None, False
         while True:
             # From the stop on, inside the loop: a ^C that lands while the
@@ -1044,7 +1149,6 @@ class _Pool:
                 interrupted = exc
         if interrupted is not None:
             raise interrupted
-        return self.left
 
 
 def _measure(mutant: Mutant, copy: Copy, attempts: list[Attempt],

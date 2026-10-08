@@ -78,6 +78,11 @@ is not cut short; SIGKILL is the way to stop a cleanup that hangs, and the
 marker covers what that leaves. With more than one worker, a refusal, ^C or
 SIGTERM stops every worker's run and removes every copy.
 
+While the workers run (one or more), a ^C or SIGTERM is held where it lands and
+raised where the main thread waits for them (`mutate._Held`). Raised where it
+lands, it can cut a lock's release short, and a worker that needs the lock to
+end would wait for ever, and the removal of the copies with it.
+
 The sweep forwards a SIGTERM to its engine, waits for the engine's copy to
 be gone, then dies by the signal itself. `pytest --mutate` ends the
 session as interrupted (exit 2) with the copy already gone.
