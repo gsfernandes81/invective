@@ -1428,7 +1428,7 @@ def test_progress_is_said_after_every_tenth_mutant(repo, monkeypatch, capsys):
     said = [ln.strip() for ln in capsys.readouterr().out.splitlines()
             if ln.strip() == "ran" or ln.startswith("  ...")]
     # the baseline, ten mutants, the line, then the last two
-    assert said == ["ran"] * 11 + ["... 10/12, 10 survived"] + ["ran"] * 2
+    assert said == ["ran"] * 11 + ["... 10/12 landed"] + ["ran"] * 2
 
 
 @pytest.mark.parametrize("selection, code", [
@@ -1723,7 +1723,7 @@ def test_a_run_given_its_settings_file_is_not_searched_for_one(tmp_path,
     member = os.path.join(top, "m")
     runs = []
 
-    def timed_out(where, tests, timeout, selection, options, target):
+    def timed_out(where, tests, timeout, selection, options, target, *rest):
         runs.append(options)
         return mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT")
 

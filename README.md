@@ -99,11 +99,11 @@ pytest --mutate src/pkg/gate.py tests/test_gate.py -k refus
 
 The mutants are run against exactly the tests pytest collected, so `-k`, `-m`,
 `--deselect` and node ids all narrow the selection. `--mutate` can be given
-more than once; `--mutate-only`, `--mutate-limit`, `--mutate-json` and
-`--mutate-ref` work as `--only`, `--limit`, `--json` and `--ref` do for
-`invective run`. The tests are not run as an ordinary session: pytest's last
-line says how many were deselected or that no tests ran. The report is the
-section above it.
+more than once; `--mutate-only`, `--mutate-limit`, `--mutate-json`,
+`--mutate-ref` and `--mutate-workers` work as `--only`, `--limit`, `--json`,
+`--ref` and `--workers` do for `invective run`. The tests are not run as an
+ordinary session: pytest's last line says how many were deselected or that no
+tests ran. The report is the section above it.
 
 pytest-xdist's workers have to be off for the outer run (`-n 0`): with
 workers on, `--mutate` stops at startup with a usage error (exit 4).

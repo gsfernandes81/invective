@@ -35,17 +35,22 @@ from __future__ import annotations
 
 import argparse
 import ast
+import collections
+import contextlib
 import copy
 import difflib
 import importlib.util
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import warnings
+from collections.abc import Callable
 from typing import NamedTuple
 
 from pytest import ExitCode
@@ -55,9 +60,9 @@ from invective import process
 from invective.accept import read as read_accepts
 from invective.config import (Config, check_pytest_settings,
                               load as load_config, project_root,
-                              relative_to_root)
+                              relative_to_root, workers as workers_of)
 from invective.errors import Refusal
-from invective.tree import git_ref, working_tree
+from invective.tree import git_ref, head, working_tree
 
 
 # --------------------------------------------------------------------------
@@ -498,9 +503,41 @@ else:
     _NO_WORKERS = ["-p", "no:xdist"]
 
 
+class Stopped(Exception):
+    """A run cut short because the campaign is stopping. Raised in place of
+    a verdict, so that a run that never finished is never one."""
+
+
+#: How often a run in a worker looks for the campaign stopping, in seconds.
+_POLL = 0.2
+
+
+def _wait(proc: subprocess.Popen, timeout: float,
+          stop: threading.Event | None) -> tuple[str, str]:
+    """What *proc* printed, once it has ended within *timeout*; raises
+    `subprocess.TimeoutExpired` when it has not, and `Stopped` as soon as
+    *stop* is set, leaving *proc* running for the caller to stop."""
+    if stop is None:
+        return proc.communicate(timeout=timeout)
+    end = time.monotonic() + timeout
+    while True:
+        # First right after the start: a stop set while the run was being
+        # started is seen before anything is waited for.
+        if stop.is_set():
+            raise Stopped
+        try:
+            return proc.communicate(
+                timeout=max(0.0, min(_POLL, end - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            # Asked again, `communicate` loses nothing it had read.
+            if time.monotonic() >= end:
+                raise
+
+
 def run_tests(where: str, tests: list[str], timeout: float,
               selection: str | None = None, options: tuple[str, ...] = (),
-              target: str = "") -> Verdict:
+              target: str = "", stop: threading.Event | None = None
+              ) -> Verdict:
     """The selection, in *where*: *tests* as pytest arguments, and when
     *selection* names a file of node ids, one a line, those tests and no
     others, *tests* then deciding only where pytest's search for its
@@ -510,7 +547,9 @@ def run_tests(where: str, tests: list[str], timeout: float,
     come after that note for the file it loaded to be the plugin's to name.
     *target*, the mutated module's path from the top of *where*, is what the
     plugin checks the tests loaded from the copy; none, and it checks
-    nothing.
+    nothing. Once *stop* is set, the run is stopped with everything it
+    started and `Stopped` is raised: a signal reaches only the main thread,
+    and a run in a worker's thread learns of it this way.
 
     **No `-q` here, and that is load-bearing.** The run's working directory is
     the copy, so it reads the project's own pytest
@@ -537,6 +576,8 @@ def run_tests(where: str, tests: list[str], timeout: float,
         # same from run to run; `-p no:` of a plugin that is not installed is
         # a no-op. The `no:` exclusions and `-n 0` are order-free: pytest
         # applies a `no:` before it imports anything.
+        if stop is not None and stop.is_set():
+            raise Stopped
         proc = subprocess.Popen(
             [sys.executable, "-m", "pytest", "-p", pytest_invective.__name__,
              *options, "-x", "-rf", "-p", "no:randomly", *_NO_WORKERS,
@@ -544,7 +585,7 @@ def run_tests(where: str, tests: list[str], timeout: float,
             cwd=where, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env, **process.OWN_GROUP)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout, stderr = _wait(proc, timeout, stop)
         except subprocess.TimeoutExpired:
             process.stop(proc)
             # A mutant that hangs is a mutant the suite noticed, in the least
@@ -553,8 +594,9 @@ def run_tests(where: str, tests: list[str], timeout: float,
             # score.
             return Verdict(False, TIMED_OUT, "TIMEOUT", "TIMEOUT")
         except BaseException:
-            # Interrupted: the run is in a group of its own, so the ^C that
-            # stopped this process never reached it.
+            # Interrupted, or the campaign is stopping: the run is in a
+            # group of its own, so the ^C that stopped this process never
+            # reached it.
             process.stop(proc)
             raise
         try:
@@ -574,10 +616,370 @@ def run_tests(where: str, tests: list[str], timeout: float,
                    missing, elsewhere)
 
 
+# --------------------------------------------------------------------------
+# **Workers.** Each has a copy of the project of its own and a thread that
+# runs in it; the main thread makes every mutant's text (`_text_of` sets the
+# process's warning filters aside, so it runs there and nowhere else), hands
+# the mutants out, and reads, confirms and reports what they came to, in the
+# order of their sites. At one worker it is a serial campaign.
+
+
+class Job(NamedTuple):
+    """One mutant of the campaign: its place among them, from 1, which is
+    also the second its write is stamped at (*n*); its site's index in the
+    module (*idx*); and its kind, change and line."""
+
+    n: int
+    idx: int
+    kind: str
+    what: str
+    line: int
+
+
+class Mutant(NamedTuple):
+    """A job and the text written for it, made on the main thread:
+    *spliced* is False when the text is the whole file unparsed."""
+
+    job: Job
+    text: str
+    spliced: bool
+
+
+class Outcome(NamedTuple):
+    """What a mutant came to, and how.
+
+    *via* names the attempt that decided it, `""` for the whole selection,
+    and *origin* what decided a verdict that was read back rather than run.
+    *confirmed* says how a kill made while other copies' runs went on was
+    confirmed with nothing else running: `"alone"`, its killer failed alone,
+    or `"full"`, the whole selection was run again and decided it."""
+
+    verdict: Verdict
+    via: str = ""
+    origin: str = ""
+    confirmed: str = ""
+
+
+#: A way to measure a mutant before the whole selection: a kill, or None to
+#: leave the mutant to the next way, and in the end to the whole selection.
+Attempt = Callable[[Mutant, "Copy"], "Outcome | None"]
+
+#: The only ways a survivor is reached. A survivor is a claim about the whole
+#: selection, so only a run of all of it, or such a verdict read back, can
+#: make one: an attempt that runs fewer tests can kill a mutant, never let
+#: one through.
+_SURVIVOR_VIA = frozenset({"", "cache"})
+
+
+class Copy:
+    """One copy of the project the campaign's mutants are written in, and
+    the only way a run is made in it (`run`).
+
+    **Each copy's writes are stamped at rising seconds.** In the pool, a
+    mutant is stamped at the campaign's clock plus its place, and a copy is
+    given its mutants in the order of their places; once the copy is
+    restored (`restore`), each write takes the next second past the last
+    place. See the loop in `mutate` for why.
+    """
+
+    def __init__(self, where: str, rel: str, source: str, tests: list[str],
+                 listed: str | None, options: tuple[str, ...],
+                 stop: threading.Event, count: int) -> None:
+        self.where, self.rel, self.source = where, rel, source
+        self.path = os.path.join(where, rel)
+        self.tests, self.listed, self.options = tests, listed, options
+        self.stop, self.count = stop, count
+        #: The campaign's clock, set before the first mutant is written.
+        self.clock = 0
+        # The mutant the file may hold, None while it is the original's.
+        self._held: Mutant | None = None
+        # The next stamp once restored; None while in the pool.
+        self._next: int | None = None
+
+    def run(self, mutant: Mutant | None, timeout: float,
+            selection: str | None = None, **handshake) -> Verdict:
+        """The selection run on *mutant*, written first unless it is the
+        mutant written last, or with None on the original, which a copy
+        holds only before its first mutant and once restored. *selection*
+        names a file of node ids to run instead of the campaign's;
+        *handshake* goes to `run_tests` as it is.
+
+        **The tests have to have loaded the copy's file**, or no mutant
+        written there reaches them: a run that says otherwise is a
+        `Refusal`, whichever run it is.
+        """
+        if mutant is None:
+            if self._held is not None:
+                raise RuntimeError("a run of the original in %s, which holds "
+                                   "the mutant of line %d"
+                                   % (self.where, self._held.job.line))
+        elif mutant is not self._held:
+            # Held before it is written: a write cut short leaves the file
+            # neither, and a run of the original must not follow it.
+            self._held = mutant
+            _write(self.path, mutant.text, self._stamp(mutant.job.n))
+        got = run_tests(self.where, self.tests, timeout,
+                        self.listed if selection is None else selection,
+                        self.options, self.rel.replace(os.sep, "/"),
+                        self.stop, **handshake)
+        if got.elsewhere:
+            # **The tests did not load the copy's file, so no mutant
+            # written there can reach them**, and every one would
+            # survive, silently. An editable install's `.pth` line, or a
+            # `sys.path` entry, puts the project's own `src` on the path;
+            # the copy's is there only when something puts it there,
+            # since `python -m pytest` adds the directory it started in,
+            # the copy's top, and that does not reach a `src/`. pytest's
+            # `pythonpath` setting does: each run reads it from the
+            # settings file in the copy, and so from the copy's rootdir,
+            # and pytest 8.4 and later apply it before loading any
+            # plugin, which a conftest comes after. The baseline is
+            # where this fires; every run is checked because the check
+            # is one field and this is the one place it is read.
+            raise Refusal((
+                "%s was imported from %s, not from the copy at %s, "
+                + UNREACHED + ". An editable install, "
+                "or a sys.path entry, points the tests at the project "
+                "itself; pytest's `pythonpath` setting naming the "
+                "directory the package is in (`src`), or a conftest.py "
+                "that puts the directory of the copy's own `src` first "
+                "on sys.path, computed from its own __file__, makes them "
+                "import the copy. A plugin pytest loads before any "
+                "conftest (an entry point, PYTEST_PLUGINS, a -p in "
+                "addopts) that imports it first is ahead of a conftest; "
+                "only the `pythonpath` setting, on pytest 8.4 or later, "
+                "is ahead of such a plugin.")
+                % (self.rel, got.elsewhere, self.where))
+        return got
+
+    def restore(self) -> None:
+        """Write the original back, so the copy can run it again."""
+        _write(self.path, self.source, self._stamp(None))
+        self._held = None
+
+    def _stamp(self, n: int | None) -> int:
+        if self._next is None and n is not None:
+            return self.clock + n
+        if self._next is None:
+            self._next = self.clock + self.count + 1
+        when, self._next = self._next, self._next + 1
+        return when
+
+
+class _Pool:
+    """A thread for each copy, the only one to run in it, started at once
+    and ended by `close`, or by `halt` when the campaign is stopping.
+
+    The main thread gives a worker a task in the worker's own inbox
+    (`give`), and reads what each task came to, its result or what it
+    raised, from one queue they all post to (`take`). A run's process is
+    touched only by the thread that started it, and a signal is delivered
+    to the main thread only, which tells the runs by the *stop* event.
+    """
+
+    def __init__(self, copies: list[Copy], stop: threading.Event,
+                 say: Callable[[str], object]) -> None:
+        self.copies, self.stop, self.say = copies, stop, say
+        self.posts: queue.Queue = queue.Queue()
+        self.inboxes: list[queue.Queue] = [queue.Queue() for _ in copies]
+        #: The key of each worker's task in flight.
+        self.busy: dict[int, object] = {}
+        #: What was posted while the pool was halted, as (worker, key, what).
+        self.left: list[tuple[int, object, object]] = []
+        self.threads = [threading.Thread(target=self._work, args=(k,),
+                                         name="invective-copy-%d" % k)
+                        for k in range(len(copies))]
+        self._ended = False
+        for thread in self.threads:
+            thread.start()
+
+    def _work(self, k: int) -> None:
+        copy, inbox = self.copies[k], self.inboxes[k]
+        while True:
+            task = inbox.get()
+            if task is None:
+                return
+            key, fn, args = task
+            try:
+                got = fn(copy, *args)
+            except BaseException as exc:
+                # Posted, never lost with the thread: the main thread
+                # raises it, or a stop it set is what it says.
+                got = exc
+            self.posts.put((k, key, got))
+
+    def give(self, k: int, key: object, fn: Callable, *args) -> None:
+        """Have worker *k* call `fn(copy, *args)`; `take` gives back *key*
+        with what it came to."""
+        self.busy[k] = key
+        self.inboxes[k].put((key, fn, args))
+
+    def take(self) -> tuple[int, object, object]:
+        """The next task done: (worker, key, its result or what it raised).
+
+        Waited for in short spells, so that a ^C reaches the main thread
+        on Windows too, and so that a worker that has ended is noticed: one
+        that ended with nothing posted is a `Refusal`, never a wait without
+        end. The queue is read once more before that, for a post made just
+        before the end.
+        """
+        while True:
+            try:
+                k, key, got = self.posts.get(timeout=_POLL)
+            except queue.Empty:
+                if all(thread.is_alive() for thread in self.threads):
+                    continue
+                try:
+                    k, key, got = self.posts.get_nowait()
+                except queue.Empty:
+                    raise Refusal("a worker ended without saying what its "
+                                  "run came to") from None
+            del self.busy[k]
+            return k, key, got
+
+    def each(self, fn: Callable) -> list:
+        """`fn(copy)` on every copy at once; the results in copy order."""
+        for k in range(len(self.copies)):
+            self.give(k, k, fn)
+        got: dict = {}
+        while len(got) < len(self.copies):
+            _k, key, result = self.take()
+            if isinstance(result, BaseException):
+                raise result
+            got[key] = result
+        return [got[k] for k in range(len(self.copies))]
+
+    def map(self, fn: Callable, items) -> list:
+        """`fn(copy, item)` for every item, each on whichever copy is
+        free; the results in item order."""
+        todo = collections.deque(enumerate(items))
+        idle = list(range(len(self.copies)))
+        got: dict = {}
+        total = len(todo)
+        while len(got) < total:
+            while idle and todo:
+                i, item = todo.popleft()
+                self.give(idle.pop(0), i, fn, item)
+            k, key, result = self.take()
+            idle.append(k)
+            if isinstance(result, BaseException):
+                raise result
+            got[key] = result
+        return [got[i] for i in range(total)]
+
+    def close(self) -> None:
+        """End every worker once its inbox is done."""
+        if self._ended:
+            return
+        self._ended = True
+        for inbox in self.inboxes:
+            inbox.put(None)
+        for thread in self.threads:
+            thread.join()
+
+    def halt(self) -> list[tuple[int, object, object]]:
+        """Stop every run in flight, end every worker, and give back what
+        was posted meanwhile (`left`).
+
+        The joins are in short spells, so a ^C still reaches the main
+        thread; a stop (^C, or the SIGTERM `stopping_on_sigterm` turns into
+        one) that lands here goes on only once every worker has ended, as
+        `tree._remove` lets one go on only once the copy is gone.
+        """
+        if self._ended:
+            return self.left
+        self._ended = True
+        self.stop.set()
+        if len(self.copies) > 1:
+            self.say("stopping %d run(s)" % len(self.busy))
+        for inbox in self.inboxes:
+            inbox.put(None)
+        interrupted = None
+        while True:
+            try:
+                for thread in self.threads:
+                    thread.join(timeout=_POLL)
+                while True:
+                    try:
+                        self.left.append(self.posts.get_nowait())
+                    except queue.Empty:
+                        break
+                if not any(thread.is_alive() for thread in self.threads):
+                    break
+            except KeyboardInterrupt as exc:
+                interrupted = exc
+        if interrupted is not None:
+            raise interrupted
+        return self.left
+
+
+def _measure(mutant: Mutant, copy: Copy, attempts: list[Attempt],
+             budget: float) -> Outcome:
+    """What *mutant* comes to in *copy*: the first outcome an attempt gives,
+    in their order, or failing them all, the whole selection's.
+
+    The whole selection is run last and is never left out, so a survivor
+    is always the whole selection's verdict (`_SURVIVOR_VIA`).
+    """
+    for attempt in attempts:
+        got = attempt(mutant, copy)
+        if got is None:
+            continue
+        if got.verdict.ok and got.via not in _SURVIVOR_VIA:
+            raise ValueError("a survivor reached by %r, which runs fewer "
+                             "tests than the selection" % got.via)
+        return got
+    return Outcome(_final(copy.run(mutant, budget), mutant, copy.rel))
+
+
+def _final(verdict: Verdict, mutant: Mutant, target: str) -> Verdict:
+    """*verdict*, a run of the whole selection on *mutant*, unless it is the
+    harness's and not the mutant's: then a `Refusal`."""
+    if (verdict.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED)
+            and not verdict.killer):
+        # The baseline proved this selection collects, and no module
+        # failed to, so this is the harness and not the mutant. Scoring it
+        # as a kill would be arithmetic over a run that executed no test.
+        raise Refusal(
+            "%s:%d %s made pytest exit %d -- it collected nothing, so "
+            "this is the runner and not the mutation. Counting it as "
+            "a kill would score a run that never ran a test.\n%s"
+            % (target, mutant.job.line, mutant.job.what, verdict.code,
+               verdict.tail))
+    return verdict
+
+
+def _gate(copy: Copy, path: str, timeout: float) -> tuple[Verdict, float]:
+    """The tests the file *path* names, one a line, run on *copy*'s
+    original, and how long that took. They can stand for the selection on
+    a mutant only when the run is `ok` with nothing `missing`."""
+    started = time.monotonic()
+    got = copy.run(None, timeout, path)
+    return got, time.monotonic() - started
+
+
+def _plain_tests(tests: list[str], where: str) -> bool:
+    """Whether every one of *tests* is a path in *where*, or a node id of
+    one: then a run of other tests, given them to start pytest's search for
+    its settings, leaves out nothing they would have chosen (an option such
+    as `-k`, which names no path, would be left out with them)."""
+    return all(test.partition("::")[0] and os.path.exists(
+        os.path.join(where, test.partition("::")[0])) for test in tests)
+
+
+def _landed(mutant: Mutant, outcome: Outcome) -> None:
+    """*outcome* stands for *mutant*: called on the main thread, once for
+    each mutant whose outcome is final, and never for one that is not. With
+    one worker that is every outcome as it comes; with more, a survivor as
+    it comes and a kill once it is confirmed; a campaign that is stopping
+    lands only those already final. The place for whatever keeps verdicts
+    beyond the campaign."""
+
+
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
            limit: int | None, say=print, ref: str | None = None,
            exclude: tuple[str, ...] = (), selection: list[str] | None = None,
-           options: tuple[str, ...] = ()) -> dict:
+           options: tuple[str, ...] = (), workers: int | str = 1) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
     The mutants are written in a copy of *root* as it stands, *exclude* left
@@ -588,6 +990,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     pytest. A campaign whose runs would not go by the project's pytest
     settings is refused (`config.check_pytest_settings`). *say* receives
     each line of progress as it happens.
+
+    *workers* mutants are run at once, each in a copy of its own
+    (`config.workers` says what it may be). With more than one, every kill
+    is confirmed once the last mutant has run, with nothing else running.
     """
     try:
         src_rel = relative_to_root(target, root)
@@ -602,14 +1008,33 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     # too, and a plain pytest with the plugin installed never does.
     with process.stopping_on_sigterm(), \
             tempfile.TemporaryDirectory(prefix="invective-selection-") as box, \
-            (git_ref(root, ref) if ref
-             else working_tree(root, exclude)) as where:
-        # Settled before anything is said of the campaign: a run that could
-        # not go by the project's settings is refused as itself.
-        # A run given its settings file with `-c`, as `pytest --mutate`
-        # forwards one, searches for none.
-        if "-c" not in options:
-            check_pytest_settings(root, where, tests, ref=bool(ref))
+            contextlib.ExitStack() as held_open:
+        # The first copy, which the sites are read from: every other copy
+        # is made from it, and so are the commit's under *ref*.
+        first = held_open.enter_context(git_ref(root, ref) if ref
+                                        else working_tree(root, exclude))
+
+        def settled(where):
+            # Settled before anything is said of the campaign: a run that
+            # could not go by the project's settings is refused as itself.
+            # A run given its settings file with `-c`, as `pytest --mutate`
+            # forwards one, searches for none.
+            if "-c" not in options:
+                check_pytest_settings(root, where, tests, ref=bool(ref))
+
+        def reached(where):
+            # **Where the writes land, links followed.** The copy keeps
+            # links as links, so a module reached through one -- the file
+            # itself or a directory on its path -- can be a file outside
+            # the copy, the project's own among them. A link that stays
+            # inside the copy is written through, as the tests that import
+            # it read through it.
+            real = os.path.realpath(os.path.join(where, src_rel))
+            if not real.startswith(os.path.join(os.path.realpath(where), "")):
+                raise Refusal("%s reaches %s through a link, outside the copy "
+                              "the mutants are written in" % (src_rel, real))
+
+        settled(first)
         listed = None
         if selection is not None:
             # One node id a line, in a file of invective's own: a selection
@@ -617,24 +1042,12 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             listed = os.path.join(box, "selection.txt")
             with open(listed, "w", encoding="utf-8") as fh:
                 fh.write("".join(node + "\n" for node in selection))
-        say("copy:      %s" % where)
-        say("project:   %s" % root)
-        say("target:    %s" % src_rel)
-        say("tests:     %s" % (" ".join(tests) if selection is None else
-                               "%d collected by pytest" % len(selection)))
+        say("copy:      %s" % first)
 
-        path = os.path.join(where, src_rel)
+        path = os.path.join(first, src_rel)
         if not os.path.isfile(path):
             raise Refusal("%s is not in the tree the mutants are made in" % src_rel)
-        # **Where the writes land, links followed.** The copy keeps links as
-        # links, so a module reached through one -- the file itself or a
-        # directory on its path -- can be a file outside the copy, the
-        # project's own among them. A link that stays inside the copy is
-        # written through, as the tests that import it read through it.
-        real = os.path.realpath(path)
-        if not real.startswith(os.path.join(os.path.realpath(where), "")):
-            raise Refusal("%s reaches %s through a link, outside the copy the "
-                          "mutants are written in" % (src_rel, real))
+        reached(first)
         # **`newline=""`, the mirror of `_write`'s.** A mutant must differ
         # from the file only at the mutation, so it is built from the file's
         # own line endings: read with the default's translation, every `\r\n`
@@ -649,80 +1062,100 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         every = [(n.lineno, w) for _k, n, w in module.sites]   # type: ignore[attr-defined]
         sites = [(i, k, n, w) for i, (k, n, w) in enumerate(module.sites)
                  if not only or k in only]
-        if not sites:
-            raise Refusal("no mutation sites in %s for %s"
-                          % (src_rel, ",".join(only or sorted(OPERATORS))))
-
-        def run(timeout):
-            got = run_tests(where, tests, timeout, listed, options,
-                            src_rel.replace(os.sep, "/"))
-            if got.elsewhere:
-                # **The tests did not load the copy's file, so no mutant
-                # written there can reach them**, and every one would
-                # survive, silently. An editable install's `.pth` line, or a
-                # `sys.path` entry, puts the project's own `src` on the path;
-                # the copy's is there only when something puts it there,
-                # since `python -m pytest` adds the directory it started in,
-                # the copy's top, and that does not reach a `src/`. pytest's
-                # `pythonpath` setting does: each run reads it from the
-                # settings file in the copy, and so from the copy's rootdir,
-                # and pytest 8.4 and later apply it before loading any
-                # plugin, which a conftest comes after. The baseline is
-                # where this fires; every run is checked because the check
-                # is one field and this is the one place it is read.
-                raise Refusal((
-                    "%s was imported from %s, not from the copy at %s, "
-                    + UNREACHED + ". An editable install, "
-                    "or a sys.path entry, points the tests at the project "
-                    "itself; pytest's `pythonpath` setting naming the "
-                    "directory the package is in (`src`), or a conftest.py "
-                    "that puts the directory of the copy's own `src` first "
-                    "on sys.path, computed from its own __file__, makes them "
-                    "import the copy. A plugin pytest loads before any "
-                    "conftest (an entry point, PYTEST_PLUGINS, a -p in "
-                    "addopts) that imports it first is ahead of a conftest; "
-                    "only the `pythonpath` setting, on pytest 8.4 or later, "
-                    "is ahead of such a plugin.")
-                    % (src_rel, got.elsewhere, where))
-            return got
-
-        started = time.time()
-        first = run(BASELINE_TIMEOUT)
-        base = time.time() - started
-        if first.code == TIMED_OUT:
-            raise Refusal(
-                "the selection took longer than %d s on the unmutated tree, "
-                "so there is no time to measure a mutant against"
-                % BASELINE_TIMEOUT)
-        if first.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED):
-            raise Refusal(
-                "the selection collected nothing on the unmutated tree "
-                "(pytest exited %d), so there is no suite here to notice a "
-                "mutation. Every mutant would score as killed by a run that "
-                "never ran a test.\n%s" % (first.code, first.tail))
-        if not first.ok:
-            raise Refusal(
-                "the selection is RED on the unmutated tree, so every mutant "
-                "would be 'killed' for a reason that is not the mutation and "
-                "the score would read perfect. Fix the suite first.\n%s"
-                % first.tail)
-        if first.missing:
-            # The selection was collected somewhere else -- a checkout that
-            # has moved on, or a commit the tests are not at.
-            raise Refusal(
-                "%d of the tests selected are not in the tree the mutants are "
-                "made in, among them %s"
-                # invective: accept[equivalent: 3 -> 4] how many are named
-                % (len(first.missing), ", ".join(first.missing[:3])))
-        say("baseline:  green in %.1fs" % base)
-
-        # invective: accept[equivalent: 3 -> 4] any budget well above the baseline serves, and a kill by time is counted apart
-        budget = max(30.0, base * 3)
         if limit:
             # Evenly spaced rather than the first N, so a cap does not mean
             # "the top of the file only".
             step = max(1, len(sites) // limit)
             sites = sites[::step][:limit]
+        if not sites:
+            raise Refusal("no mutation sites in %s for %s"
+                          % (src_rel, ",".join(only or sorted(OPERATORS))))
+
+        count = workers_of(workers, most=len(sites))
+        # **Every copy before the first run**, so that none holds what a
+        # run left behind: a cache, a database, a file a test writes.
+        places = [first]
+        commit = head(first) if ref and count > 1 else None
+        for _k in range(1, count):
+            where = held_open.enter_context(
+                git_ref(root, commit) if ref
+                else working_tree(root, exclude, source=first))
+            settled(where)
+            reached(where)
+            say("copy:      %s" % where)
+            places.append(where)
+        say("workers:   %d" % count)
+        say("project:   %s" % root)
+        say("target:    %s" % src_rel)
+        say("tests:     %s" % (" ".join(tests) if selection is None else
+                               "%d collected by pytest" % len(selection)))
+
+        stop = threading.Event()
+        copies = [Copy(where, src_rel, source, tests, listed, options, stop,
+                       len(sites)) for where in places]
+        pool = _Pool(copies, stop, say)
+
+        def ended(kind, exc, tb):
+            # Ended before the copies are removed: a run still going would
+            # hold its copy.
+            if kind is None:
+                pool.close()
+            else:
+                pool.halt()
+
+        held_open.push(ended)
+
+        def baseline(copy: Copy, together: bool = False) -> float:
+            started = time.time()
+            got = copy.run(None, BASELINE_TIMEOUT)
+            took = time.time() - started
+            if got.code == TIMED_OUT:
+                raise Refusal(
+                    "the selection took longer than %d s on the unmutated "
+                    "tree, so there is no time to measure a mutant against"
+                    % BASELINE_TIMEOUT)
+            if got.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED):
+                raise Refusal(
+                    "the selection collected nothing on the unmutated tree "
+                    "(pytest exited %d), so there is no suite here to notice "
+                    "a mutation. Every mutant would score as killed by a run "
+                    "that never ran a test.\n%s" % (got.code, got.tail))
+            if not got.ok:
+                # At once, a run can be red because of another copy's: a
+                # port, a path or a database the suite shares.
+                raise Refusal(
+                    "the selection is RED on the unmutated tree%s, so every "
+                    "mutant would be 'killed' for a reason that is not the "
+                    "mutation and the score would read perfect. Fix the "
+                    "suite first.\n%s"
+                    % (" at %s, run in %d copies at once" % (copy.where, count)
+                       if together else "", got.tail))
+            if got.missing:
+                # The selection was collected somewhere else -- a checkout
+                # that has moved on, or a commit the tests are not at.
+                raise Refusal(
+                    "%d of the tests selected are not in the tree the mutants "
+                    "are made in, among them %s"
+                    # invective: accept[equivalent: 3 -> 4] how many are named
+                    % (len(got.missing), ", ".join(got.missing[:3])))
+            return took
+
+        # **The first copy runs the selection alone, then every copy runs
+        # it at once.** Alone, it proves the suite green with nothing else
+        # running, and is what a kill is confirmed against; at once, each
+        # copy must be green too, and the slowest run is the load every
+        # mutant's runs will be under, which the budget is measured from.
+        alone = base = baseline(copies[0])
+        if count > 1:
+            base = max(pool.each(lambda copy: baseline(copy, True)))
+        say("baseline:  green in %.1fs" % base)
+
+        # invective: accept[equivalent: 3 -> 4] any budget well above the baseline serves, and a kill by time is counted apart
+        budget = max(30.0, base * 3)
+        # A kill is confirmed with nothing else running, and never on less
+        # time than the loaded budget gave it.
+        # invective: accept[equivalent: 3 -> 4] any budget well above the baseline serves, and a kill by time is counted apart
+        alone_budget = max(budget, alone * 3)
         say("mutants:   %d\n" % len(sites))
 
         survivors, accepted, kills, killed, broken = [], [], [], 0, 0
@@ -740,80 +1173,213 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # the copy's own file. Only this file is stamped, so every other
         # module keeps its cache and the cost is nothing. Each mutant is the
         # whole file, so the next write replaces the last one and every run
-        # differs from the copy by exactly one edit.
+        # differs from the copy by exactly one edit. Each copy stamps its own
+        # file (`Copy`).
         clock = int(time.time())
-        for n, (idx, kind, node, what) in enumerate(sites, 1):
-            line = node.lineno                                  # type: ignore[attr-defined]
+        for copy in copies:
+            copy.clock = clock
+        jobs = collections.deque(
+            Job(n, idx, kind, what, node.lineno)            # type: ignore[attr-defined]
+            for n, (idx, kind, node, what) in enumerate(sites, 1))
+        attempts: list[Attempt] = []
+
+        def made(job: Job) -> Mutant:
             try:
-                written, spliced = _text_of(module, idx)
+                text, spliced = _text_of(module, job.idx)
             except Refusal as exc:
-                raise Refusal("%s:%d %s %s" % (src_rel, line, what, exc)) from exc
-            _write(path, written, clock + n)
-            got = run(budget)
-            text = lines[line - 1].strip()
-            if (got.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED)
-                    and not got.killer):
-                # The baseline proved this selection collects, and no module
-                # failed to, so this is the harness and not the mutant.
-                # Scoring it as a kill would be arithmetic over a run that
-                # executed no test.
-                raise Refusal(
-                    "%s:%d %s made pytest exit %d -- it collected nothing, so "
-                    "this is the runner and not the mutation. Counting it as "
-                    "a kill would score a run that never ran a test.\n%s"
-                    % (src_rel, line, what, got.code, got.tail))
-            covering = [a for a in accepts if a.covers(line, what)]
-            # The edit as a reader sees it, for every entry the mutant makes:
-            # kind, line and change find a site but do not show what a `NOT`
-            # or `RAISE` across several lines became, or which of two sites on
-            # one line this was. Split by `_LINE_END`, as the splice and the
-            # report's `line` are, so the `@@` numbers are the report's lines,
-            # no `\r` is left on a line, and a `\r\n` file's diff is the
-            # edited lines alone, both sides having lost their endings alike.
-            # The headers spell the path with `/` on every platform, as git
-            # writes a diff and as the report's node ids are spelt: they are
-            # part of a text another tool reads, unlike `target`, which is a
-            # path on this machine and keeps its native separators.
-            shown = src_rel.replace(os.sep, "/")
+                raise Refusal("%s:%d %s %s"
+                              % (src_rel, job.line, job.what, exc)) from exc
+            return Mutant(job, text, spliced)
+
+        def measured(copy: Copy, mutant: Mutant) -> Outcome:
+            return _measure(mutant, copy, attempts, budget)
+
+        def final(outcome: Outcome) -> bool:
+            # A kill made while other copies ran is final only once it is
+            # confirmed: a test can fail because another copy's run holds a
+            # port, a path or a database.
+            return count == 1 or outcome.verdict.ok or outcome.via == "cache"
+
+        # The edit as a reader sees it, for every entry the mutant makes:
+        # kind, line and change find a site but do not show what a `NOT`
+        # or `RAISE` across several lines became, or which of two sites on
+        # one line this was. Split by `_LINE_END`, as the splice and the
+        # report's `line` are, so the `@@` numbers are the report's lines,
+        # no `\r` is left on a line, and a `\r\n` file's diff is the
+        # edited lines alone, both sides having lost their endings alike.
+        # The headers spell the path with `/` on every platform, as git
+        # writes a diff and as the report's node ids are spelt: they are
+        # part of a text another tool reads, unlike `target`, which is a
+        # path on this machine and keeps its native separators.
+        shown = src_rel.replace(os.sep, "/")
+
+        def entry(mutant: Mutant, outcome: Outcome) -> dict:
+            job = mutant.job
             diff = "\n".join(difflib.unified_diff(
-                lines, _report_lines(written), fromfile=shown,
+                lines, _report_lines(mutant.text), fromfile=shown,
                 tofile=shown + " (mutant)", lineterm=""))
-            mutant = {"kind": kind, "line": line, "change": what, "diff": diff}
-            if not spliced:
+            said = {"kind": job.kind, "line": job.line, "change": job.what,
+                    "diff": diff}
+            if not mutant.spliced:
                 # Said beside the entry and not only in the closing lines,
                 # because this is the mutant whose line numbers are not the
                 # file's and whose diff is the whole file.
-                mutant["whole_file"] = True
-            if got.ok and covering:
-                accepted.append({**mutant, "source": text,
-                                 "reason": covering[0].reason,
-                                 "why": covering[0].why})
-                say("  accepted  %s:%d  %-28s %s" % (src_rel, line, what,
-                                                    covering[0].reason))
-            elif got.ok:
-                survivors.append({**mutant, "source": text})
-                # invective: accept[equivalent: 60 -> 61] a display width
-                say("  SURVIVED  %s:%d  %-28s %s" % (src_rel, line, what, text[:60]))
-            else:
-                killed += 1
-                # **Which check is load-bearing, not merely that one was.** A
-                # killed mutant with no killer beside it says the suite
-                # noticed; with one, it says what the line is FOR -- and a
-                # line whose only killer is a test about something else is a
-                # finding of its own.
-                kills.append({**mutant, "killer": got.killer, "code": got.code})
-                # A module that would not import, under the mutant: pytest
-                # exits 2 for that when the selection names files, and 4 --
-                # "found no collectors" -- when it names node ids. The killer
-                # is the module that failed.
-                if got.code in (ExitCode.INTERRUPTED, ExitCode.INTERNAL_ERROR,
-                                ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED):
-                    broken += 1
-                for a in covering:
-                    stale.setdefault(a, "%s is killed by %s"
-                                     % (what, got.killer or "a run that failed"))
-            if n % 10 == 0:
-                say("  ... %d/%d, %d survived" % (n, len(sites), len(survivors)))
+                said["whole_file"] = True
+            for key in ("via", "origin", "confirmed"):
+                if getattr(outcome, key):
+                    said[key] = getattr(outcome, key)
+            return said
+
+        # Each final outcome, until its turn to be reported comes: they are
+        # reported in the order of their sites, whatever order they end in.
+        done: dict[int, tuple[dict, Outcome]] = {}
+        reported = 0
+
+        def report_done() -> None:
+            nonlocal killed, broken, reported
+            while reported + 1 in done:
+                reported += 1
+                mutant, outcome = done.pop(reported)
+                got = outcome.verdict
+                line, what = mutant["line"], mutant["change"]
+                text = lines[line - 1].strip()
+                covering = [a for a in accepts if a.covers(line, what)]
+                if got.ok and covering:
+                    accepted.append({**mutant, "source": text,
+                                     "reason": covering[0].reason,
+                                     "why": covering[0].why})
+                    say("  accepted  %s:%d  %-28s %s" % (src_rel, line, what,
+                                                        covering[0].reason))
+                elif got.ok:
+                    survivors.append({**mutant, "source": text})
+                    # invective: accept[equivalent: 60 -> 61] a display width
+                    say("  SURVIVED  %s:%d  %-28s %s" % (src_rel, line, what,
+                                                        text[:60]))
+                else:
+                    killed += 1
+                    # **Which check is load-bearing, not merely that one
+                    # was.** A killed mutant with no killer beside it says
+                    # the suite noticed; with one, it says what the line is
+                    # FOR -- and a line whose only killer is a test about
+                    # something else is a finding of its own.
+                    kills.append({**mutant, "killer": got.killer,
+                                  "code": got.code})
+                    # A module that would not import, under the mutant:
+                    # pytest exits 2 for that when the selection names
+                    # files, and 4 -- "found no collectors" -- when it names
+                    # node ids. The killer is the module that failed.
+                    if got.code in (ExitCode.INTERRUPTED, ExitCode.INTERNAL_ERROR,
+                                    ExitCode.USAGE_ERROR,
+                                    ExitCode.NO_TESTS_COLLECTED):
+                        broken += 1
+                    for a in covering:
+                        stale.setdefault(a, "%s is killed by %s" % (
+                            what, got.killer or "a run that failed"))
+
+        def lands(mutant: Mutant, outcome: Outcome) -> None:
+            _landed(mutant, outcome)
+            done[mutant.job.n] = (entry(mutant, outcome), outcome)
+            report_done()
+
+        # **The pool.** Each worker is given the next mutant as soon as it
+        # is free, and the main thread makes one more mutant's text for each
+        # run in flight while they run, so a worker never waits for one. A
+        # text that cannot be written is therefore refused while mutants
+        # before it are still running, with the sentence a serial campaign
+        # gives.
+        running: dict[int, Mutant] = {}
+        ahead: collections.deque[Mutant] = collections.deque()
+        idle = list(range(count))
+        unconfirmed: list[tuple[Job, Outcome]] = []
+        finished = 0
+        try:
+            while jobs or ahead or running:
+                while idle and (ahead or jobs):
+                    mutant = ahead.popleft() if ahead else made(jobs.popleft())
+                    running[mutant.job.n] = mutant
+                    pool.give(idle.pop(0), mutant.job.n, measured, mutant)
+                if jobs and len(ahead) < len(running) and pool.posts.empty():
+                    ahead.append(made(jobs.popleft()))
+                    continue
+                k, n, got = pool.take()
+                idle.append(k)
+                if isinstance(got, BaseException):
+                    raise got
+                mutant = running.pop(n)
+                if final(got):
+                    lands(mutant, got)
+                else:
+                    # Its text is made again to confirm it, rather than held
+                    # through the rest of the campaign.
+                    unconfirmed.append((mutant.job, got))
+                finished += 1
+                if finished % 10 == 0:
+                    say("  ... %d/%d landed" % (finished, len(sites)))
+        except BaseException:
+            # What ended while the runs were being stopped stands if it was
+            # final; a kill that was not confirmed is dropped, and so is a
+            # run cut short, which is `Stopped`, never an outcome.
+            for _k, n, got in pool.halt():
+                if isinstance(got, Outcome) and final(got):
+                    _landed(running[n], got)
+            raise
+        pool.close()
+
+        if unconfirmed:
+            # **Every kill is confirmed with nothing else running**, in the
+            # first copy with the original back in it. Its first run is the
+            # whole selection on the original: the mutants' runs there can
+            # have left something behind that a test reads, and a copy no
+            # longer green on the original would score a kill for that.
+            confirming = copies[0]
+            confirming.restore()
+            guard = confirming.run(None, alone_budget)
+            if not guard.ok or guard.missing:
+                raise Refusal(
+                    "the selection is not green in the first copy once the "
+                    "original is back in it, after mutants ran there, so no "
+                    "kill can be confirmed in it: a run left something "
+                    "behind that a test reads.\n%s" % guard.tail)
+            # A killer that is a test, run alone on the original, must pass
+            # there, or its failing alone on the mutant says nothing. Only
+            # where a run of other tests leaves out nothing the selection
+            # chose: on the command line, an option among the tests would
+            # be left out with them.
+            usable = {}
+            if selection is not None or _plain_tests(tests, first):
+                killers = dict.fromkeys(
+                    outcome.verdict.killer for _job, outcome in unconfirmed
+                    if "::" in outcome.verdict.killer)
+                for i, killer in enumerate(killers):
+                    one = os.path.join(box, "killer-%d.txt" % i)
+                    with open(one, "w", encoding="utf-8") as fh:
+                        fh.write(killer + "\n")
+                    gated, _took = _gate(confirming, one, alone_budget)
+                    if gated.ok and not gated.missing:
+                        usable[killer] = one
+            for job, outcome in sorted(unconfirmed):
+                mutant = made(job)
+                killer = outcome.verdict.killer
+                confirmed = None
+                if killer in usable:
+                    got = confirming.run(mutant, alone_budget, usable[killer])
+                    if (got.code == ExitCode.TESTS_FAILED
+                            and got.killer == killer and not got.missing):
+                        confirmed = outcome._replace(confirmed="alone")
+                if confirmed is None:
+                    # The whole selection again decides it, a survivor
+                    # included: this run is the only one with nothing else
+                    # running.
+                    confirmed = Outcome(
+                        _final(confirming.run(mutant, alone_budget), mutant,
+                               src_rel), confirmed="full")
+                lands(mutant, confirmed)
+
+        if reported != len(sites):
+            # Unreachable while every mutant ends in an outcome or a
+            # refusal; a report that left one out would read as complete.
+            raise Refusal("%d of the %d mutants came to no verdict"
+                          % (len(sites) - reported, len(sites)))
 
         for a in accepts:
             if not any(a.covers(line, what) for line, what in every):
@@ -822,9 +1388,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         stale_ = [{"line": a.at, "applies_to": a.line, "reason": a.reason,
                    "change": a.change, "why": a.why, "problem": problem}
                   for a, problem in sorted(stale.items())]
-        for entry in stale_:
+        for item in stale_:
             say("  STALE     %s:%d  accept[%s]  %s" % (
-                src_rel, entry["line"], entry["reason"], entry["problem"]))
+                src_rel, item["line"], item["reason"], item["problem"]))
 
         return {"target": src_rel, "tests": tests if selection is None else selection,
                 "mutants": len(sites), "killed": killed, "kills": kills,
@@ -834,7 +1400,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 # kill -- the suite did notice -- but a blunter one, and a
                 # campaign that cannot see the split cannot tell a
                 # well-guarded module from an unimportable one.
-                "broken": broken}
+                "broken": broken, "workers": count}
 
 
 def summary(report: dict) -> list[str]:
@@ -934,6 +1500,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--json", help="write the report here as well")
     ap.add_argument("--ref", help="run on this git commit, branch or tag "
                                   "instead of the files as they stand")
+    ap.add_argument("--workers", metavar="N",
+                    help='run N mutants at once, each in a copy of its own; '
+                         '"auto" for one per CPU. [tool.invective] workers '
+                         'sets the default, which is 1')
     return ap
 
 
@@ -954,8 +1524,12 @@ def main(argv: list[str] | None = None) -> int:
     tests = rewrite_tests(args.tests, os.getcwd(), root)
     try:
         config = load_config(root)
+        if args.workers is not None:
+            workers_of(args.workers, "--workers")
         report = mutate(root, args.target, tests, only, args.limit,
-                        ref=args.ref, exclude=config.exclude)
+                        ref=args.ref, exclude=config.exclude,
+                        workers=(config.workers if args.workers is None
+                                 else args.workers))
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2

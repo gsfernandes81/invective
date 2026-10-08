@@ -26,7 +26,7 @@ import sys
 import tempfile
 
 from invective.config import (check_pytest_settings, project_root,
-                              relative_to_root)
+                              relative_to_root, workers)
 from invective.errors import Refusal
 from invective.mutate import UNREACHED
 from invective.process import (STOP_GRACE, Terminated, exit_by,
@@ -304,6 +304,9 @@ def parser():
                          "under --src")
     ap.add_argument("--ref", help="run on this git commit, branch or tag "
                                   "instead of the files as they stand")
+    ap.add_argument("--workers", metavar="N",
+                    help="give each module's engine N workers, as `invective "
+                         "run --workers` takes them")
     return ap
 
 
@@ -326,6 +329,9 @@ def main(argv=None):
         for given in [*args.src, args.tests_dir]:
             if not os.path.isdir(os.path.join(root, given)):
                 raise Refusal("%s is not a directory under %s" % (given, root))
+        # Once here, rather than as a refusal by every module's engine.
+        if args.workers is not None:
+            workers(args.workers, "--workers")
         _settle(args, root)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
@@ -383,6 +389,8 @@ def _sweep(args, root):
             cmd += ["--limit", str(args.limit)]
         if args.ref:
             cmd += ["--ref", args.ref]
+        if args.workers is not None:
+            cmd += ["--workers", args.workers]
         # **The per-module report is asked for and read, not re-derived from
         # the printed summary.** The summary carries a score; the engine's
         # JSON carries which test killed each mutant, and that is the half
