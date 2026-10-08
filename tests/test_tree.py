@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -533,3 +534,80 @@ def test_a_copy_already_renamed_for_removal_that_will_not_go_does_not_stop_the_s
     _refuse_to_remove_directories(monkeypatch)
 
     trees.reap()
+
+
+#: A `git` that is the real one for everything but `worktree add`, which
+#: starts a process of its own in the tree being checked out, as the real
+#: one starts `git reset --hard` there, and then takes its time.
+_SLOW_CHECKOUT = """\
+import os, subprocess, sys, time
+args = sys.argv[1:]
+if "worktree" in args and args[args.index("worktree") + 1:][:1] == ["add"]:
+    tree = args[-2]
+    os.makedirs(tree)
+    subprocess.Popen([sys.executable, "-c", (
+        "import os, time\\n"
+        "with open(%r, 'w') as fh:\\n"
+        "    fh.write(str(os.getpid()))\\n"
+        "time.sleep(60)") % os.environ["FILLER_PID"]], cwd=tree)
+    time.sleep(60)
+else:
+    real = os.environ["REAL_GIT"]
+    os.execv(real, [real] + args)
+"""
+
+
+def _running(pid):
+    """Whether *pid* is a process that has not ended: an orphan that has
+    ended stays a zombie until whatever adopted it collects it, and a zombie
+    still answers a probe."""
+    if not trees._alive(pid):
+        return False
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                           capture_output=True, text=True).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the shim on the PATH is a POSIX "
+                    "script, and SIGALRM is POSIX's")
+def test_a_ref_stopped_during_the_checkout_stops_what_git_started(
+        repo, tmp_path, monkeypatch):
+    """`git worktree add` fills the tree from a child of its own; stopping
+    git alone would leave that child writing into a copy being removed, and
+    running after the run has ended."""
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "git").write_text("#!%s\n%s" % (sys.executable, _SLOW_CHECKOUT),
+                              encoding="utf-8")
+    os.chmod(shim / "git", 0o755)
+    filler_pid = tmp_path / "filler.pid"
+    monkeypatch.setenv("REAL_GIT", shutil.which("git"))
+    monkeypatch.setenv("FILLER_PID", str(filler_pid))
+    monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
+
+    def stop(signum, frame):
+        # The stop lands once the filler is running, however slowly the
+        # processes before it started.
+        if filler_pid.exists() and filler_pid.read_text():
+            raise mutate._Terminated(signal.SIGTERM)
+        signal.setitimer(signal.ITIMER_REAL, 0.1)
+
+    previous = signal.signal(signal.SIGALRM, stop)
+    filler = None
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.5)
+        with pytest.raises(mutate._Terminated):
+            with trees.git_ref(repo, "HEAD"):
+                pass
+        filler = int(filler_pid.read_text())
+        end = time.monotonic() + 5
+        while _running(filler) and time.monotonic() < end:
+            time.sleep(0.05)
+        assert not _running(filler)
+        assert [n for n in os.listdir(tmp_path)
+                if n.startswith("invective-")] == []
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        if filler is not None and _running(filler):
+            os.kill(filler, signal.SIGKILL)

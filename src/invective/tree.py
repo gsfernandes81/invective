@@ -159,15 +159,30 @@ def _discard(root: str, where: str) -> None:
 
 
 def _git(root: str, *args: str) -> str:
+    """What git prints for *args*, run in *root*'s repository; a Refusal
+    when it fails or there is no git. Stopped on the way out with everything
+    it started, as a run is."""
+    # Here and not at the top: mutate imports this module.
+    from invective.mutate import _OWN_GROUP, _stop
     try:
-        done = subprocess.run(["git", "-C", root, *args], capture_output=True,
-                              text=True)
+        proc = subprocess.Popen(["git", "-C", root, *args],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                **_OWN_GROUP)
     except FileNotFoundError as exc:
         raise Refusal("a run on a git ref needs git, and there is no `git` "
                       "on the PATH") from exc
-    if done.returncode != 0:
-        raise Refusal("git %s failed: %s" % (args[0], done.stderr.strip()))
-    return done.stdout
+    try:
+        out, err = proc.communicate()
+    except BaseException:
+        # A SIGTERM or ^C. `git worktree add` fills the tree from a child,
+        # `git reset --hard`, which killing git alone would leave writing
+        # into the copy while it is removed, and running after the run.
+        _stop(proc)
+        raise
+    if proc.returncode != 0:
+        raise Refusal("git %s failed: %s" % (args[0], err.strip()))
+    return out
 
 
 def _mark(where: str, root: str) -> None:
