@@ -264,8 +264,7 @@ def test_a_settings_file_found_above_the_project_that_sets_nothing_is_let_be(
         tree, tmp_path):
     """pytest's own search stops above the project only when the project
     has no settings of its own, and every run in the copy finds none there
-    either: a file up there that sets nothing changes nothing, unlike one
-    given with `-c`."""
+    either: a file up there that sets nothing changes nothing."""
     # The fixture's own settings table would stop the search at the tree.
     write_tree(tree, {"pyproject.toml": ""})
     write_tree(str(tmp_path), {"pytest.ini": "[pytest]\n"})

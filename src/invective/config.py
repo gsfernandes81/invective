@@ -14,8 +14,9 @@ project's own, so a command works from anywhere inside the project.
 
 So is whether pytest's own settings reach the mutants' runs
 (`check_pytest_settings`): every run goes by what pytest's search finds in
-the tree the mutants are run in, and a run whose project reads settings, or
-a `conftest.py`, from above its top, where no such tree reaches, is refused.
+the tree the mutants are run in, and a run whose project reads settings other
+than `markers`, or a `conftest.py`, from above its top, where no such tree
+reaches, is refused.
 """
 
 from __future__ import annotations
@@ -237,13 +238,14 @@ def _start(where: str, args: Sequence[str]) -> str:
 
 
 def _read_above(top: str, fallback: bool) -> str | None:
-    """What pytest reads above the directory *top*, its search having found
-    nothing below that ends it, that can change what a run says: the
-    settings file that ends the search up there, when it sets something;
-    or else the first `conftest.py` on the way up to pytest's rootdir, the
-    directory of that file, or with none of the nearest `pyproject.toml`
-    unless *fallback* says the tree holds a nearer one. None when there is
-    neither."""
+    """What pytest reads above the directory *top* that can change what a
+    run says, once its search has found nothing below *top* that ends it.
+
+    First, the settings file that ends the search above *top*, when it sets
+    anything but `markers`. Failing that, the first `conftest.py` on the way
+    up to pytest's rootdir, which is the directory of the file that ends the
+    search; when no file does, that of the nearest `pyproject.toml`, unless
+    *fallback* says the tree holds a nearer one. None when there is neither."""
     conftest = loaded = None
     for here in islice(_up(top), 1, None):
         if conftest is None and os.path.isfile(os.path.join(here,

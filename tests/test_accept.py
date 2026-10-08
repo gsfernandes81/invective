@@ -473,8 +473,6 @@ def test_a_repository_s_top_is_the_nearest_directory_holding_its_own(
     assert config.repository_top(os.path.join(top, "other", "pkg")) is None
 
 
-
-
 @pytest.mark.parametrize("path, rel", [
     ("pkg/gate.py", os.path.join("pkg", "gate.py")),
     (".", "."),
