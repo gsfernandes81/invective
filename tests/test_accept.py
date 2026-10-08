@@ -303,6 +303,9 @@ def test_the_search_starts_where_pytest_s_does_among_the_tests(tmp_path):
         member, ["tests/test_a.py::test_x", "-q", "tests/sub"]) is None
     assert config.pytest_config_above(member) == os.path.join(top,
                                                               "pytest.ini")
+    # Each kind of path alone starts the search at the tests' directory.
+    assert config.pytest_config_above(member, ["tests/test_a.py"]) is None
+    assert config.pytest_config_above(member, ["tests/sub"]) is None
     # A path that names nothing, or leads out, leaves the search at the top.
     assert config.pytest_config_above(member, ["tests/none.py", ".."]) == (
         os.path.join(top, "pytest.ini"))
