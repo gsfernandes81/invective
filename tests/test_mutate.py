@@ -347,6 +347,19 @@ def test_a_whole_file_the_parser_rejects_is_refused_not_raised():
         mutate._text_of(source, ast.parse(source), 0)
 
 
+def test_not_is_wrapped_so_its_removal_stays_inside_its_span():
+    """`not (a or b)` without its `not` is the parenthesised `or` and not the
+    bare one `ast.unparse` writes, so the comment and the line numbers around
+    it are kept only if `not` is among the wrapped kinds."""
+    source = "x = y and not (a or b)  # kept\n"
+    tree = ast.parse(source)
+
+    assert [w for _k, _n, w in mutate._sites(tree)] == [
+        "And -> Or", "not X -> X", "Or -> And"]
+    assert mutate._text_of(source, tree, 1) == (
+        "x = y and (a or b)  # kept\n", True)
+
+
 def test_the_raise_operator_really_removes_the_refusal():
     """The operator class that catches a deleted refusal, driven end to end."""
     tree = ast.parse(SAMPLE)
