@@ -96,8 +96,10 @@ jobs:
 
       # The tags made here are lightweight, so the remote's plain
       # `refs/tags/<tag>` line is the commit. An annotated tag someone made by
-      # hand shows its tag object there instead, which is not `$SHA`, and so
-      # is left alone like any tag on another commit.
+      # hand shows its tag object there instead, which is never `$SHA`, so it
+      # is treated as a tag on another commit: it passes only when its
+      # release is published, and fails the run otherwise, so the version is
+      # never left silently undownloadable.
       - name: Find the tag
         id: tag
         env:
