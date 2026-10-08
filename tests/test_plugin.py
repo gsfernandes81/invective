@@ -599,6 +599,20 @@ def test_a_module_that_fails_on_its_file_is_not_the_one_named(
     assert plugin._loaded_elsewhere(str(tmp_path / "copy"), MOD) == ""
 
 
+def test_a_module_that_fails_on_its_file_does_not_stop_the_clearing(
+        tmp_path, monkeypatch):
+    """A refusal is cleared by finding the copy's file loaded under another
+    name; a lazily loaded module met on the way is not that file, and its
+    error is not the session's."""
+    class Lazy(ModuleType):
+        def __getattr__(self, name):
+            raise RuntimeError("the load failed")
+
+    monkeypatch.setitem(sys.modules, "zz_lazy", Lazy("zz_lazy"))
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": OTHER_MOD}) \
+        == _file(tmp_path, OTHER_MOD)
+
+
 @pytest.mark.parametrize("file", [OTHER_MOD + "c", None],
                          ids=["pyc", "no-file"])
 def test_a_module_with_no_source_file_is_never_the_one_named(
