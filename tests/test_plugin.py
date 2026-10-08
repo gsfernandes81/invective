@@ -583,6 +583,22 @@ def test_the_name_loaded_from_another_tree_is_that_tree_s_file(
         == _file(tmp_path, OTHER_MOD)
 
 
+def test_a_module_that_fails_on_its_file_is_not_the_one_named(
+        tmp_path, monkeypatch):
+    """A lazily loaded module under the target's name can fail on any
+    attribute; the verdict does not turn into the plugin's own error."""
+    class Lazy(ModuleType):
+        def __getattr__(self, name):
+            raise RuntimeError("the load failed")
+
+    plugin = _plugin_here()
+    monkeypatch.setattr(plugin, "_LOADED_BEFORE", frozenset())
+    write_tree(tmp_path / "copy", NESTED)
+    monkeypatch.setitem(sys.modules, "pkg.sub.mod", Lazy("pkg.sub.mod"))
+
+    assert plugin._loaded_elsewhere(str(tmp_path / "copy"), MOD) == ""
+
+
 @pytest.mark.parametrize("file", [OTHER_MOD + "c", None],
                          ids=["pyc", "no-file"])
 def test_a_module_with_no_source_file_is_never_the_one_named(

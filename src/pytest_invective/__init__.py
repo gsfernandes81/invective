@@ -284,7 +284,11 @@ def _loaded_elsewhere(copy, target):
         # file the mutant could be in. Joined to the copy because a relative
         # `sys.path` entry gives a relative `__file__`, relative to the
         # directory the run started in.
-        file = getattr(module, "__file__", None)
+        try:
+            file = getattr(module, "__file__", None)
+        except Exception:
+            # A lazily loaded module can fail on any attribute.
+            return None
         if not isinstance(file, str) or not file.endswith(".py"):
             return None
         # Resolved but spelt as the filesystem spells it, since this is the
