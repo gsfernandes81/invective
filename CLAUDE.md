@@ -34,6 +34,18 @@ bump the version releases nothing.
 
 ## Documentation
 
+`docs/` is the map, and `head -4 docs/*.md` is its index. `README.md` is
+the user's reference.
+
+- Read `docs/documentation.md` before writing a doc, a comment or a
+  docstring: it holds the shape, the maxims, and the mechanical checks.
+- Read `docs/architecture.md` for the module table, the plugin separation,
+  and the handshake.
+- Read `docs/isolation.md` before changing the copy, the reaper, the
+  signals, or the import-from-outside refusal.
+- Read `docs/development.md` for the environment, CI, and how to judge a
+  check.
+
 ### Who writes it
 
 Only Claude Opus 4.6 (`claude-opus-4-6`) may write or rephrase
