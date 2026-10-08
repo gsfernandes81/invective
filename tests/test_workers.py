@@ -14,6 +14,7 @@ import contextlib
 import hashlib
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -957,6 +958,39 @@ def test_a_stop_during_the_halt_goes_on_once_every_worker_has_ended(
     assert ended == [True]
     assert not pool.threads[0].is_alive()
     assert pool.left == [(0, 0, 1)]
+
+
+def test_a_post_made_as_the_halt_finds_the_queue_empty_is_kept(tmp_path):
+    """The worker posts its outcome, then ends: a post made after the halt
+    has read the queue empty, by a worker that has ended by the time the
+    halt looks, is read all the same, and not lost with the pool."""
+    (copy,) = _copies(tmp_path, 1)
+    stop = copy.stop
+    pool = mutate._Pool([copy], stop, print)
+    drained = threading.Event()
+    posts = pool.posts
+
+    class Posts(type(posts)):
+        def get_nowait(self):
+            try:
+                return super().get_nowait()
+            except queue.Empty:
+                if stop.is_set() and not drained.is_set():
+                    # The worker posts and ends between this read and the
+                    # halt's look at whether every worker has ended.
+                    drained.set()
+                    assert pool.gone[0].wait(10)
+                raise
+
+    pool.posts = Posts()
+
+    def task(copy):
+        assert stop.wait(10) and drained.wait(10)
+        return "a final outcome"
+
+    pool.give(0, 7, task)
+    assert pool.halt() == [(0, 7, "a final outcome")]
+    assert pool.posts.empty()
 
 
 def test_a_copy_holding_a_mutant_is_never_run_as_the_original(

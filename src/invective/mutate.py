@@ -1027,12 +1027,16 @@ class _Pool:
                         self.say("stopping %d run(s)" % len(self.busy))
                 for gone in self.gone:
                     gone.wait(_POLL)
+                # Read before the queue is: a worker posts, then ends, so
+                # once every one has ended, all they posted is there to be
+                # read. Read after, a post made between the two is lost.
+                ended = all(gone.is_set() for gone in self.gone)
                 while True:
                     try:
                         self.left.append(self.posts.get_nowait())
                     except queue.Empty:
                         break
-                if all(gone.is_set() for gone in self.gone):
+                if ended:
                     for thread in self.threads:
                         thread.join()
                     break
