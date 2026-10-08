@@ -1348,6 +1348,21 @@ def test_dying_by_the_signal_first_writes_out_what_was_printed(monkeypatch):
     assert died == [signal.SIGTERM]
 
 
+def test_dying_by_the_signal_is_by_its_default_action(monkeypatch):
+    """A handler still in place when the signal is sent would run instead of
+    ending the process, so the default is put back first."""
+    at_kill = []
+    monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: at_kill.append(
+        signal.getsignal(signum)))
+    old = signal.signal(signal.SIGTERM, lambda *a: None)
+    try:
+        mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+    assert at_kill == [signal.SIG_DFL]
+
+
 def test_a_baseline_that_runs_out_of_time_is_refused_for_that(repo, monkeypatch):
     """Not as a red baseline: nothing failed, and a person told it did would
     go looking for a failing test."""
