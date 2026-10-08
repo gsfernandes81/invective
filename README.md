@@ -23,13 +23,13 @@ uv add --dev git+https://github.com/gsfernandes81/invective
 To pin a release by tag:
 
 ```console
-uv add --dev git+https://github.com/gsfernandes81/invective@v0.2.1
+uv add --dev git+https://github.com/gsfernandes81/invective@v0.3.0
 ```
 
 Or install the release's wheel, which needs no build backend:
 
 ```console
-uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.2.1/invective-0.2.1-py3-none-any.whl
+uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.3.0/invective-0.3.0-py3-none-any.whl
 ```
 
 It needs pytest 8.2 or later in the same environment, and supports every
@@ -53,8 +53,18 @@ spaced through the file), and `--json report.json` writes the full report.
 `--ref` runs on a git commit, branch or tag instead of the files as they
 stand.
 
+`--workers N` runs N mutants at once, each in a copy of its own; `auto` is
+one per available CPU, at most 8. `workers` in `[tool.invective]` sets the
+default, which is 1. With more than one worker, every kill is confirmed once
+the others are done, with nothing else running: its killer is run alone, or
+else the whole selection again, and the kill carries `confirmed` (`alone` or
+`full`) in the report. A suite whose tests share a port, a fixed path or a
+database can still have a mutant survive because of another copy's run; give
+it one worker.
+
 ```text
 copy:      /tmp/invective-k2m1x9ab
+workers:   1
 project:   /home/me/proj
 target:    src/pkg/gate.py
 tests:     tests/test_gate.py
@@ -77,13 +87,13 @@ diff of the source file against the mutant.
 
 ## What is measured
 
-The mutants are written in a copy of the project made as the run starts, so
-your files never hold one. A run stopped by ^C or SIGTERM removes its copy;
-one killed outright leaves a copy marked with its owner, which the next
-invective to start removes. The copy is of the files as they stand:
-uncommitted edits and new files are measured. It leaves out version control,
-caches and virtual environments; `exclude` in `[tool.invective]` leaves out
-anything else, such as large data.
+The mutants are written in a copy of the project (one per worker) made as the
+run starts, so your files never hold one. A run stopped by ^C or SIGTERM
+removes its copies; one killed outright leaves them marked with their owner,
+which the next invective to start removes. The copy is of the files as they
+stand: uncommitted edits and new files are measured. It leaves out version
+control, caches and virtual environments; `exclude` in `[tool.invective]`
+leaves out anything else, such as large data.
 
 To measure a commit instead, give `--ref` (`--mutate-ref` from pytest) a
 commit, branch or tag. That is the one use invective makes of git.
@@ -138,7 +148,8 @@ The sweep tries `RAISE` only and at most 25 mutants per module unless told
 otherwise with `--only` and `--limit`. `--json` writes the results as JSON;
 each measured entry carries a `report` key with the engine's full report for
 that module (survivors, accepted, stale and kills as data, with `diff`).
-`--ref` runs on a git commit, branch or tag.
+`--ref` runs on a git commit, branch or tag. `--workers N` gives each module's
+engine N workers.
 
 `--modules` sweeps only the named module files instead of discovering them
 under `--src`:
@@ -220,7 +231,7 @@ read as absent.
 - **It refuses a failing selection.** If the chosen tests do not pass before
   any edit, every mutant would count as killed and the score would be 100%
   for nothing. The same goes for a selection that collects no tests.
-- **It runs pytest only**, one mutant at a time, in a fresh process each.
+- **It runs pytest only**, in a fresh process for each mutant.
 
 ## Developing invective
 

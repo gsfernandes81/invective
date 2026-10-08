@@ -52,8 +52,9 @@ control, caches, `node_modules`) and any directory holding `pyvenv.cfg`.
 `[tool.invective] exclude` leaves out anything else.
 
 A mutant is written by replacing the target file in the copy with the
-mutated text, then stamping its mtime one second ahead of the previous
-mutant's, so the bytecode cache never reuses the last mutant's `.pyc`.
+mutated text, then stamping its mtime at the campaign's start plus the mutant's
+place in the file, in seconds, so each copy's mtimes rise with every mutant it
+is given.
 
 ## One mutant's run
 
@@ -61,6 +62,12 @@ Each mutant is run as `python -m pytest` in the copy, in a process group
 of its own (`process.OWN_GROUP`), so that stopping the run stops everything
 it started. The killer comes from the plugin, which writes it to the file
 `INVECTIVE_VERDICT` names, not from the printed output.
+
+## Workers
+
+`mutate._Pool` runs one thread per copy. The main thread makes each mutant's
+text, hands out the work, and prints the results in site order; a run's process
+is touched only by the thread that started it.
 
 ## Exit codes
 

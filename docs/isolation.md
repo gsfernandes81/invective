@@ -75,7 +75,8 @@ A run stopped by ^C or SIGTERM removes its copy (`process.stopping_on_sigterm`
 turns the signal into an interrupt that unwinds through the copy's
 `finally`). A second SIGTERM during the cleanup is ignored, so the removal
 is not cut short; SIGKILL is the way to stop a cleanup that hangs, and the
-marker covers what that leaves.
+marker covers what that leaves. With more than one worker, a refusal, ^C or
+SIGTERM stops every worker's run and removes every copy.
 
 The sweep forwards a SIGTERM to its engine, waits for the engine's copy to
 be gone, then dies by the signal itself. `pytest --mutate` ends the
@@ -85,6 +86,20 @@ On Windows, `TerminateProcess` ends a process outright; the marker is what
 covers a terminated run there. As a pid namespace's init (a container's
 entry point), both `invective run` and `invective sweep` remove the copy
 and exit 128 + the signal's number.
+
+## Workers
+
+With `workers` above 1, each worker has a copy of its own, made from the first
+(`tree.working_tree`'s `source`), or a worktree of the one commit `--ref`
+resolves to. The first copy runs the selection alone, then every copy runs it at
+once, and each must be green. Every kill is confirmed after the last mutant has
+run, with nothing else running, in the first copy restored to the original: its
+killer alone, which must also pass alone on the original, or else the whole
+selection. Before any kill is confirmed, the whole selection is run there once
+more, and the run is refused unless it passes. A test that fails because
+another copy's run holds a port, a path or a database therefore never scores a
+kill. The reverse is not caught: a test that passes because of another copy's
+run lets a mutant survive, so such a suite runs with one worker.
 
 ## The import-from-outside refusal
 
