@@ -347,12 +347,18 @@ def _sweep(args, root):
             # body` is true of "occurred", "required" and "ignored", so a
             # traceback from a driver that could not start was labelled a red
             # baseline.
+            # A refusal is one sentence the engine chose and a person has to
+            # read whole; any other last line is only cut to a display width.
+            said_lines = body.strip().splitlines() or ["no output"]
+            refusal = next((ln for ln in said_lines
+                            if ln.startswith("refused:")), None)
             note = "no mutation sites" if "no mutation sites" in body else \
                    ("RED baseline" if "is RED on the unmutated tree" in body else
                     "DRIVER FAILED rc=%d: %s" % (
                         code,
+                        refusal if refusal is not None else
                         # invective: accept[equivalent: 90 -> 91] a display width
-                        (body.strip().splitlines() or ["no output"])[-1][:90]))
+                        said_lines[-1][:90]))
             report.append({"module": module, "note": note, "tests": tests})
             print("%-46s %s" % (module, note))
             continue

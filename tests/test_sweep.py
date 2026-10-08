@@ -327,6 +327,24 @@ def test_a_module_with_no_score_says_why(repo, monkeypatch, tmp_path, said,
     assert entry["note"] == note and "score" not in entry
 
 
+def test_a_refusal_the_engine_gave_is_said_whole(
+        repo, monkeypatch, capsys, tmp_path):
+    """A refusal is the engine's own sentence, and the person who sweeps has
+    to read all of it: it carries the path and the advice."""
+    sentence = "refused: " + "x" * 200
+    monkeypatch.setattr(sweep.subprocess, "Popen", _Engine(
+        2, stderr="\n" + sentence + "\n"))
+    out = str(tmp_path / "sweep.json")
+
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR, "--json", out,
+                "--modules", _p("pkg/gate.py")])
+
+    with open(out, encoding="utf-8") as fh:
+        (entry,) = json.load(fh)["measured"]
+    assert entry["note"] == "DRIVER FAILED rc=2: " + sentence
+    assert sentence in capsys.readouterr().out
+
+
 def test_a_real_sweep_separates_unmeasured_from_killed_and_survived(
         repo, tmp_path, capsys):
     """The whole path with nothing stubbed: the driver starts the engine.
