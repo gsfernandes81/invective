@@ -38,7 +38,11 @@ What is skipped (`tree.SKIPPED`): `.git`, `.hg`, `.svn`, `.tox`, `.nox`,
 whose mtime is in the future and whose size matches a mutant's would run
 the original's bytecode, and a copied `.pytest_cache` leaks `--lf` state
 into the runs. Symlinks are copied as symlinks (`symlinks=True`); a target
-reached through a link that leads outside the copy is refused.
+reached through a link that leads outside the copy is refused. The copy is
+never hardlinked: a hardlink shares the original's inode, so writing a
+mutant would edit the project's own file. On Windows, making symlinks
+needs a privilege; a file held open by a running process leaves the copy
+for the next reaper.
 
 ## The marker and the reaper
 
@@ -50,9 +54,11 @@ begins by removing copies in the temporary directory whose owner is dead
 missing or unreadable, or when the owner cannot be asked (another user's
 process). Pid reuse delays a reap, never causes a wrong one.
 
-A copy being removed is first renamed `invective-dead-<suffix>`, so a
-reaper killed halfway through leaves a name the next reaper recognises.
-A `--ref` copy's git worktree entry is cleared before the copy is removed.
+A killed run's copy keeps untracked files such as `.env` until the next
+start removes it. A copy being removed is first renamed
+`invective-dead-<suffix>`, so a reaper killed halfway through leaves a
+name the next reaper recognises. A `--ref` copy's git worktree entry is
+cleared before the copy is removed.
 
 ## Signals
 
@@ -90,12 +96,17 @@ copy reaches: every run in there would go by other settings, and a mutant
 only those settings kill would be reported as a survivor. A settings file
 that sets only `markers` is let be: it never changes a verdict silently.
 The fix for a workspace member is pytest settings of its own (an empty
-`[tool.pytest.ini_options]` table stops pytest's search there).
+`[tool.pytest.ini_options]` table stops pytest's search there). A
+`pytest --mutate -c FILE` run skips this check: `-c` is forwarded to every
+mutant's run, so they go by the same file.
 
 ## Not to build
 
 Each of these trades the on-disk, fresh-process guarantee for a speedup,
-and fails in the silent direction invective exists to refuse.
+and fails in the silent direction invective exists to refuse. pytest-gremlins
+takes the first: it instruments a module in-process and switches mutants with
+an environment variable, so a child interpreter a test starts imports the
+original file and every mutant it would catch survives silently.
 
 - Mutation switching by environment variable or in-process, warm pytest
   pools and fork servers: they miss import-time mutants, leak state between
@@ -106,11 +117,19 @@ and fails in the silent direction invective exists to refuse.
 
 > **Finding:** (2026-10-07, or3 benchmark, 4 cores, nothing else running)
 >
-> `PYTHONDONTWRITEBYTECODE=1` in mutant runs costs 6-17% of every run
-> (12% on `cfg.py` 18 mutants, 6% on `farpy.py` 19 mutants, 17% on a
-> 3-module sweep of 22 mutants) with identical verdicts and survivors.
-> The cost is every module a run imports other than the mutant, recompiled
-> on every run; the copy already carries no `__pycache__`, and the mtime
-> stamping already holds on the file where or3's old engine went 9/11/9
-> of 19. A second guard that costs 6-17% is not worth it unless a
-> filesystem whose mtimes the stamping cannot rely on turns up.
+> `PYTHONDONTWRITEBYTECODE=1` in mutant runs, the only variable changed:
+>
+> | benchmark | n | off | on | cost | runs |
+> |---|---|---|---|---|---|
+> | `run`, `cfg.py`, RAISE+CMP+NOT | 18 | 47.5 s | 53.4 s | +12% | 3 |
+> | `run`, `farpy.py`, all kinds | 19 | 19.1 s | 20.3 s | +6% | 3 |
+> | `sweep`, 3 modules | 22 | 252.6 s | 295.0 s | +17% | 2 |
+>
+> Verdicts and survivors identical on and off (`cfg.py` 7/18,
+> `farpy.py` 9/19). Only the sweep separates clearly; the two `run`
+> rows are within noise. The cost is every module a run imports other
+> than the mutant, recompiled on every run; the copy already carries no
+> `__pycache__`, and the mtime stamping already holds on the file where
+> or3's old engine went 9/11/9 of 19. A second guard that costs 6-17%
+> is not worth it unless a filesystem whose mtimes the stamping cannot
+> rely on turns up.

@@ -7,8 +7,8 @@ import sys
 from invective import mutate, sweep
 
 USAGE = """\
-usage: invective run   --target MODULE --tests TEST [TEST ...] [--only OPS] [--limit N] [--json FILE]
-       invective sweep --src DIR [DIR ...] --tests-dir DIR [--only OPS] [--limit N] [--json FILE]
+usage: invective run   --target MODULE --tests TEST [TEST ...] [--only OPS] [--limit N] [--json FILE] [--ref REF]
+       invective sweep --src DIR [DIR ...] --tests-dir DIR [--modules FILE ...] [--only OPS] [--limit N] [--json FILE] [--ref REF]
 
 `invective run --help` and `invective sweep --help` say what each one does.
 """

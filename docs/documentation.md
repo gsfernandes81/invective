@@ -61,7 +61,20 @@ deleted. It is never marked stale.
 
 ## Checks
 
-`tests/test_docs.py` enforces the mechanical rules: every backticked path
-names something that exists, every dotted symbol resolves, every command in
-a code block parses, the header shape is right, prose wraps at 90
-characters, and line-number citations and dash asides are caught.
+`tests/test_docs.py` enforces the mechanical rules and reads the prose's
+restatements of the code. Mechanical: every backticked path names something
+that exists, every dotted symbol resolves, every `invective run` or
+`invective sweep` line in a fenced code block parses against the real
+parser, every `pytest --mutate` option is one the plugin registers,
+`__main__.USAGE` names only flags the parsers have, the header shape is
+right, prose wraps at 90 characters, and line-number citations and dash
+asides are caught. Restatements: the edits table and the CMP pairs match
+`mutate.OPERATORS` and `mutate._CMP_SWAP`, the sweep's default kinds and
+cap match the parser's, the reasons match `accept.REASONS`, the acceptance
+examples parse through `accept.read`, both `[tool.invective]` tables load
+through `config.load` and name every key in `config._KEYS`, each
+`--mutate-*` option pairs with its `invective run` flag, the forwarded
+options match `pytest_invective._forwarded`, the handshake variables match
+the plugin's constants, and `tree.SKIPPED` matches the isolation page's
+list. Every scan asserts it found something, so a pattern that stops
+matching fails rather than passing empty.

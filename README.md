@@ -8,12 +8,13 @@ A passing suite shows the code does what the tests say. It does not show the
 tests say anything. A surviving edit (a *mutant*) is a line whose behaviour
 no test depends on: either a check is missing, or the line does not matter.
 
-How it works and why: `docs/` (`head -4 docs/*.md`).
+How it works and why: `docs/` in a clone (`head -4 docs/*.md`).
 
 ## Install
 
 It is not on PyPI. Install it from this repository into the project whose
-tests you want to measure:
+tests you want to measure (it goes into the project's virtual environment,
+beside pytest):
 
 ```console
 uv add --dev git+https://github.com/gsfernandes81/invective
@@ -31,24 +32,26 @@ Or install the release's wheel, which needs no build backend:
 uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.2.0/invective-0.2.0-py3-none-any.whl
 ```
 
-It needs pytest 8.2 or later, and supports every Python that has not reached
-its end of life: 3.11 to 3.14 today. It does not need git, except to run on a
-commit with `--ref`.
+It needs pytest 8.2 or later in the same environment, and supports every
+Python that has not reached its end of life: 3.11 to 3.14 today. It does not
+need git, except to run on a commit with `--ref`.
 
 ## One module
 
-Run it from anywhere inside the project:
+Run it from anywhere inside the project (the nearest directory at or above
+the working directory that holds a `pyproject.toml` or another pytest
+settings file; with none, the working directory itself):
 
 ```console
 invective run --target src/pkg/gate.py --tests tests/test_gate.py
 ```
 
 `--target` and `--tests` are relative to the directory the command is run
-in. `--tests` takes anything pytest accepts as a selection. `--only
-CMP,RAISE` limits the kinds of edit, `--limit 40` caps how many are tried
-(evenly spaced through the file), and `--json report.json` writes the full
-report. `--ref` runs on a git commit, branch or tag instead of the files as
-they stand.
+in. `--tests` takes files, directories and node ids. `--only CMP,RAISE`
+limits the kinds of edit, `--limit 40` caps how many are tried (evenly
+spaced through the file), and `--json report.json` writes the full report.
+`--ref` runs on a git commit, branch or tag instead of the files as they
+stand.
 
 ```text
 copy:      /tmp/invective-k2m1x9ab
@@ -98,22 +101,25 @@ The mutants are run against exactly the tests pytest collected, so `-k`, `-m`,
 `--deselect` and node ids all narrow the selection. `--mutate` can be given
 more than once; `--mutate-only`, `--mutate-limit`, `--mutate-json` and
 `--mutate-ref` work as `--only`, `--limit`, `--json` and `--ref` do for
-`invective run`. The tests are not run as an ordinary session, so pytest's
-last line says "no tests ran"; the report is the section above it.
+`invective run`. The tests are not run as an ordinary session: pytest's last
+line says how many were deselected or that no tests ran. The report is the
+section above it.
 
-pytest-xdist's workers have to be off for the outer run (`-n 0`): its
-controlling process collects nothing, and an empty selection is refused.
+pytest-xdist's workers have to be off for the outer run (`-n 0`): with
+workers on, `--mutate` stops at startup with a usage error (exit 4).
 Without `--mutate`, the plugin does nothing.
 
-These options reach every mutant's run as you gave them: `-p`, `-o`, `-W`,
-`--import-mode`, `--runxfail`, `--strict-markers` and `--doctest-modules`.
-Others do not: `--pdb` would stop a run for good, `--lf` would drop tests,
-and `-q` would leave a refusal nothing to quote. Your pytest configuration is
-in the copy, so every run reads it.
+These options reach every mutant's run: `-p`, `-o`, `-W`, `--import-mode`,
+`--runxfail`, `--strict-markers` and `--doctest-modules`. `-c FILE` is also
+forwarded, given from the project's top; a run given `-c` skips the settings
+check. The rest do not reach the mutants: `--pdb` would stop a run for good,
+`--lf` would drop tests, and `-q` would leave a refusal nothing to quote.
+Your pytest configuration is in the copy, so every run reads it.
 
-A child interpreter started by a test in a different directory imports the
-installed package, not the copy under test, unless the test puts the copy on
-`sys.path`.
+A child interpreter started by a test imports the mutant only when it starts
+from the copy's working directory (or when the test puts the copy on
+`sys.path`). In a `src` layout, starting the child from elsewhere imports the
+installed package, not the copy. Issue #2 tracks the known limits.
 
 ## A whole source tree
 
@@ -195,9 +201,15 @@ max-accepted = 10          # so do more accepted survivors than this
 exclude = ["var/*"]        # left out of the copy
 ```
 
-A run that breaks these rules exits 1 (`pytest --mutate` fails as a failing
-test would). A run that could not be trusted exits 2, and says why. An unknown
-key in `[tool.invective]` is refused, so a misspelt one is not read as absent.
+`invective run` and `invective sweep` exit 1 when a module breaks these
+rules, 2 when a run could not be trusted (a red baseline, a target loaded
+from outside the copy, pytest settings above the project's top), and 0
+otherwise. The sweep also exits 2 when any module is imported from outside
+the copy, and exits 0 for a RED baseline, "no mutation sites" or a driver
+failure on an individual module. `pytest --mutate` exits 4 on a usage error,
+2 on a refusal or SIGTERM, and 1 when rules are broken. A SIGTERM ends
+`invective run` by the signal (143 in a shell). An unknown key in
+`[tool.invective]` is refused, so a misspelt one is not read as absent.
 
 ## What it will not do
 

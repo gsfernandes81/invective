@@ -14,8 +14,8 @@ import pytest
 
 # **This checkout's `src`, ahead of any installed copy, and put there by a
 # conftest rather than by `pythonpath`.** A run of invective against itself
-# tests a worktree, and the worktree's `src` holds the mutant, so the code
-# under test must come from here. The plugin that reports the run's own
+# tests a copy, and the copy's `src` holds the mutant, so the code under
+# test must come from here. The plugin that reports the run's own
 # verdict must not: pytest 8.4 and later apply `pythonpath` before loading
 # plugins, which would make a mutant of the plugin the judge of its own run.
 # Every pytest imports a conftest after its plugins.

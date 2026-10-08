@@ -33,8 +33,8 @@ popped so a pytest the suite starts does not inherit them:
 - `INVECTIVE_SELECTION`: a file of node ids, one a line, that the plugin
   keeps and no others.
 - `INVECTIVE_VERDICT`: a file the plugin writes at the session's end with
-  the first failing test's node id and whether the target was loaded from
-  outside the copy.
+  the first failing test's node id, the selected tests that were not found,
+  and whether the target was loaded from outside the copy.
 - `INVECTIVE_TARGET`: the mutated module's path from the copy's top, `/`
   separators. The plugin checks the tests loaded it from inside the copy.
 - `INVECTIVE_TYPED`: how many trailing arguments are paths for pytest's
@@ -63,10 +63,20 @@ it started. The killer comes from the plugin, which writes it to the file
 
 ## Exit codes
 
+`invective run` and `invective sweep`:
+
 - **0**: the run completed. Survivors are a finding to read; the run passes
-  unless `[tool.invective]` says otherwise.
-- **1**: the run completed and broke the project's rules
-  (`fail-on-survivors`, `max-accepted`).
-- **2**: the run could not be trusted and was refused (a red baseline, an
-  empty selection, a target loaded from outside the copy, pytest settings
-  above the project's top).
+  unless `[tool.invective]` says otherwise. The sweep also exits 0 for a
+  RED baseline, "no mutation sites" or a driver failure on a single module.
+- **1**: a module broke the project's rules (`fail-on-survivors`,
+  `max-accepted`).
+- **2**: a refusal (a red baseline, an empty selection, a target loaded from
+  outside the copy, pytest settings above the project's top). The sweep
+  also exits 2 when any module is imported from outside the copy. A
+  SIGTERM ends `invective run` by the signal (143 in a shell).
+
+`pytest --mutate`:
+
+- **4**: a usage error (xdist workers on, an unknown `--mutate-only` kind).
+- **2**: a refusal or SIGTERM.
+- **1**: rules broken.

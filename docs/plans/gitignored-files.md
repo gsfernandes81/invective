@@ -1,7 +1,7 @@
 # Gitignored files
 
 Two proposed `[tool.invective]` keys for leaving out gitignored files;
-proposed, not decided.
+open.
 
 ## The keys
 
@@ -15,8 +15,8 @@ include-ignored   = [".env", "src/pkg/_version.py", "build/*.so"]
 `git ls-files --others --ignored --exclude-standard`, so it needs git and
 refuses outside a repository. Untracked files that are not ignored are
 still copied. `include-ignored` re-includes a subset of the ignored files
-and does nothing when `ignore-gitignored` is false; `exclude` still wins
-over it.
+(repo-relative globs) and does nothing when `ignore-gitignored` is false;
+`exclude` still wins over it.
 
 ## Why the default is false
 

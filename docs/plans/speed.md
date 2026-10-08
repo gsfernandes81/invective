@@ -33,14 +33,17 @@ minutes. All multipliers are estimates, not measurements.
   one test, so 2 adds about nothing.
 - **Survivors are the floor in every case.** Nothing in 2 or 3 helps
   them: a survivor has no killer, and 2's confirmation pass puts it back
-  at the full suite.
+  at the full suite. Re-running the full selection is safer than running
+  only the tests the subset skipped, which changes process and order.
 - **4 is weaker without 2.** The whole module's text is in the key, so
   any edit to a module invalidates all of its mutants; what is left is the
-  sweep case, modules that did not change.
+  sweep case, modules that did not change. Saying which mutants a changed
+  test affects needs option 2's coverage map.
 - `invective sweep` already narrows to the test files that import the
   module, which makes 2's gain smaller there.
 - Recommended stack, first run: about 5.5 minutes against about 80
-  (roughly 8-25x). A cached re-run after a small change: under a minute.
+  (roughly 8-25x), or about 14.5 minutes without option 2's coverage
+  selection. A cached re-run after a small change: under a minute.
 
 If most runs are warm local re-runs, 1+3+4 is likely enough to start. If
 CI is the main use, 2 is the one worth building.
@@ -51,7 +54,8 @@ CI is the main use, 2 is the one worth building.
 > `import pytest` 173 ms, pytest on one trivial test 228 ms). A real
 > `conftest.py` can push that to 0.5-1.5 s. The engine runs the 6-mutant
 > fixture in 0.37 s per run. Copying a 224 KB tree: `shutil.copytree`
-> 6 ms, `git worktree add` 14 ms. invective's own suite is the opposite
+> 6 ms, `git worktree add` 14 ms (a wash at this size; both grow with
+> the tree's bytes). invective's own suite is the opposite
 > case: each test spawns pytest, 0.2-3.5 s per test, so startup is under
 > 10% of a run and option 2 would be worth 10-20x.
 

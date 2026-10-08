@@ -407,8 +407,9 @@ class _Anything:
 def test_the_forwarded_options_are_the_plugins():
     """An option the plugin starts or stops forwarding to each mutant's run
     changes what a run measures, and the README's list is how a user knows."""
-    match = re.search(r"These options reach every mutant's run as you gave them: "
-                      r"(.*?)\. Others do not",
+    match = re.search(r"These options reach every mutant's run: "
+                      r"(.*?)\. `-c FILE` is also forwarded.*?"
+                      r"The rest do not reach",
                       " ".join(_paragraphs(_section("README.md", "## From pytest"))))
     assert match, "the sentence listing the forwarded options"
     said = set(re.findall(r"`(-[^`]+)`", match.group(1)))
