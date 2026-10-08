@@ -15,7 +15,8 @@ import pytest
 from invective import mutate
 from invective import tree as trees
 
-from conftest import git, slow_run, stop_group, wait_ended, write_tree
+from conftest import (commit, git, slow_run, stop_group, wait_ended,
+                      write_tree)
 
 
 def _files(where):
@@ -504,6 +505,59 @@ def test_a_ref_begins_by_removing_the_copies_of_dead_owners(repo, tmp_path):
 
     with trees.git_ref(repo, "HEAD"):
         assert not dead.exists()
+
+
+@pytest.mark.parametrize("name", ["invective-leak1234",
+                                  "invective-dead-leak1234"])
+def test_the_project_being_measured_is_never_reaped(tree, tmp_path, name):
+    """A leaked copy someone measures is a project in the temporary
+    directory, under a copy's name and with a dead owner's marker; removing
+    it would take the project, and the working directory, with it."""
+    project = _dead_owners_copy(tmp_path, name)
+    shutil.copytree(tree, project, dirs_exist_ok=True)
+    other = _dead_owners_copy(tmp_path, "invective-bbbbbbbb")
+
+    with trees.working_tree(str(project)) as where:
+        assert os.path.isfile(os.path.join(where, "pkg", "gate.py"))
+
+    assert os.path.isfile(project / "pkg" / "gate.py")
+    # The reaper still did its work on everything else.
+    assert not other.exists()
+
+
+def test_the_project_being_measured_is_never_reaped_from_inside_it(
+        tree, tmp_path):
+    """Its subdirectory measured, as a run from inside it measures it."""
+    project = _dead_owners_copy(tmp_path, "invective-leak1234")
+    shutil.copytree(tree, project, dirs_exist_ok=True)
+
+    with trees.working_tree(str(project / "pkg")) as where:
+        assert os.path.isfile(os.path.join(where, "gate.py"))
+
+    assert os.path.isfile(project / "pkg" / "gate.py")
+
+
+def test_a_ref_never_reaps_the_repository_it_is_taken_from(tree, tmp_path):
+    project = _dead_owners_copy(tmp_path, "invective-leak1234")
+    shutil.copytree(tree, project, dirs_exist_ok=True)
+    git(str(project), "init", "-q", "-b", "main")
+    commit(str(project))
+
+    with trees.git_ref(str(project), "HEAD") as where:
+        assert os.path.isfile(os.path.join(where, "pkg", "gate.py"))
+
+    assert os.path.isfile(project / "pkg" / "gate.py")
+
+
+def test_only_a_dead_name_invective_makes_is_removed_unconditionally(
+        tmp_path):
+    """A person's `invective-dead-letter-notes` is not a copy."""
+    write_tree(str(tmp_path), {"invective-dead-letter-notes/notes.txt": "x\n",
+                               "invective-dead-abcd_234/x": ""})
+
+    trees.reap()
+
+    assert _marked(tmp_path) == ["invective-dead-letter-notes"]
 
 
 def _refuse_to_remove_directories(monkeypatch):

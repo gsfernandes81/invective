@@ -21,6 +21,7 @@ import contextlib
 import fnmatch
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -46,8 +47,8 @@ def working_tree(root: str, exclude: tuple[str, ...] = ()):
     """A copy of *root* as it stands, uncommitted edits and untracked files
     included. *exclude* holds glob patterns, matched against paths relative to
     *root* with `/` between their parts, of anything else to leave out."""
-    reap()
     root = os.path.abspath(root)
+    reap(root)
     # Between here and the marker, a kill leaves an empty, unmarked
     # `invective-*` directory that no reaper touches. The window is
     # microseconds, a rule for empty unmarked directories would need an age,
@@ -95,7 +96,7 @@ def git_ref(root: str, ref: str):
     """The tree of commit *ref* of the git repository *root* is in, as a
     detached git worktree; the copy's top level is the directory there that
     corresponds to *root*. The only part of invective that needs git."""
-    reap()
+    reap(root)
     # The worktree is a subdirectory of the copy's directory, which is marked
     # before the checkout: git wants the directory it checks out into empty,
     # and a kill while it fills a large tree, which takes seconds, must leave
@@ -240,8 +241,15 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def reap() -> None:
-    """Remove every copy in the temporary directory whose owner is dead.
+#: A copy's name once it is being removed: `mkdtemp`'s eight characters,
+#: lowercase letters, digits and `_`, after the dead prefix.
+_DEAD = re.compile(r"invective-dead-[a-z0-9_]{8}")
+
+
+def reap(keep: str | None = None) -> None:
+    """Remove every copy in the temporary directory whose owner is dead,
+    except the one that is or holds *keep*, the directory being measured:
+    a leaked copy someone measures is a project, whatever its marker says.
 
     Run at the start of every copy, deliberately: that is every `run`, every
     engine the sweep starts, every `pytest --mutate`, and every test of
@@ -257,7 +265,9 @@ def reap() -> None:
     `invective-dead-<name>` and removed under that name: a reaper killed
     halfway through may have deleted the marker before the rest, and the
     next reaper still knows the directory for what it is. The suffix
-    `mkdtemp` gives a copy never starts `dead-`, so the two cannot collide.
+    `mkdtemp` gives a copy never starts `dead-`, so the two cannot collide,
+    and only a dead name of the shape invective makes, `invective-dead-`
+    and the eight characters of that suffix, is removed without a marker.
     A rename that fails is another reaper's win, or a copy on a shared
     temporary directory that is not ours to touch, and is left.
 
@@ -279,11 +289,17 @@ def reap() -> None:
         names = os.listdir(box)
     except OSError:
         return
+    measured = None
+    if keep is not None:
+        measured = os.path.normcase(os.path.realpath(keep)) + os.sep
     for name in names:
         if not name.startswith("invective-"):
             continue
         path = os.path.join(box, name)
-        if name.startswith("invective-dead-"):
+        if measured is not None and measured.startswith(
+                os.path.normcase(os.path.realpath(path)) + os.sep):
+            continue
+        if _DEAD.fullmatch(name):
             shutil.rmtree(path, ignore_errors=True)
             continue
         try:
