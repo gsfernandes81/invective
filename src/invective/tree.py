@@ -145,15 +145,23 @@ def _discard(root: str, where: str) -> None:
     git keeps of its worktree, locked or not. Says nothing and raises
     nothing: it runs on the way out of a run whose own outcome is the one to
     report, and where there may be no git."""
-    _remove(where)
     # invective: accept[equivalent: True -> False] git says nothing here a person needs
     quietly = {"capture_output": True, "text": True}
+    # `remove` goes first, while the directory exists: git registers the real
+    # path of a worktree and can match the entry only by canonicalising the
+    # one given, which it cannot do for a path that is gone -- a temporary
+    # directory reached through a symlink then leaves the entry for good.
+    # `--force` given twice clears a locked entry. The marker is in *where*,
+    # not in the worktree, so a kill during git's deletion still leaves a
+    # marked directory for the next reaper.
     try:
-        # With the directory gone, `remove` on the registered path clears the
-        # entry, a locked one only with `--force` given twice; `prune` drops
-        # the entries of earlier runs' copies that a reaper removed.
         subprocess.run(["git", "-C", root, "worktree", "remove", "--force",
                         "--force", os.path.join(where, "tree")], **quietly)
+    except FileNotFoundError:
+        pass
+    _remove(where)
+    # `prune` drops the entries of earlier runs' copies that a reaper removed.
+    try:
         subprocess.run(["git", "-C", root, "worktree", "prune"], **quietly)
     except FileNotFoundError:
         pass

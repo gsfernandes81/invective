@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 import pytest
@@ -415,6 +416,40 @@ def test_a_ref_stopped_during_the_checkout_leaves_no_copy_and_no_worktree(
                                    "--porcelain").splitlines()
               if line.startswith("worktree ")]
     # The repository's own, alone.
+    assert len(listed) == 1
+
+
+def test_a_ref_stopped_during_the_checkout_through_a_linked_temp_dir_leaves_no_worktree(
+        repo, tmp_path, monkeypatch):
+    """Git registers the real path of a worktree and cannot canonicalise one
+    that is gone, so the entry is removed while the directory still exists,
+    whichever spelling of the temporary directory the copy was given."""
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link = tmp_path / "link"
+    try:
+        os.symlink(real_dir, link, target_is_directory=True)
+    except OSError:
+        pytest.skip("no symlinks here")
+    monkeypatch.setattr(tempfile, "tempdir", str(link))
+    real = trees._git
+
+    def stopped_after_the_add(root, *args):
+        out = real(root, *args)
+        if args[:2] == ("worktree", "add"):
+            git(repo, "worktree", "lock", args[3])
+            raise mutate._Terminated(signal.SIGTERM)
+        return out
+
+    monkeypatch.setattr(trees, "_git", stopped_after_the_add)
+    with pytest.raises(mutate._Terminated):
+        with trees.git_ref(repo, "HEAD"):
+            pass
+
+    assert os.listdir(real_dir) == []
+    listed = [line for line in git(repo, "worktree", "list",
+                                   "--porcelain").splitlines()
+              if line.startswith("worktree ")]
     assert len(listed) == 1
 
 
