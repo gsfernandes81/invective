@@ -55,7 +55,7 @@ directory whose owner is dead (`tree.reap`). A copy is kept when its owner
 is alive, when the marker is missing or unreadable, when the owner cannot
 be asked (another user's process), or when its `ns` is not the reaper's (a
 container sharing the temporary directory). A marker without `ns` is judged
-by its pid alone.
+by its pid alone. Pid reuse delays a reap, never causes a wrong one.
 
 A killed run's copy keeps untracked files such as `.env` until the next
 start removes it. A copy being removed is first renamed
