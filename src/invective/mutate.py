@@ -229,7 +229,8 @@ def _apply(module: _Module, index: int, base: ast.AST) -> ast.AST:
     nothing else touched.
 
     Only the site's path is copied, and nothing *base* holds is edited:
-    every other mutant of the file is made from it too. The edits here and
+    every other mutant of the file is made from it too. The mutant shares
+    every node off that path with *base*, so it is never edited either. The edits here and
     in `_mutated_node` are the same by construction, one made in the whole
     tree and one in the node alone, and must stay so: `_text_of`'s
     comparison of the two trees is what catches a drift, by writing every
@@ -389,8 +390,10 @@ def _splice(source: str, node: ast.AST, head: str, tail: str = "") -> str:
 def _reparsed(text: str) -> ast.AST:
     """*text* parsed only to be compared, silently: a warning it raises is
     the target's own, which the parse that found its sites has said once.
-    The filters set aside are the process's, not the thread's, so this runs
-    on the main thread only."""
+    While it runs, no other thread may warn or change the warning filters:
+    the filters it sets aside are the process's (unless
+    `sys.flags.context_aware_warnings`), so another thread's warning would
+    be lost and its new filter undone."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return ast.parse(text)
