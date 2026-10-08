@@ -374,6 +374,24 @@ def test_the_home_directory_is_not_offered_as_where_to_run_from(
     assert "run invective from %s," % (tmp_path / "ws") in ws
 
 
+def test_a_root_of_the_filesystem_is_never_offered_as_where_to_run_from(
+        tmp_path, monkeypatch):
+    """A drive's root need not hold the home directory (`D:\\` while it is on
+    `C:`), and a copy made from it is a copy of the whole drive. Here every
+    root holds the home directory, so the home rule is set aside to see the
+    root rule alone."""
+    monkeypatch.setattr(config, "_inside", lambda path, root: None)
+
+    top = os.path.join(os.path.abspath(os.sep), "pytest.ini")
+    root = str(config.outside_refusal(top, str(tmp_path / "proj")))
+    below = str(config.outside_refusal(str(tmp_path / "ws" / "pytest.ini"),
+                                       str(tmp_path / "ws" / "proj")))
+
+    assert "run invective from" not in root
+    assert "move them into the project" in root
+    assert "run invective from %s," % (tmp_path / "ws") in below
+
+
 def test_a_conftest_pytest_loads_above_the_project_s_top_is_named(tmp_path):
     """Settings that set nothing still put pytest's rootdir above the top,
     and pytest loads every `conftest.py` from there down, which the copy

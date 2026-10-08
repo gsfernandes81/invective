@@ -293,8 +293,11 @@ def outside_refusal(left_out: str, root: str) -> Refusal:
     there = os.path.normcase(os.path.realpath(os.path.dirname(left_out)))
     home = os.path.normcase(os.path.realpath(os.path.expanduser("~")))
     # The home directory is nobody's project, and a copy made from it, or
-    # from a directory above it, would carry everything in it.
-    if _inside(home, there) is not None:
+    # from a directory above it, would carry everything in it. A root of the
+    # filesystem is never offered either: on Windows a drive's root need not
+    # hold the home directory (`D:\` while it is on `C:`), and a copy of it
+    # is a copy of the whole drive.
+    if os.path.dirname(there) == there or _inside(home, there) is not None:
         return Refusal(said + "move them into the project")
     return Refusal(said + "move them into the project, or run invective from "
                    "%s, so that the copy is made from there"
