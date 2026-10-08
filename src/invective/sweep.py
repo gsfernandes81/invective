@@ -11,8 +11,9 @@ they test. A module with no such file is reported as unmeasured rather than
 skipped silently -- that distinction is the whole point.
 
 Run it from anywhere inside the project; `--src`, `--tests-dir` and
-`--modules` are relative to the directory it is run in. It exits 1 when a
-module breaks the project's `[tool.invective]` rules.
+`--modules` are relative to the directory it is run in. It exits 2 when the
+tests import a module from outside the copy, as `invective run` does, and 1
+when a module breaks the project's `[tool.invective]` rules.
 
     invective sweep --src src/pkg --tests-dir tests [--limit N] [--only OPS]
 """
@@ -27,7 +28,8 @@ import tempfile
 from invective.config import (check_pytest_settings, project_root,
                               relative_to_root)
 from invective.errors import Refusal
-from invective.mutate import _STOP_GRACE, _Terminated, _exit_by, stopping_on_sigterm
+from invective.mutate import (_STOP_GRACE, UNREACHED, _Terminated, _exit_by,
+                              stopping_on_sigterm)
 from invective.tree import git_ref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -360,7 +362,7 @@ def _settle(args, root):
 
 def _sweep(args, root):
     """Every module measured and printed as it is, and the exit code."""
-    report, unmeasured, failing = [], [], []
+    report, unmeasured, failing, unreached = [], [], [], []
     # A bare `--modules` names no file and sweeps none: an empty list is what
     # a shell expansion of the changed files expands to when nothing changed.
     for module in (args.modules if args.modules is not None
@@ -407,6 +409,12 @@ def _sweep(args, root):
             said_lines = body.strip().splitlines() or ["no output"]
             refusal = next((ln for ln in said_lines
                             if ln.startswith("refused:")), None)
+            # **The one refusal that fails the sweep.** The tests load the
+            # project's own file, so no campaign on it measures anything,
+            # whichever entry point starts it; `invective run` exits 2 on it,
+            # and a gate on the sweep must not read green for the same tree.
+            if refusal is not None and UNREACHED in refusal:
+                unreached.append(module)
 
             # "no mutation sites" and "RED baseline" are answers ABOUT the
             # module; anything else is this driver failing to get an answer
@@ -471,6 +479,11 @@ def _sweep(args, root):
     if failing:
         print("\n%d module(s) break the project's rules: %s"
               % (len(failing), ", ".join(failing)))
+    if unreached:
+        print("\nrefused: the tests import %d module(s) from outside the "
+              "copy, so no mutant of them can reach the tests: %s"
+              % (len(unreached), ", ".join(unreached)), file=sys.stderr)
+        return 2
     return 1 if failing else 0
 
 

@@ -76,6 +76,10 @@ TIMED_OUT = -1  # invective: accept[equivalent: 1 -> 2] any code pytest cannot e
 #: the campaign instead of holding it for ever.
 BASELINE_TIMEOUT = 600  # invective: accept[equivalent: 600 -> 601] any cap far above a suite's time serves
 
+#: The clause a refusal of a target the tests import from outside the copy is
+#: known by, here and in the sweep, which reads it in the engine's output.
+UNREACHED = "so no mutant of it can reach the tests"
+
 
 class Verdict(NamedTuple):
     """What one run of the selection said.
@@ -751,9 +755,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 # plugin, which a conftest comes after. The baseline is
                 # where this fires; every run is checked because the check
                 # is one field and this is the one place it is read.
-                raise Refusal(
-                    "%s was imported from %s, not from the copy at %s, so no "
-                    "mutant of it can reach the tests. An editable install, "
+                raise Refusal((
+                    "%s was imported from %s, not from the copy at %s, "
+                    + UNREACHED + ". An editable install, "
                     "or a sys.path entry, points the tests at the project "
                     "itself; pytest's `pythonpath` setting naming the "
                     "directory the package is in (`src`), or a conftest.py "
@@ -763,7 +767,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "conftest (an entry point, PYTEST_PLUGINS, a -p in "
                     "addopts) that imports it first is ahead of a conftest; "
                     "only the `pythonpath` setting, on pytest 8.4 or later, "
-                    "is ahead of such a plugin."
+                    "is ahead of such a plugin.")
                     % (src_rel, got.elsewhere, where))
             return got
 

@@ -605,6 +605,44 @@ def test_a_refusal_the_engine_gave_is_said_whole(
     assert sentence in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("fixed", [None, "pythonpath"])
+def test_a_module_the_tests_import_from_outside_the_copy_fails_the_sweep(
+        tmp_path, monkeypatch, capsys, fixed):
+    """The tests load the project's own file, as an editable install of a
+    `src` layout has them do, so no mutant can reach them: the sweep exits
+    2, as `invective run` does on the same tree, and a gate on it does not
+    read green with nothing measured. The engine's refusal is still its
+    module's row. With pytest's `pythonpath` setting naming `src`, the tests
+    load the copy's file and the module is measured. Nothing is stubbed: a
+    `PYTHONPATH` entry stands in for the editable install's `.pth` line."""
+    project = os.path.realpath(tmp_path / "project")
+    write_tree(project, {
+        "pyproject.toml": "[project]\nname = 'p'\n[tool.pytest.ini_options]\n"
+                          + ("pythonpath = ['src']\n" if fixed else ""),
+        "src/pkg/__init__.py": "",
+        "src/pkg/gate.py": FILES["pkg/gate.py"],
+        "tests/test_gate.py": FILES["pkg/tests/test_gate.py"],
+    })
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("PYTHONPATH",
+                       os.pathsep.join([SRC, os.path.join(project, "src")]))
+    gate = os.path.join("src", "pkg", "gate.py")
+
+    rc = sweep.main(["--src", os.path.join("src", "pkg"), "--tests-dir",
+                     "tests", "--modules", gate])
+
+    out, err = capsys.readouterr()
+    if fixed:
+        assert rc == 0
+        assert "1/1" in out
+        return
+    assert rc == 2
+    assert "DRIVER FAILED rc=2: refused: " in out
+    assert "was imported from" in out
+    (said,) = [ln for ln in err.splitlines() if ln.startswith("refused:")]
+    assert said.endswith(": " + gate)
+
+
 def test_a_real_sweep_separates_unmeasured_from_killed_and_survived(
         repo, tmp_path, capsys):
     """The whole path with nothing stubbed: the driver starts the engine.
