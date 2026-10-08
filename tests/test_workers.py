@@ -599,6 +599,40 @@ def test_a_killer_is_run_alone_only_where_it_leaves_out_nothing_the_tests_chose(
     assert report["unreproduced"] == []
 
 
+@pytest.mark.parametrize("kill, tests", [
+    (mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT"),
+     GATE_TESTS),
+    (killed_by("pkg/tests/test_gate.py", ExitCode.INTERRUPTED), GATE_TESTS),
+    (killed_by(MINOR), GATE_TESTS + ["-k", "minor or adult"])])
+def test_a_kill_with_no_killer_to_run_alone_that_the_selection_lets_through_is_named(
+        tree, monkeypatch, kill, tests):
+    """A kill by time, by a module, or by a test that cannot be run alone
+    is the whole selection's again, and when that lets the mutant through
+    it did not come back: it is named, as a kill its killer does not make
+    alone is, and the survivor says how it was decided."""
+    def said(run):
+        if run.text is None:
+            return GREEN
+        # In the pool, on the second copy only: with nothing else running,
+        # every mutant passes.
+        return kill if run.copy == 1 else GREEN
+
+    run = Campaign(tree, monkeypatch, said=said)
+    report = run(2, tests=tests, confirm=True)
+    overturned = [s for s in report["survivors"] if "confirmed" in s]
+    assert overturned and report["killed"] == 0
+    assert {s["confirmed"] for s in overturned} == {"full"}
+    assert [(u["line"], u["change"], u["killer"], u["alone"], u["again"])
+            for u in report["unreproduced"]] == [
+        (s["line"], s["change"], kill.killer, "no killer to run alone",
+         "survived") for s in overturned]
+    said_ = mutate.summary(report)
+    assert said_[2] == (
+        "             %s:%d %s  no killer to run alone (%s); the whole "
+        "selection again: survived" % (GATE, overturned[0]["line"],
+                                       overturned[0]["change"], kill.killer))
+
+
 def test_a_killer_red_alone_on_the_original_confirms_nothing_alone(
         tree, monkeypatch):
     """A test that fails alone on the original, because it needs another
@@ -1116,6 +1150,10 @@ def test_a_kill_with_no_killer_to_run_alone_is_decided_by_the_selection_again(
     assert [k["confirmed"] for k in report["kills"]] == ["full"]
     assert not [r for r in campaign.runs if r.alone]
     assert len(landed) == 2
+    # The one the selection let through is named; the one it killed is not.
+    assert [(u["line"], u["alone"], u["again"])
+            for u in report["unreproduced"]] == [
+        (report["survivors"][0]["line"], mutate.NO_KILLER, "survived")]
 
 
 # --------------------------------------------------------------------------

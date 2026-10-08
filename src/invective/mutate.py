@@ -660,7 +660,8 @@ class Outcome(NamedTuple):
     and *origin* what decided a verdict that was read back rather than run.
     *confirmed* says how a kill made while other copies' runs went on was
     confirmed with nothing else running: `"alone"`, its killer failed alone,
-    or `"full"`, the whole selection was run again and decided it."""
+    or `"full"`, the whole selection was run again and decided it. The
+    verdict is then that run's, so a survivor carries it too."""
 
     verdict: Verdict
     via: str = ""
@@ -671,6 +672,12 @@ class Outcome(NamedTuple):
 #: A way to measure a mutant before the whole selection: a kill, or None to
 #: leave the mutant to the next way, and in the end to the whole selection.
 Attempt = Callable[[Mutant, "Copy"], "Outcome | None"]
+
+#: What `unreproduced` says of a kill no killer could be run alone to
+#: confirm, a kill by time, by a module or under tests that hold an option,
+#: when the whole selection run again with nothing else running lets the
+#: mutant through.
+NO_KILLER = "no killer to run alone"
 
 #: The only ways a survivor is reached. A survivor is a claim about the whole
 #: selection, so only a run of all of it, or such a verdict read back, can
@@ -1538,6 +1545,11 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     confirmed = Outcome(
                         _final(pool.on(0, again, mutant), mutant, src_rel),
                         confirmed="full")
+                    if not alone_said and confirmed.verdict.ok:
+                        # A kill that did not come back, though no killer
+                        # could say so alone: named all the same, since
+                        # this is what the diagnosis is for.
+                        alone_said = NO_KILLER
                 if alone_said:
                     unreproduced.append({
                         "kind": job.kind, "line": job.line, "change": job.what,
@@ -1617,10 +1629,15 @@ def summary(report: dict) -> list[str]:
                      "alone, which may depend on its order or on another "
                      "copy's run:" % len(unreproduced))
         for item in unreproduced:
-            lines.append("             %s:%d %s  %s %s; the whole selection "
+            if item["alone"] != NO_KILLER:
+                alone = "%s %s" % (item["killer"], item["alone"])
+            elif item["killer"]:
+                alone = "%s (%s)" % (NO_KILLER, item["killer"])
+            else:
+                alone = NO_KILLER
+            lines.append("             %s:%d %s  %s; the whole selection "
                          "again: %s" % (report["target"], item["line"],
-                                        item["change"], item["killer"],
-                                        item["alone"], item["again"]))
+                                        item["change"], alone, item["again"]))
     # `.get`: the key is only there when the fallback was used, over the
     # three lists a report already has.
     whole = sum(e.get("whole_file", False) for e in

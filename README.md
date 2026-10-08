@@ -67,10 +67,13 @@ runs it at once is refused for that.
 
 `--confirm` (`confirm` in `[tool.invective]`) looks for such tests. Once the
 last mutant has run, every kill is run again with nothing else running: its
-killer alone, or else the whole selection, and the kill carries `confirmed`
-(`alone` or `full`) in the report. A kill its killer does not make alone is
-listed under `unreproduced` and in the closing lines, with that killer, the
-test to look at. With one worker there is nothing to confirm.
+killer alone, or else the whole selection, whose verdict stands. The entry
+carries `confirmed` (`alone` or `full`) in the report, a survivor's too when the
+whole selection let the mutant through. A kill its killer does not make alone
+is listed under `unreproduced` and in the closing lines, with that killer, the
+test to look at; so is a kill with no killer to run alone (a kill by time, by a
+module, or under `--tests` holding an option) that the whole selection lets
+through. With one worker there is nothing to confirm.
 
 ```text
 copy:      /tmp/invective-k2m1x9ab

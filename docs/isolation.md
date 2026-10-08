@@ -111,7 +111,10 @@ the whole selection, whose verdict stands. Before any kill is confirmed, the
 whole selection is run there once more, and the run is refused unless it
 passes. A kill its killer does not make alone is named in the report
 (`unreproduced`) and in the closing lines: its killer is likely a test that
-depends on its order or on another copy's run. A survivor is not run again.
+depends on its order or on another copy's run. A kill with no killer to run
+alone (a kill by time, by a module, or under `--tests` holding an option) that
+the whole selection lets through is named too, as `mutate.NO_KILLER`, and its
+survivor carries `confirmed` as a kill does. A survivor is not run again.
 
 ## The import-from-outside refusal
 
