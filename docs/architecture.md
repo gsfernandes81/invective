@@ -69,6 +69,25 @@ it started. The killer comes from the plugin, which writes it to the file
 text, hands out the work, and prints the results in site order; a run's process
 is touched only by the thread that started it.
 
+> **Finding:** (2026-10-08, more-itertools at `81c21a8`, Python 3.14, a 4-vCPU VM,
+> three runs each, median wall time; R40 is `recipes.py` against `test_recipes.py`,
+> 40 mutants; M60 is `more.py` against `test_more.py`, 60 mutants)
+>
+> | case | serial engine | 1 worker | 4 workers | 4 workers, `--confirm` |
+> |---|---|---|---|---|
+> | R40 | 308.7 s | 306.0 s | 100.2 s | 256.9 s (pool 96.6 s, confirmation 160.1 s) |
+> | M60 | 322.7 s | 952.1 s | 96.7 s | 2127.0 s (pool 264.7 s, confirmation 1862.3 s) |
+>
+> Four workers run R40 3.1x and M60 3.3x faster than the serial engine, with the
+> same kills, survivors and acceptances. The VM's speed varied through the day:
+> the M60 serial runs beside these took 2036 to 2164 s, one-worker runs 426 to
+> 1252 s, and two of those scored 5 and 1 more kills, by time, so M60's serial
+> figure is the day's first run, on a quiet hour, and its `--confirm` figure is
+> one run on a slow one. Confirming costs about one serial run of each kill's
+> killer and one full run for each kill by time, which takes back most of what
+> the workers save; it found no kill its killer did not make alone on either
+> suite.
+
 ## Exit codes
 
 See the exit-code table in `README.md` ("Failing a run on survivors").
