@@ -1348,6 +1348,20 @@ def test_dying_by_the_signal_first_writes_out_what_was_printed(monkeypatch):
     assert died == [signal.SIGTERM]
 
 
+def test_a_closed_standard_stream_does_not_stand_in_for_the_signal(
+        monkeypatch):
+    """Started with stdout closed, a process has `sys.stdout` None, and
+    there is nothing to write out: the exit is still by the signal."""
+    monkeypatch.setattr(sys, "stdout", None)
+    died = []
+    monkeypatch.setattr(mutate.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: died.append(signum))
+
+    mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+
+    assert died == [signal.SIGTERM]
+
+
 def test_dying_by_the_signal_is_by_its_default_action(monkeypatch):
     """A handler still in place when the signal is sent would run instead of
     ending the process, so the default is put back first."""

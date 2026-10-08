@@ -554,6 +554,10 @@ def _exit_by(exc: _Terminated) -> None:
     first: the signal ends the process without flushing a buffer, and a
     run's output sent to a file or a pipe is buffered."""
     for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            # A standard stream closed when the process started: nothing
+            # was written to it.
+            continue
         try:
             stream.flush()
         except (OSError, ValueError):
