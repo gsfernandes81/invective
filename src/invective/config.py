@@ -11,6 +11,12 @@ An unknown key is a refusal, so that a misspelt one is not read as absent.
 The project they belong to is found here too: `project_root` walks up from
 where a command is started to the nearest directory pytest would take for a
 project's own, so a command works from anywhere inside the project.
+
+So are pytest's own settings: which settings file every run in a copy is
+given (`pytest_settings_option`), searched for as far as the project's top
+or, for a ref's tree, its repository's (`repository_top`), and the refusal
+of a run whose settings, or a `conftest.py` pytest loads for them, the copy
+would leave out (`pytest_config_above`, `outside_refusal`).
 """
 
 from __future__ import annotations
