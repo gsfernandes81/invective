@@ -58,7 +58,7 @@ mutant's, so the bytecode cache never reuses the last mutant's `.pyc`.
 
 Each mutant is run as `python -m pytest` in the copy, in a process group
 of its own (`mutate._OWN_GROUP`), so that stopping the run stops everything
-it started. The verdict comes from the plugin, which writes it to the file
+it started. The killer comes from the plugin, which writes it to the file
 `INVECTIVE_VERDICT` names, not from the printed output.
 
 ## Exit codes

@@ -16,7 +16,7 @@ controlling process collects nothing and an empty selection is refused.
 
 `tests/conftest.py` puts this checkout's `src` on `sys.path` so the code
 under test comes from here, not from an installed copy: a run of invective
-against itself tests a worktree, and the worktree's `src` holds the mutant.
+against itself tests a copy, and the copy's `src` holds the mutant.
 
 ## CI
 

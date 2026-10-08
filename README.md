@@ -51,7 +51,7 @@ report. `--ref` runs on a git commit, branch or tag instead of the files as
 they stand.
 
 ```text
-copy:      /tmp/invective-k2m1x9
+copy:      /tmp/invective-k2m1x9ab
 project:   /home/me/proj
 target:    src/pkg/gate.py
 tests:     tests/test_gate.py
@@ -112,8 +112,8 @@ and `-q` would leave a refusal nothing to quote. Your pytest configuration is
 in the copy, so every run reads it.
 
 A child interpreter started by a test in a different directory imports the
-installed package, not the copy under test, unless it is installed editable
-or the test puts the copy on `sys.path`.
+installed package, not the copy under test, unless the test puts the copy on
+`sys.path`.
 
 ## A whole source tree
 
