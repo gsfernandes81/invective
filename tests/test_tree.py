@@ -18,7 +18,7 @@ import pytest
 from invective import mutate, process
 from invective import tree as trees
 
-from conftest import (commit, git, slow_run, stop_group, wait_ended,
+from conftest import (SRC, commit, git, slow_run, stop_group, wait_ended,
                       write_tree)
 
 
@@ -299,7 +299,8 @@ def test_the_copy_is_marked_with_its_owner_before_it_is_filled(tmp_path,
     with pytest.raises(mutate.Refusal):
         with trees.working_tree(root):
             pass
-    assert seen == [{"pid": os.getpid(), "root": root}]
+    assert seen == [{"pid": os.getpid(), "root": root,
+                     "ns": trees._namespace()}]
 
 
 def test_a_ref_s_copy_is_marked_with_its_owner_too(repo, tmp_path):
@@ -308,7 +309,8 @@ def test_a_ref_s_copy_is_marked_with_its_owner_too(repo, tmp_path):
     with trees.git_ref(repo, "HEAD"):
         (box,) = _marked(tmp_path)
         with open(tmp_path / box / trees.MARKER, encoding="utf-8") as fh:
-            assert json.load(fh) == {"pid": os.getpid(), "root": repo}
+            assert json.load(fh) == {"pid": os.getpid(), "root": repo,
+                                     "ns": trees._namespace()}
 
 
 def test_a_ref_s_copy_is_marked_before_git_fills_it(repo, monkeypatch):
@@ -329,6 +331,59 @@ def test_a_ref_s_copy_is_marked_before_git_fills_it(repo, monkeypatch):
         pass
     assert seen == [True]
 
+
+def test_the_namespace_is_the_boot_and_the_pid_namespace_on_linux():
+    """Each half alone is shared: the boot id by every container on the
+    host, a pid namespace's inode by namespaces on other boots. Nothing
+    else has the two to read, and there the namespace is `None`."""
+    if not sys.platform.startswith("linux"):
+        assert trees._namespace() is None
+        return
+    with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as fh:
+        boot = fh.read().strip()
+    assert trees._namespace() == boot + "/" + os.readlink("/proc/self/ns/pid")
+
+
+def test_a_namespace_that_cannot_be_read_is_none(monkeypatch):
+    """A `/proc` that is not mounted, or not readable, must not stop every
+    copy from being made."""
+    def unreadable(path):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(trees.os, "readlink", unreadable)
+    assert trees._namespace() is None
+
+
+def _unshare():
+    """An `unshare` command that can make a pid namespace here, or None."""
+    if shutil.which("unshare") is None:
+        return None
+    # As root, `--pid` alone; as anyone else, only inside a user namespace
+    # of their own, where the kernel lets them have one.
+    for command in (["unshare", "--pid", "--fork"],
+                    ["unshare", "--user", "--map-root-user", "--pid",
+                     "--fork"]):
+        made = subprocess.run([*command, "true"], capture_output=True)
+        if made.returncode == 0:
+            return command
+    return None
+
+
+def test_a_process_in_another_pid_namespace_has_another_namespace():
+    """Containers on one host share the boot id, so the pid namespace is what
+    tells a copy made in one from a copy made in another."""
+    command = _unshare()
+    if command is None:
+        pytest.skip("`unshare` cannot make a pid namespace here")
+    theirs = subprocess.run(
+        [*command, sys.executable, "-c",
+         "from invective import tree; print(tree._namespace())"],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "PYTHONPATH": SRC}).stdout.strip()
+
+    ours = trees._namespace()
+    assert ours is not None
+    assert theirs not in (ours, "None")
 
 
 def test_a_copy_killed_while_it_is_removed_is_left_under_a_name_the_reaper_removes(
@@ -508,13 +563,14 @@ def test_every_pid_an_os_hands_out_is_asked_about(tmp_path, monkeypatch):
     assert _marked(tmp_path) == []
 
 
-def _dead_owners_copy(tmp_path, name):
+def _dead_owners_copy(tmp_path, name, **more):
     gone = subprocess.Popen([sys.executable, "-c", ""])
     gone.wait()
     dead = tmp_path / name
     os.mkdir(dead)
     (dead / trees.MARKER).write_text(
-        json.dumps({"pid": gone.pid, "root": "elsewhere"}), encoding="utf-8")
+        json.dumps({"pid": gone.pid, "root": "elsewhere", **more}),
+        encoding="utf-8")
     return dead
 
 
@@ -549,6 +605,50 @@ def test_a_ref_begins_by_removing_the_copies_of_dead_owners(repo, tmp_path):
     with trees.git_ref(repo, "HEAD"):
         assert not dead.exists()
 
+
+@pytest.mark.parametrize("theirs, ours", [
+    ("boot/pid:[4026532262]", "boot/pid:[4026531836]"),
+    (None, "boot/pid:[4026531836]"),
+    ("boot/pid:[4026532262]", None),
+], ids=["another-container", "unread-there", "unread-here"])
+def test_a_copy_made_in_another_namespace_is_never_reaped(tmp_path,
+                                                          monkeypatch, theirs,
+                                                          ours):
+    """A container sharing the temporary directory counts pids from 1 in a
+    namespace of its own, so the pid of its live copy's owner is dead here,
+    or somebody else's. A namespace that could not be read on one side is
+    not the other side's either."""
+    monkeypatch.setattr(trees, "_namespace", lambda: ours)
+    kept = _dead_owners_copy(tmp_path, "invective-eeeeeeee", ns=theirs)
+
+    trees.reap()
+
+    assert kept.is_dir()
+
+
+@pytest.mark.parametrize("ns", ["boot/pid:[4026531836]", None],
+                         ids=["read", "unread"])
+def test_a_dead_owner_in_this_namespace_is_reaped(tmp_path, monkeypatch, ns):
+    """Only another namespace keeps a copy: where neither side can be read
+    (Windows, macOS), `None` is the same namespace, and the pid decides."""
+    monkeypatch.setattr(trees, "_namespace", lambda: ns)
+    _dead_owners_copy(tmp_path, "invective-eeeeeeee", ns=ns)
+
+    trees.reap()
+
+    assert _marked(tmp_path) == []
+
+
+def test_a_marker_without_a_namespace_is_judged_by_its_pid(tmp_path,
+                                                          monkeypatch):
+    """An invective before 0.2.1 writes no `ns`, and its dead owner's copy
+    is still reaped here, where the namespace can be read."""
+    monkeypatch.setattr(trees, "_namespace", lambda: "boot/pid:[4026531836]")
+    _dead_owners_copy(tmp_path, "invective-eeeeeeee")
+
+    trees.reap()
+
+    assert _marked(tmp_path) == []
 
 
 def test_git_imports_nothing_when_it_runs():

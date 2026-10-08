@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 from invective.errors import Refusal
@@ -37,9 +38,10 @@ SKIPPED = frozenset({".git", ".hg", ".svn", ".tox", ".nox", "__pycache__",
                      "node_modules"})
 
 #: The file at the top of a copy's directory that names its owner:
-#: `{"pid": ..., "root": ...}`, the process the copy belongs to and the
-#: project it is a copy of. `root` is read by nothing here; it is for a
-#: person who finds a copy and wants to know whose it was.
+#: `{"pid": ..., "root": ..., "ns": ...}`, the process the copy belongs to,
+#: the project it is a copy of, and where that pid means that process
+#: (`_namespace`). `root` is read by nothing here; it is for a person who
+#: finds a copy and wants to know whose it was.
 MARKER = ".invective-owner"
 
 
@@ -208,10 +210,29 @@ def _git(root: str, *args: str) -> str:
 
 
 def _mark(where: str, root: str) -> None:
-    """Write *where*'s marker: the pid of this process and the project it is
-    a copy of."""
+    """Write *where*'s marker: the pid of this process, the project it is
+    a copy of, and the namespace the pid is read in."""
     with open(os.path.join(where, MARKER), "w", encoding="utf-8") as fh:
-        json.dump({"pid": os.getpid(), "root": root}, fh)
+        json.dump({"pid": os.getpid(), "root": root, "ns": _namespace()}, fh)
+
+
+def _namespace() -> str | None:
+    """Where a pid in a marker names a process: on Linux, the boot and the
+    pid namespace (`<boot id>/pid:[<inode>]`); `None` elsewhere, or when
+    either cannot be read.
+
+    Containers on one host can share a temporary directory, and each counts
+    pids from 1 in a namespace of its own, so a live copy of one names a pid
+    that is dead, or somebody else's, in the other. The boot id alone is
+    shared by every container on the host."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as fh:
+            boot = fh.read().strip()
+        return boot + "/" + os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
 
 
 # Windows: what `OpenProcess` is asked for, what it says of a pid nothing has,
@@ -298,7 +319,9 @@ def reap(keep: str | None = None) -> None:
     fails in the safe direction: a dead owner's pid taken by an unrelated
     process keeps the copy until that pid is free, a delayed reap and never
     a wrong one, and a zombie owner reads as alive until its parent collects
-    it. A `--ref` copy holds a git worktree, whose entry in the repository's
+    it. A pid is asked about only in the namespace it was written in: a
+    marker whose `ns` is not this process's `_namespace()` is kept. A
+    `--ref` copy holds a git worktree, whose entry in the repository's
     `.git/worktrees` `git_ref` clears on its own way out; the entry of one
     removed here is dropped by the `prune` at the end of the next `--ref`
     run, unless a kill during its checkout left it locked. No git is run
@@ -313,6 +336,7 @@ def reap(keep: str | None = None) -> None:
     measured = None
     if keep is not None:
         measured = os.path.normcase(os.path.realpath(keep)) + os.sep
+    here = _namespace()
     for name in names:
         if not name.startswith("invective-"):
             continue
@@ -325,7 +349,8 @@ def reap(keep: str | None = None) -> None:
             continue
         try:
             with open(os.path.join(path, MARKER), encoding="utf-8") as fh:
-                pid = json.load(fh)["pid"]
+                marker = json.load(fh)
+            pid = marker["pid"]
         except (OSError, ValueError, KeyError, TypeError):
             continue
         # A marker that does not hold a pid is not ours, and is left like one
@@ -336,6 +361,13 @@ def reap(keep: str | None = None) -> None:
         if not isinstance(pid, int) or isinstance(pid, bool):
             continue
         if pid <= 0 or pid >= 2 ** 32:
+            continue
+        # A pid from another namespace (a container sharing the temporary
+        # directory) says nothing of the process it names here, and its copy
+        # is kept. `None` equals only `None`: where neither side can be read,
+        # the pid decides, as it does for a marker with no `ns`, which an
+        # invective before 0.2.1 writes.
+        if "ns" in marker and marker["ns"] != here:
             continue
         try:
             owner_alive = pid == os.getpid() or _alive(pid)
