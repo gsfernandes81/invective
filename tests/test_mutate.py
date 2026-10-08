@@ -261,6 +261,21 @@ def test_a_nested_t_string_site_written_whole_is_the_mutant():
 
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
+def test_a_site_inside_a_nested_t_string_is_spliced():
+    """The outer interpolation's text is written from the inner one's, so
+    the comparison of the splice with the mutant normalises the inner first,
+    as `_apply` does: from the inner's raw `x+2` the two would differ only
+    in that spacing, and the mutant would be the whole file unparsed."""
+    source = "def f(x):\n    return t\"{t'{x+1}'}\"\n"
+    tree = ast.parse(source)
+    (index,) = [i for i, (k, _n, _w) in enumerate(mutate._sites(tree))
+                if k == "CONST"]
+    text, spliced = mutate._text_of(source, tree, index)
+    assert spliced is True
+    assert text == source.replace("x+1", "x+2")
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
 def test_a_whole_file_that_is_not_the_mutant_is_refused(monkeypatch):
     """The file unparsed is checked as the splice is: a mutated tree whose
     interpolation still carries the original text unparses to the original

@@ -225,12 +225,14 @@ def _dump(tree: ast.AST) -> str:
     The text is the source's spelling of an expression the tree already
     holds, so two trees that differ only there are the same program up to
     its spacing: a splice of `x+1` to `x+2` parses to the text `x+2`, where
-    `_apply` can only give `ast.unparse`'s `x + 2`.
+    `_apply` can only give `ast.unparse`'s `x + 2`. An outer interpolation's
+    text is written from its inner one's, so the inner is normalised first,
+    as `_apply`'s refresh does.
     """
     if _INTERPOLATION is None:
         return ast.dump(tree)
     tree = copy.deepcopy(tree)
-    for node in ast.walk(tree):
+    for node in reversed(list(ast.walk(tree))):
         if isinstance(node, _INTERPOLATION):
             node.str = ast.unparse(node.value)
     return ast.dump(tree)
