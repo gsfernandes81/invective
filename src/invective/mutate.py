@@ -77,6 +77,11 @@ from invective.tree import git_ref, head, working_tree
 #: Not pytest's: a run this module stopped. Any value pytest cannot exit with.
 TIMED_OUT = -1  # invective: accept[equivalent: 1 -> 2] any code pytest cannot exit with serves
 
+#: Every code pytest exits with. A run that ended with another, or by a
+#: signal, ended outside pytest's say: a kill all the same, with no test to
+#: name.
+_PYTEST_CODES = frozenset(int(code) for code in ExitCode)
+
 #: How long the unmutated selection may take, so that a suite that hangs ends
 #: the campaign instead of holding it for ever.
 BASELINE_TIMEOUT = 600  # invective: accept[equivalent: 600 -> 601] any cap far above a suite's time serves
@@ -1722,6 +1727,15 @@ def summary(report: dict) -> list[str]:
         # give a mutant the suite would have let through.
         lines.append("           %d of the kills were runs stopped at their "
                      "time budget, not a test failing" % timeouts)
+    ended = sum(k["code"] != TIMED_OUT and k["code"] not in _PYTEST_CODES
+                and not k["killer"] for k in report["kills"])
+    if ended:
+        # Said apart for the same reason: a run a signal ended (the
+        # machine out of memory, a test that kills its own process) or that
+        # crashed is no test failing on the mutant, and the suite may well
+        # have let it through.
+        lines.append("           %d of the kills were runs a signal or a crash "
+                     "ended, not a test failing" % ended)
     if report["broken"]:
         # Said out loud rather than folded into the score: these are mutants
         # the runner could not collect past, and a file whose kills are mostly

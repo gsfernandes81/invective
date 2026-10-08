@@ -804,6 +804,49 @@ def test_a_kill_with_no_killer_to_run_alone_that_the_selection_lets_through_is_n
                                        overturned[0]["change"], kill.killer))
 
 
+#: A run a signal ended, which names no test.
+SIGNALLED = mutate.Verdict(False, -9, "", "")
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+def test_a_run_a_signal_ended_is_a_kill_said_apart(tree, monkeypatch,
+                                                   confirm):
+    """No test failed, and no test can be run alone for it: without
+    confirming it is a kill, said apart beside the kills by time; asked to
+    confirm, the whole selection again decides it."""
+    seen = collections.Counter()
+
+    def said(run):
+        if run.text is None:
+            return GREEN
+        with campaign.lock:
+            seen[run.text] += 1
+            again = seen[run.text] > 1
+        if again:
+            return killed_by(MINOR)
+        if "raise" not in run.text:
+            return SIGNALLED
+        if "member or" in run.text:
+            return GREEN
+        return mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT")
+
+    campaign = Campaign(tree, monkeypatch, said=said)
+    report = campaign(2, only=["RAISE", "BOOL", "CMP"], confirm=confirm)
+    closing = mutate.summary(report)
+    (raised,) = [kill for kill in report["kills"] if kill["kind"] == "RAISE"]
+    if not confirm:
+        assert (raised["code"], raised["killer"]) == (-9, "")
+        timeouts = [n for n, line in enumerate(closing)
+                    if "stopped at their time budget" in line]
+        assert closing[timeouts[0] + 1] == (
+            "           1 of the kills were runs a signal or a crash ended, "
+            "not a test failing")
+    else:
+        assert (raised["code"], raised["killer"], raised["confirmed"]) == (
+            ExitCode.TESTS_FAILED, MINOR, "full")
+        assert not any("a signal or a crash" in line for line in closing)
+
+
 def test_a_killer_red_alone_on_the_original_confirms_nothing_alone(
         tree, monkeypatch):
     """A test that fails alone on the original, because it needs another
