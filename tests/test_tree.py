@@ -358,11 +358,14 @@ def _unshare():
     """An `unshare` command that can make a pid namespace here, or None."""
     if shutil.which("unshare") is None:
         return None
-    # As root, `--pid` alone; as anyone else, only inside a user namespace
-    # of their own, where the kernel lets them have one.
+    # As root, `--pid` alone; as anyone else, inside a user namespace of
+    # their own where the kernel lets them have one, or through a sudo that
+    # asks for no password (GitHub's runners, whose AppArmor refuses the user
+    # namespace).
     for command in (["unshare", "--pid", "--fork"],
                     ["unshare", "--user", "--map-root-user", "--pid",
-                     "--fork"]):
+                     "--fork"],
+                    ["sudo", "-n", "unshare", "--pid", "--fork"]):
         made = subprocess.run([*command, "true"], capture_output=True)
         if made.returncode == 0:
             return command
@@ -375,11 +378,13 @@ def test_a_process_in_another_pid_namespace_has_another_namespace():
     command = _unshare()
     if command is None:
         pytest.skip("`unshare` cannot make a pid namespace here")
+    # This checkout's `src` goes in by the code rather than PYTHONPATH, which
+    # sudo drops from the environment.
     theirs = subprocess.run(
         [*command, sys.executable, "-c",
-         "from invective import tree; print(tree._namespace())"],
-        capture_output=True, text=True, check=True,
-        env={**os.environ, "PYTHONPATH": SRC}).stdout.strip()
+         "import sys; sys.path.insert(0, %r); "
+         "from invective import tree; print(tree._namespace())" % SRC],
+        capture_output=True, text=True, check=True).stdout.strip()
 
     ours = trees._namespace()
     assert ours is not None

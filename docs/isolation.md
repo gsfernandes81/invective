@@ -47,15 +47,21 @@ for the next reaper.
 ## The marker and the reaper
 
 Every copy carries `.invective-owner` at its top: `{"pid": <owner's pid>,
-"root": "<the project>", "ns": "<pid namespace>"}`, written
-before the copy is filled. `ns` (`tree._namespace`) is `null` where it
-cannot be read. Every `invective run`, every engine the sweep starts, and
-every `pytest --mutate` begins by removing copies in the temporary
-directory whose owner is dead (`tree.reap`). A copy is kept when its owner
-is alive, when the marker is missing or unreadable, when the owner cannot
-be asked (another user's process), or when its `ns` is not the reaper's (a
-container sharing the temporary directory). A marker without `ns` is judged
-by its pid alone. Pid reuse delays a reap, never causes a wrong one.
+"root": "<the project>", "ns": "<pid namespace>"}`, written before the copy
+is filled. `ns` (`tree._namespace`) is `null` where it cannot be read. Every
+`invective run`, every engine the sweep starts, and every `pytest --mutate`
+begins by removing copies in the temporary directory whose owner is dead
+(`tree.reap`). A copy is kept when its owner is alive, when the marker is
+missing or unreadable, when the owner cannot be asked (another user's
+process), or when its `ns` is not the reaper's (a container sharing the
+temporary directory). A marker without `ns` is judged by its pid alone. Pid
+reuse delays a reap, never causes a wrong one.
+
+A copy kept for its `ns` is removed only by a reaper in that same pid
+namespace, or by hand: one left by a container that has since gone stays,
+and `null` matches only `null`. `ns` tells containers on one host apart,
+not hosts: hosts sharing a temporary directory over a network read each
+other's pids, as they did before `ns`.
 
 A killed run's copy keeps untracked files such as `.env` until the next
 start removes it. A copy being removed is first renamed
