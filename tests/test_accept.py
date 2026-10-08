@@ -305,6 +305,8 @@ _SEARCHES = {
     "from-a-test-file-s-directory": (
         _TESTS, "m", None, ["tests/test_a.py"], False, None),
     "from-a-test-directory": (_TESTS, "m", None, ["tests/sub"], False, None),
+    "a-node-id-starts-it-from-its-file-s-directory": (
+        _TESTS, "m", None, ["tests/test_a.py::test_x"], False, None),
     "a-path-that-is-not-there-is-no-start": (
         _TESTS, "m", None, ["tests/test_a.py", "other/none.py"], False, None),
     "a-path-that-names-nothing-or-leads-out": (
@@ -315,6 +317,9 @@ _SEARCHES = {
     "a-ref-s-tree-holds-its-repository-s-settings": (
         {**_REF, "w/pytest.ini": _STRICT, "t/pytest.ini": _STRICT}, "w/sub",
         "t/sub", [], True, None),
+    "a-ref-s-tree-ends-it-before-settings-above-the-repository": (
+        {**_REF, "w/pytest.ini": _STRICT, "t/pytest.ini": _STRICT,
+         "pytest.ini": _STRICT}, "w/sub", "t/sub", [], True, None),
     "a-ref-goes-by-its-own-settings-not-the-files-as-they-stand": (
         {**_REF, "w/pytest.ini": _STRICT}, "w/sub", "t/sub", [], True, None),
     "settings-above-a-repository-are-in-no-ref": (

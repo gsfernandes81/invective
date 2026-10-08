@@ -1904,3 +1904,26 @@ def test_the_run_command_line_is_one_a_test_can_parse():
             args.ref) == ("pkg/gate.py",
                           ["tests/test_gate.py", "tests/test_idle.py"],
                           "RAISE", 3, "out.json", "main")
+
+
+def test_the_tests_given_steer_the_search_for_the_settings_a_run_goes_by(
+        tmp_path, monkeypatch):
+    """The `pytest.ini` above the project is strict, which the project would
+    read from above; the `tests` directory holds a settings file of its own,
+    which ends pytest's search there. The campaign is given `tests`, so it is
+    not refused for the file above: it is refused only when the runs'
+    arguments are left out of the check."""
+    top = os.path.realpath(tmp_path)
+    no_pytest_settings_above(top)
+    write_tree(top, {"pytest.ini": "[pytest]\nxfail_strict = true\n"})
+    project = os.path.join(top, "sub")
+    write_tree(project, {**SRC_LAYOUT,
+                         "pyproject.toml": "[project]\nname = 'p'\n",
+                         "tests/conftest.py": FIXED_CONFTEST,
+                         "tests/pytest.ini": "[pytest]\n"})
+    _with_on_path(monkeypatch, os.path.join(project, "src"))
+    target = os.path.join(project, "src", "pkg", "gate.py")
+
+    report = mutate.mutate(project, target, ["tests"], ["RAISE"], None)
+
+    assert report["killed"] == 1
