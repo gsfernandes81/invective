@@ -327,6 +327,18 @@ def test_every_run_is_given_the_settings_file_pytest_reads_here(
     assert config.pytest_settings_option(proj, args) == given
 
 
+def test_the_settings_file_given_to_every_run_is_searched_no_further_than_the_top(
+        tmp_path):
+    """Run in a copy of the top, pytest's search would go on above the
+    temporary directory: what the top's own pytest falls back on is given,
+    and a file above that sets nothing is `pytest_config_above`'s to judge."""
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {"pytest.ini": "[pytest]\n",
+                     "m/pyproject.toml": "[project]\n"})
+    assert config.pytest_settings_option(os.path.join(top, "m")) == (
+        "-c", "pyproject.toml")
+
+
 def test_a_settings_file_above_the_top_is_given_to_no_run(tmp_path):
     """The copy has no path to it: whether the runs may go without it is
     `pytest_config_above`'s to say."""

@@ -646,14 +646,17 @@ def run_tests(where: str, tests: list[str], timeout: float,
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
            limit: int | None, say=print, tree=None,
            selection: list[str] | None = None,
-           options: tuple[str, ...] = ()) -> dict:
+           options: tuple[str, ...] | None = ()) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
     The mutants are written in *tree*, a context manager giving a directory
     that stands for *root* (`tree.working_tree` or `tree.git_ref`); by
     default a copy of *root* as it stands. *selection* is a list of node ids
     to run instead of whatever *tests* collects, and *options* go to every
-    run's pytest. *say* receives each line of progress as it happens.
+    run's pytest; with None, every run is given the settings file pytest
+    reads in the tree the mutants are made in, for a ref the ref's own and
+    not the working tree's. *say* receives each line of progress as it
+    happens.
     """
     try:
         src_rel = relative_to_root(target, root)
@@ -685,9 +688,12 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         path = os.path.join(where, src_rel)
         if not os.path.isfile(path):
             raise Refusal("%s is not in the tree the mutants are made in" % src_rel)
-        # A settings file named for every run, which the tree lacks (ignored
-        # by git, excluded, or not in the ref), fails each run in pytest's
-        # config load: a baseline that reads as red when no test failed.
+        if options is None:
+            options = pytest_settings_option(where, tests)
+        # A settings file named for every run by the run that chose it, which
+        # the tree lacks (ignored by git, excluded, or not in the ref), fails
+        # each run in pytest's config load: a baseline that reads as red when
+        # no test failed.
         if "-c" in options:
             ini = options[options.index("-c") + 1]
             if not os.path.isfile(os.path.join(where, ini)):
@@ -1033,10 +1039,16 @@ def main(argv: list[str] | None = None) -> int:
         left_out = pytest_config_above(root, tests)
         if left_out:
             raise outside_refusal(left_out, root)
-        tree = (git_ref(root, args.ref) if args.ref
-                else working_tree(root, config.exclude))
+        # A ref's runs go by the ref's own settings file, found in its tree.
+        # The working tree's is found here, so that a copy which leaves it
+        # out (`exclude`) is refused rather than run by another.
+        if args.ref:
+            tree, options = git_ref(root, args.ref), None
+        else:
+            tree = working_tree(root, config.exclude)
+            options = pytest_settings_option(root, tests)
         report = mutate(root, args.target, tests, only, args.limit,
-                        tree=tree, options=pytest_settings_option(root, tests))
+                        tree=tree, options=options)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2

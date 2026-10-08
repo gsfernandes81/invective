@@ -167,11 +167,17 @@ def _holds_settings(path: str) -> bool | None:
         return True
 
 
-def _pytest_reads(start: str) -> str | None:
+def _pytest_reads(start: str, top: str | None = None) -> str | None:
     """The settings file pytest reads when its search starts at *start*:
     the first of `_SETTINGS` on the way up that is pytest's, or with none
-    the nearest `pyproject.toml`, where pytest puts its rootdir instead."""
+    the nearest `pyproject.toml`, where pytest puts its rootdir instead.
+
+    The way up ends at *top*, a directory at or above *start*, when one is
+    given, as it does in a tree with nothing above it; *top*'s own files are
+    looked at."""
     here, nearest_pyproject = start, None
+    # On Windows the same directory may be spelt in either case.
+    end = None if top is None else os.path.normcase(top)
     while True:
         for name in _SETTINGS:
             path = os.path.join(here, name)
@@ -182,7 +188,7 @@ def _pytest_reads(start: str) -> str | None:
             if _holds_settings(path) is not None:
                 return path
         up = os.path.dirname(here)
-        if up == here:
+        if up == here or os.path.normcase(here) == end:
             return nearest_pyproject
         here = up
 
@@ -222,11 +228,12 @@ def pytest_file_left_out(root: str, inifile: str | None) -> str | None:
         here = up
 
 
-def pytest_reads(root: str, args: tuple[str, ...] | list[str] = ()
-                 ) -> str | None:
+def pytest_reads(root: str, args: tuple[str, ...] | list[str] = (),
+                 within: bool = False) -> str | None:
     """The settings file pytest reads for a run with *args*, as given from
     *root*: `_pytest_reads` from where pytest starts its search, the deepest
-    directory every path among them is under, or *root* with none."""
+    directory every path among them is under, or *root* with none. *within*
+    ends the search at *root*'s top."""
     dirs = []
     for arg in args:
         if arg.startswith("-"):
@@ -246,7 +253,7 @@ def pytest_reads(root: str, args: tuple[str, ...] | list[str] = ()
         # A path out of the project (on Windows, on another drive) is
         # refused on its own account; pytest's search is the one from here.
         start = os.path.abspath(root)
-    return _pytest_reads(start)
+    return _pytest_reads(start, os.path.abspath(root) if within else None)
 
 
 def pytest_config_above(root: str, args: tuple[str, ...] | list[str] = ()
@@ -258,21 +265,17 @@ def pytest_config_above(root: str, args: tuple[str, ...] | list[str] = ()
 
 def pytest_settings_option(root: str, args: tuple[str, ...] | list[str] = ()
                            ) -> tuple[str, ...]:
-    """The `-c` every run in a copy of *root* is given, naming the settings
-    file a run with *args* started here reads, so that each run reads it and
-    searches no further. A run started at the top of the copy would search
-    past it, above the temporary directory, when the project's file is below
-    the top or when pytest only falls back on a `pyproject.toml`. Empty when
-    pytest reads no file inside *root*."""
-    read = pytest_reads(root, args)
+    """The `-c` every run in a copy of *root* is given: the settings file a
+    run of *root*'s own pytest with *args* reads, searched for no further
+    than *root*'s top, so that each run reads it and searches no further. A
+    run started in the copy would otherwise go on above the temporary
+    directory when the file is below the top or when pytest only falls back
+    on a `pyproject.toml`; what is above *root* is `pytest_config_above`'s
+    to refuse or let be. Empty when *root* holds no file pytest reads."""
+    read = pytest_reads(root, args, within=True)
     if read is None:
         return ()
-    try:
-        return ("-c", relative_to_root(read, root))
-    except ValueError:
-        # Above the root: `pytest_config_above` has decided the run may go
-        # without it, and the copy has no path to it.
-        return ()
+    return ("-c", relative_to_root(read, root))
 
 
 def outside_refusal(left_out: str, root: str) -> Refusal:

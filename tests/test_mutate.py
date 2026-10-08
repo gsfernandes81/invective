@@ -1586,6 +1586,47 @@ def test_a_ref_given_to_the_command_is_the_tree_it_runs_on(repo, capsys):
         assert json.load(fh)["kills"][0]["line"] == 3
 
 
+def test_a_ref_s_runs_read_the_ref_s_own_settings_file(repo, capsys):
+    """The ref's `pytest.ini` makes an xfail strict, which only it fails on
+    the mutant; the working tree has moved the setting into
+    `pyproject.toml`. Each run in the ref's tree is given the ref's file."""
+    commit(repo, {
+        "pytest.ini": "[pytest]\nxfail_strict = true\n",
+        "pyproject.toml": "[project]\nname = 'p'\n",
+        "pkg/tests/test_strict.py": ("import pytest\n"
+                                     "from pkg import gate\n"
+                                     "\n"
+                                     "@pytest.mark.xfail(raises=ValueError)\n"
+                                     "def test_a_minor_fails():\n"
+                                     "    gate.admit(10, False)\n")})
+    old = git(repo, "rev-parse", "HEAD").strip()
+    os.remove(os.path.join(repo, "pytest.ini"))
+    commit(repo, {"pyproject.toml": ("[project]\nname = 'p'\n"
+                                     "[tool.pytest.ini_options]\n"
+                                     "xfail_strict = true\n")})
+
+    assert mutate.main(["--target", GATE, "--tests",
+                        "pkg/tests/test_strict.py", "--only", "RAISE",
+                        "--ref", old]) == 0
+    assert "1/1 killed (100.0%)" in capsys.readouterr().out
+
+
+def test_a_settings_file_the_copy_leaves_out_is_refused(tree, monkeypatch,
+                                                        capsys):
+    """The run started here reads `pytest.ini`, which `exclude` leaves out
+    of the copy: every run in there would go by the `pyproject.toml`."""
+    write_tree(tree, {"pytest.ini": "[pytest]\nxfail_strict = true\n",
+                      "pyproject.toml": ("[tool.pytest.ini_options]\n"
+                                         "[tool.invective]\n"
+                                         "exclude = ['pytest.ini']\n")})
+    monkeypatch.chdir(tree)
+
+    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
+                        "--only", "RAISE"]) == 2
+    assert ("refused: pytest read its settings from pytest.ini, which the "
+            "tree" in capsys.readouterr().err)
+
+
 def test_a_selected_test_the_tree_does_not_have_is_refused(tree):
     """A selection collected somewhere else: one of its tests is not here."""
     with pytest.raises(mutate.Refusal) as caught:
