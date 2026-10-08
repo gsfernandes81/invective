@@ -10,6 +10,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import warnings
 
@@ -839,6 +840,32 @@ def test_settings_above_the_copy_of_a_project_with_none_are_refused(
     err = capsys.readouterr().err
     assert "refused: pytest reads %s, above the copy" % os.path.join(
         str(tmp_path), "above", "pytest.ini") in err
+    assert not settings_above_the_copy.exists()
+
+
+def test_settings_above_a_copy_reached_through_a_link_are_refused(
+        settings_above_the_copy, tmp_path, monkeypatch, capsys):
+    """pytest's search climbs the directories its working directory is
+    really in, so with the temporary directory reached through a link, what
+    is above the link's target is what every run would read."""
+    link = tmp_path / "link"
+    try:
+        os.symlink(tmp_path / "above" / "tmp", link, target_is_directory=True)
+    except OSError:
+        pytest.skip("no symlinks")
+    monkeypatch.setattr(tempfile, "tempdir", str(link))
+    for name in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.setenv(name, str(link))
+    proj = _beside(tmp_path, monkeypatch, {"pyproject.toml": ""})
+    os.remove(os.path.join(proj, "pyproject.toml"))
+    os.mkdir(os.path.join(proj, ".git"))
+
+    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
+                        "--only", "RAISE"]) == 2
+
+    err = capsys.readouterr().err
+    assert "refused: pytest reads %s, above the copy" % os.path.join(
+        os.path.realpath(tmp_path), "above", "pytest.ini") in err
     assert not settings_above_the_copy.exists()
 
 

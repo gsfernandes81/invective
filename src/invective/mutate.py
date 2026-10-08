@@ -708,8 +708,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # the top of the copy stops its search: it goes on above the
             # copy, into the temporary directory's ancestors, where a
             # settings file, or a `conftest.py` its rootdir brings in, would
-            # decide every run, the baseline's too.
-            left_out = pytest_config_above(where)
+            # decide every run, the baseline's too. pytest's search starts
+            # from its working directory as the kernel spells it, so through
+            # a temporary directory reached by a link it climbs the target's.
+            left_out = pytest_config_above(os.path.realpath(where))
             if left_out:
                 raise Refusal(
                     "pytest reads %s, above the copy the mutants are run in "
