@@ -876,12 +876,22 @@ class _Pool:
         self.busy: dict[int, object] = {}
         #: What was posted while the pool was halted, as (worker, key, what).
         self.left: list[tuple[int, object, object]] = []
-        self.threads = [threading.Thread(target=self._work, args=(k,),
+        #: Each worker's end, set as its thread's last act. Not
+        #: `Thread.is_alive`: a join a ^C cuts short can leave a thread that
+        #: still runs reading as ended (3.11).
+        self.gone = [threading.Event() for _ in copies]
+        self.threads = [threading.Thread(target=self._run, args=(k,),
                                          name="invective-copy-%d" % k)
                         for k in range(len(copies))]
         self._ended = False
         for thread in self.threads:
             thread.start()
+
+    def _run(self, k: int) -> None:
+        try:
+            self._work(k)
+        finally:
+            self.gone[k].set()
 
     def _work(self, k: int) -> None:
         copy, inbox = self.copies[k], self.inboxes[k]
@@ -980,22 +990,28 @@ class _Pool:
         if self._ended:
             return self.left
         self._ended = True
-        self.stop.set()
-        if len(self.copies) > 1:
-            self.say("stopping %d run(s)" % len(self.busy))
-        for inbox in self.inboxes:
-            inbox.put(None)
-        interrupted = None
+        interrupted, told = None, False
         while True:
+            # From the stop on, inside the loop: a ^C that lands while the
+            # workers are being told is held as one that lands in a join.
             try:
-                for thread in self.threads:
-                    thread.join(timeout=_POLL)
+                self.stop.set()
+                if not told:
+                    for inbox in self.inboxes:
+                        inbox.put(None)
+                    told = True
+                    if len(self.copies) > 1:
+                        self.say("stopping %d run(s)" % len(self.busy))
+                for gone in self.gone:
+                    gone.wait(_POLL)
                 while True:
                     try:
                         self.left.append(self.posts.get_nowait())
                     except queue.Empty:
                         break
-                if not any(thread.is_alive() for thread in self.threads):
+                if all(gone.is_set() for gone in self.gone):
+                    for thread in self.threads:
+                        thread.join()
                     break
             except KeyboardInterrupt as exc:
                 interrupted = exc
