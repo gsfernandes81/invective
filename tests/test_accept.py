@@ -328,49 +328,266 @@ def test_every_run_is_given_the_settings_file_pytest_reads_here(
     no_pytest_settings_above(tmp_path)
     proj = os.path.join(os.path.realpath(tmp_path), "proj")
     write_tree(proj, files)
-    assert config.pytest_settings_option(proj, args) == given
+    assert config.pytest_settings(proj, proj, args) == given
 
 
 def test_the_settings_file_given_to_every_run_is_searched_no_further_than_the_top(
         tmp_path):
     """Run in a copy of the top, pytest's search would go on above the
     temporary directory: what the top's own pytest falls back on is given,
-    and a file above that sets nothing is `pytest_config_above`'s to judge."""
+    and a file above it that sets nothing is let be."""
     top = os.path.realpath(tmp_path)
     write_tree(top, {"pytest.ini": "[pytest]\n",
                      "m/pyproject.toml": "[project]\n"})
-    assert config.pytest_settings_option(os.path.join(top, "m")) == (
-        "-c", "pyproject.toml")
+    m = os.path.join(top, "m")
+    assert config.pytest_settings(m, m) == ("-c", "pyproject.toml")
 
 
 def test_a_settings_file_above_the_top_is_given_to_no_run(tmp_path):
-    """The copy has no path to it: whether the runs may go without it is
-    `pytest_config_above`'s to say."""
+    """The copy has no path to it, and one that sets nothing is no reason
+    to refuse."""
     top = os.path.realpath(tmp_path)
     write_tree(top, {"pytest.ini": "[pytest]\n", "m/.git": ""})
-    assert config.pytest_settings_option(os.path.join(top, "m")) == ()
+    m = os.path.join(top, "m")
+    assert config.pytest_settings(m, m) == ()
 
 
 def test_a_settings_file_above_the_project_inside_its_top_is_given_with_dots(
         tmp_path):
-    """Searched for as far as a top given above the project, here the
-    repository's, the settings file found there is given from the project
-    with `..`; with no top given, the search ends at the project, whose
-    `pyproject.toml` pytest falls back on."""
+    """For a ref the search goes as far as its repository's top, and a file
+    found above the project there is given from the project with `..`; for
+    a copy it ends at the project, whose `pyproject.toml` pytest falls back
+    on. Above the repository, a file that sets nothing is let be."""
     top = os.path.realpath(tmp_path)
     write_tree(top, {"pytest.ini": "[pytest]\n", "m/.git": "",
                      "m/sub/pyproject.toml": "[project]\n"})
     sub = os.path.join(top, "m", "sub")
 
-    assert config.pytest_settings_option(sub) == ("-c", "pyproject.toml")
-    assert config.pytest_settings_option(
-        sub, top=os.path.join(top, "m")) == ("-c", "pyproject.toml")
+    assert config.pytest_settings(sub, sub) == ("-c", "pyproject.toml")
+    assert config.pytest_settings(sub, sub, ref=True) == (
+        "-c", "pyproject.toml")
     os.rename(os.path.join(top, "pytest.ini"),
               os.path.join(top, "m", "pytest.ini"))
-    assert config.pytest_settings_option(
-        sub, top=os.path.join(top, "m")) == ("-c", os.path.join("..",
-                                                                "pytest.ini"))
-    assert config.pytest_settings_option(sub) == ("-c", "pyproject.toml")
+    assert config.pytest_settings(sub, sub, ref=True) == (
+        "-c", os.path.join("..", "pytest.ini"))
+    assert config.pytest_settings(sub, sub) == ("-c", "pyproject.toml")
+
+
+#: A repository `w` and the tree of one of its refs `t`, each with the
+#: project `sub` in it, whose own `pyproject.toml` sets nothing. A `.git`
+#: file marks each one's top, as it does a worktree's.
+_REF = {"w/.git": "gitdir: elsewhere\n", "w/sub/pyproject.toml": "[project]\n",
+        "t/.git": "gitdir: elsewhere\n", "t/sub/pyproject.toml": "[project]\n"}
+_STRICT = "[pytest]\nxfail_strict = true\n"
+
+
+def test_a_ref_s_runs_go_by_the_settings_in_its_own_tree(tmp_path):
+    """The repository's settings, above the project, are refused for a copy
+    of the project, which does not hold them; a ref's tree holds its own,
+    which every run there is given. What the files as they stand keep
+    there is not the ref's: with none in the ref's tree, its runs fall back
+    on the project's `pyproject.toml`, as the ref's own pytest does."""
+    no_pytest_settings_above(tmp_path)
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {**_REF, "w/pytest.ini": _STRICT, "t/pytest.ini": _STRICT})
+    root, where = os.path.join(top, "w", "sub"), os.path.join(top, "t", "sub")
+
+    with pytest.raises(Refusal) as caught:
+        config.pytest_settings(root, root)
+    assert str(caught.value).startswith(
+        "pytest reads %s, which is above the project's top %s, so the copy "
+        "the mutants are run in does not hold it" % (
+            os.path.join(top, "w", "pytest.ini"), root))
+    assert config.pytest_settings(root, where, ref=True) == (
+        "-c", os.path.join("..", "pytest.ini"))
+
+    os.remove(os.path.join(top, "t", "pytest.ini"))
+    assert config.pytest_settings(root, where, ref=True) == (
+        "-c", "pyproject.toml")
+
+
+def test_settings_above_a_repository_are_in_no_ref_s_tree(tmp_path,
+                                                         monkeypatch):
+    """A file above the repository's top is in no commit of it: refused for
+    a ref, naming it, unless the ref's own settings stop pytest's search
+    first. With no repository found, the project's top is the tree's."""
+    no_pytest_settings_above(tmp_path)
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {**_REF, "pytest.ini": _STRICT})
+    root, where = os.path.join(top, "w", "sub"), os.path.join(top, "t", "sub")
+    above = os.path.join(top, "pytest.ini")
+
+    with pytest.raises(Refusal) as caught:
+        config.pytest_settings(root, where, ref=True)
+    assert str(caught.value) == (
+        "pytest reads %s, which is above the top of the repository %s, so the "
+        "ref's tree the mutants are run in does not hold it and every run in "
+        "there would go by other settings; move them into the repository"
+        % (above, os.path.join(top, "w")))
+
+    write_tree(top, {"t/sub/pyproject.toml": "[tool.pytest.ini_options]\n"})
+    assert config.pytest_settings(root, where, ref=True) == (
+        "-c", "pyproject.toml")
+
+    monkeypatch.setattr(config, "_REPOSITORY", (".invective-repository",))
+    write_tree(top, {"t/sub/pyproject.toml": "[project]\n"})
+    with pytest.raises(Refusal) as caught:
+        config.pytest_settings(root, where, ref=True)
+    assert str(caught.value).startswith("pytest reads %s, which is above "
+                                        % above)
+
+
+def test_a_settings_file_the_copy_leaves_out_is_refused_and_not_replaced(
+        tmp_path):
+    """The run started here reads the project's `pytest.ini`; a copy that
+    leaves it out would have every run go by its `pyproject.toml`."""
+    no_pytest_settings_above(tmp_path)
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {"proj/pytest.ini": _STRICT,
+                     "proj/pyproject.toml": "[project]\n",
+                     "copy/pyproject.toml": "[project]\n"})
+    root, where = os.path.join(top, "proj"), os.path.join(top, "copy")
+
+    with pytest.raises(Refusal) as caught:
+        config.pytest_settings(root, where)
+    assert str(caught.value) == (
+        "pytest read its settings from pytest.ini, which the tree the mutants "
+        "are made in does not hold (excluded, ignored by git, or not in the "
+        "ref), so no run in there can go by the settings this one did")
+    write_tree(top, {"copy/pytest.ini": _STRICT})
+    assert config.pytest_settings(root, where) == ("-c", "pytest.ini")
+
+
+def test_settings_above_the_copy_refuse_a_project_with_none(tmp_path):
+    """With no file of the project's to give, every run's search goes on
+    above the copy, and settings there would decide it."""
+    no_pytest_settings_above(tmp_path)
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {"proj/.git": "", "above/pytest.ini": _STRICT,
+                     "above/copy/.git": ""})
+    root, where = os.path.join(top, "proj"), os.path.join(top, "above", "copy")
+
+    with pytest.raises(Refusal) as caught:
+        config.pytest_settings(root, where)
+    assert str(caught.value).startswith(
+        "pytest reads %s, above the copy the mutants are run in at %s, so "
+        "every run in there would go by it;" % (
+            os.path.join(top, "above", "pytest.ini"), where))
+    assert config.pytest_settings(root, root) == ()
+
+
+def test_the_settings_file_a_pytest_read_is_given_from_the_project(tmp_path):
+    """`pytest --mutate` names the file it read, given from the project's
+    top to every run. A file outside the project is given to no run: let be
+    when it sets nothing, refused when it sets something, or when it was
+    named with `-c`, which decides the run whatever it sets."""
+    no_pytest_settings_above(tmp_path)
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {**_REF, "pytest.ini": "[pytest]\n",
+                     "w/sub/tests/pytest.ini": "[pytest]\n",
+                     "elsewhere/pytest.ini": "[pytest]\n",
+                     "strict/pytest.ini": _STRICT})
+    root = os.path.join(top, "w", "sub")
+    below = os.path.join(root, "tests", "pytest.ini")
+    elsewhere = os.path.join(top, "elsewhere", "pytest.ini")
+    strict = os.path.join(top, "strict", "pytest.ini")
+
+    for given in (False, True):
+        assert config.pytest_settings(root, root, read=below,
+                                      given=given) == (
+            "-c", os.path.join("tests", "pytest.ini"))
+    assert config.pytest_settings(
+        root, root, read=os.path.join(top, "pytest.ini")) == ()
+    with pytest.raises(Refusal) as caught:
+        config.pytest_settings(root, root, read=strict)
+    assert str(caught.value).startswith(
+        "pytest reads %s, which is above the project's top %s," % (strict,
+                                                                   root))
+    with pytest.raises(Refusal) as caught:
+        config.pytest_settings(root, root, read=elsewhere, given=True)
+    assert str(caught.value) == (
+        "pytest's settings file %s, given with -c, is outside the project at "
+        "%s: no copy holds it, and every mutant's run would read the "
+        "project's own settings instead" % (elsewhere, root))
+
+
+def test_the_settings_file_a_pytest_read_is_given_from_the_project_in_a_ref(
+        tmp_path):
+    """For a ref, from the project's place in the ref's tree, with `..` for
+    the repository's own above the project, and refused when the ref's tree
+    does not hold it. Named with `-c` from outside the repository, no ref's
+    tree holds it."""
+    no_pytest_settings_above(tmp_path)
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {**_REF, "w/pytest.ini": _STRICT, "t/pytest.ini": _STRICT,
+                     "elsewhere/pytest.ini": "[pytest]\n"})
+    root, where = os.path.join(top, "w", "sub"), os.path.join(top, "t", "sub")
+    repository = os.path.join(top, "w", "pytest.ini")
+    elsewhere = os.path.join(top, "elsewhere", "pytest.ini")
+
+    assert config.pytest_settings(root, where, ref=True, read=repository) == (
+        "-c", os.path.join("..", "pytest.ini"))
+    with pytest.raises(Refusal) as caught:
+        config.pytest_settings(root, where, ref=True, read=elsewhere,
+                               given=True)
+    assert str(caught.value) == (
+        "pytest's settings file %s, given with -c, is outside the repository "
+        "at %s: no ref's tree holds it, and every mutant's run would read "
+        "the ref's own settings instead" % (elsewhere, os.path.join(top, "w")))
+
+    os.remove(os.path.join(top, "t", "pytest.ini"))
+    with pytest.raises(Refusal) as caught:
+        config.pytest_settings(root, where, ref=True, read=repository)
+    assert str(caught.value).startswith(
+        "pytest read its settings from %s, which the tree the mutants are "
+        "made in does not hold" % os.path.join("..", "pytest.ini"))
+
+
+def test_a_conftest_above_a_project_that_falls_back_on_its_own_pyproject_is_let_be(
+        tmp_path):
+    """With no file on the way up that is pytest's, pytest falls back on
+    the nearest `pyproject.toml`, the project's own, and its rootdir is
+    there: a `conftest.py` above is never loaded. With none in the project,
+    the one above is the nearest, and the `conftest.py` below it is."""
+    home = os.path.realpath(tmp_path)
+    no_pytest_settings_above(home)
+    proj = os.path.join(home, "work", "proj")
+    write_tree(home, {"pyproject.toml": "[tool.ruff]\n",
+                      "work/conftest.py": "",
+                      "work/proj/pyproject.toml": "[project]\n"})
+    assert config.pytest_config_above(proj) is None
+
+    os.remove(os.path.join(proj, "pyproject.toml"))
+    assert config.pytest_config_above(proj) == os.path.join(home, "work",
+                                                            "conftest.py")
+
+
+def test_a_ref_s_refusal_names_its_repository_and_no_place_to_run_from(
+        tmp_path, monkeypatch):
+    """A ref's tree is its repository's from wherever invective is run, so
+    the only way to a tree that holds the file is to move it into the
+    repository; for a copy, running from the file's directory is one."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    ws, repo = str(tmp_path / "ws"), str(tmp_path / "ws" / "repo")
+    ini = os.path.join(ws, "pytest.ini")
+
+    assert str(config.outside_refusal(ini, repo, ref=True)) == (
+        "pytest reads %s, which is above the top of the repository %s, so the "
+        "ref's tree the mutants are run in does not hold it and every run in "
+        "there would go by other settings; move them into the repository"
+        % (ini, repo))
+    assert str(config.outside_refusal(
+        os.path.join(ws, "conftest.py"), repo, ref=True)).endswith(
+        "; move it into the repository, or give the project pytest settings "
+        "of its own, which stop pytest there")
+    assert str(config.outside_refusal(ini, repo)).endswith(
+        "; move them into the project, or run invective from %s, so that "
+        "the copy is made from there" % ws)
+    assert str(config.outside_refusal(
+        os.path.join(ws, "conftest.py"), repo)).endswith(
+        "; move it into the project, or give the project pytest settings of "
+        "its own, which stop pytest there")
 
 
 @pytest.mark.parametrize("as_file", [True, False])

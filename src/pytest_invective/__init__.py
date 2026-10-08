@@ -370,7 +370,6 @@ def pytest_runtestloop(session):
     from invective import mutate
 
     from invective import config as settings
-    from invective import tree
 
     tr = config.pluginmanager.get_plugin("terminalreporter")
     say = tr.write_line if tr is not None else print
@@ -382,26 +381,6 @@ def pytest_runtestloop(session):
     root = settings.project_root(str(config.invocation_params.dir))
     reports, failures = [], []
     try:
-        # The settings file this pytest read: `_forwarded` hands it to every
-        # run, and one outside the project, which no copy holds, refuses the
-        # run when it, or a `conftest.py` it brings in, would matter.
-        ini = config.inipath
-        left_out = settings.pytest_file_left_out(
-            root, None if ini is None else str(ini))
-        if left_out:
-            raise settings.outside_refusal(left_out, root)
-        if ini is not None and config.option.inifilename:
-            # `-c` skips pytest's search, so a file outside the project that
-            # sets nothing still decides this run: without it, every run in
-            # the copy, started at its top, would find the project's own.
-            try:
-                settings.relative_to_root(str(ini), root)
-            except ValueError:
-                raise mutate.Refusal(
-                    "pytest's settings file %s, given with -c, is outside the "
-                    "project at %s: no copy holds it, and every mutant's run "
-                    "would read the project's own settings instead"
-                    % (ini, root)) from None
         if session.testsfailed:
             # Even with --continue-on-collection-errors: the tests that did
             # collect are not the selection that was asked for.
@@ -415,14 +394,21 @@ def pytest_runtestloop(session):
                                  "nothing to notice a mutant")
         rules = settings.load(root)
         selection = [_node(item, root) for item in session.items]
-        ref = config.getoption("mutate_ref")
+        # Every run starts at the top of the copy with node ids for its only
+        # paths, so it would never find a settings file below the top
+        # (`tests/pytest.ini` found from `pytest tests`, or one given with
+        # `-c`) and would go by the top's. The file this pytest read is
+        # named to each instead, as the tree the mutants are run in holds
+        # it, which also makes its directory the rootdir, as it was here.
+        ini = config.inipath
         for target in targets:
             report = mutate.mutate(
                 root, target, [], _only(config),
                 config.getoption("mutate_limit"), say=say,
-                tree=(tree.git_ref(root, ref) if ref
-                      else tree.working_tree(root, rules.exclude)),
-                selection=selection, options=_forwarded(config, root))
+                ref=config.getoption("mutate_ref"), exclude=rules.exclude,
+                selection=selection, options=_forwarded(config),
+                read=None if ini is None else str(ini),
+                given=bool(config.option.inifilename))
             reports.append(report)
             failures.extend("%s: %s" % (report["target"], failure)
                             for failure in mutate.gate(report, rules))
@@ -455,9 +441,7 @@ _ENGINE_S = frozenset({"terminal", "xdist", "xdist.plugin", __name__})
 #: mutant's run is given too. Anything else stays behind: `--pdb` would stop
 #: a run for good, `--lf` would drop tests, and `-q` would leave a refusal
 #: nothing to quote.
-def _forwarded(config, root):
-    from invective import config as settings
-
+def _forwarded(config):
     forwarded = []
     for plugin in config.option.plugins or ():
         # The plugins whose options every run is given (`-rf`, `--no-header`,
@@ -474,19 +458,6 @@ def _forwarded(config, root):
                        ("--doctest-modules", "doctestmodules")):
         if config.getoption(dest, False):
             forwarded.append(flag)
-    # Every run starts at the top of the copy with node ids for its only
-    # paths, so a settings file below the top (`tests/pytest.ini` found from
-    # `pytest tests`, or one given with `-c`) is one it would never find,
-    # and it would go by the top's instead. `-c` also makes the file's
-    # directory the rootdir, as it was here. One outside the root has no
-    # path from the copy, and `pytest_file_left_out` has decided whether the
-    # runs may go without it.
-    ini = config.inipath
-    if ini is not None:
-        try:
-            forwarded += ["-c", settings.relative_to_root(str(ini), root)]
-        except ValueError:
-            pass
     return tuple(forwarded)
 
 

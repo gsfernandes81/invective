@@ -19,10 +19,11 @@ from pytest import ExitCode
 
 from invective import config, mutate
 from invective import tree as trees
-from invective.tree import git_ref, working_tree
+from invective.tree import git_ref
 
-from conftest import (FILES, MARKERLESS, WORKSPACE, commit, git,
-                      no_pytest_settings_above, slow_run, write_tree)
+from conftest import (FILES, MARKERLESS, MONOREPO, WORKSPACE, commit, git,
+                      monorepo, no_pytest_settings_above, slow_run,
+                      write_tree)
 
 SAMPLE = '''
 def refuse(n, flag, other):
@@ -952,7 +953,7 @@ def test_a_module_left_out_of_the_copy_is_refused(tree, monkeypatch):
 
     with pytest.raises(mutate.Refusal) as caught:
         mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None,
-                      tree=working_tree(tree, ("pkg/gate.py",)))
+                      exclude=("pkg/gate.py",))
     assert "not in the tree the mutants are made in" in str(caught.value)
 
 
@@ -1140,7 +1141,7 @@ def test_a_ref_in_a_repository_with_no_commit_is_refused_with_git_s_reason(
 
     with pytest.raises(mutate.Refusal) as caught:
         mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS, None, None,
-                      tree=git_ref(tree, "HEAD"))
+                      ref="HEAD")
     assert str(caught.value).startswith("git worktree failed: fatal: ")
     assert "HEAD" in str(caught.value)
 
@@ -1153,7 +1154,7 @@ def test_a_ref_is_mutated_as_committed_not_as_it_stands(repo):
     write_tree(repo, {"pkg/gate.py": edited})
 
     report = mutate.mutate(repo, gate, GATE_TESTS, ["RAISE"], None,
-                           tree=git_ref(repo, "HEAD"))
+                           ref="HEAD")
 
     assert report["kills"][0]["line"] == 3
     assert len(git(repo, "worktree", "list").splitlines()) == 1
@@ -1166,45 +1167,66 @@ def test_a_ref_from_below_the_top_of_the_repository_is_that_directory(repo):
         assert sorted(os.listdir(where))[:2] == ["__init__.py", "gate.py"]
 
 
-@pytest.mark.parametrize("own_pyproject", [True, False])
+@pytest.mark.parametrize("own_pyproject, moved", [
+    (True, True), (False, True), (True, False)],
+    ids=["moved", "moved-no-pyproject", "kept"])
 def test_a_ref_s_settings_above_the_project_in_its_repository_are_read(
-        tmp_path, monkeypatch, capsys, own_pyproject):
+        tmp_path, monkeypatch, capsys, own_pyproject, moved):
     """At the ref, pytest's settings are the repository's `pytest.ini`,
-    above the project, where its xfail is strict; since then they have moved
-    into the project's own `pyproject.toml`. The ref's runs go by the ref's
-    file, which its tree holds, as the ref's own pytest does: the gate's one
-    `RAISE` mutant, which only a strict xfail fails, is killed. The ref's
-    project may have a `pyproject.toml` that sets nothing, or none at all."""
+    above the project, where its xfail is strict. The ref's runs go by the
+    ref's file, which its tree holds, as the ref's own pytest does: the
+    gate's one `RAISE` mutant, which only a strict xfail fails, is killed.
+
+    The file may since have moved into the project's own `pyproject.toml`,
+    and the ref's project may have a `pyproject.toml` that sets nothing, or
+    none at all. Or it is still where it was, as a monorepo keeps it, and is
+    above the project as it stands too: a ref's tree holds it all the same,
+    so the ref is measured, where a run on the files as they stand is
+    refused."""
     no_pytest_settings_above(tmp_path)
     mono = os.path.realpath(tmp_path / "mono")
-    os.makedirs(mono)
-    git(mono, "init", "-q", "-b", "main")
-    project = "[project]\nname = 'sub'\nversion = '0'\n"
-    old = {"pytest.ini": "[pytest]\nxfail_strict = true\n",
-           "sub/pkg/__init__.py": "",
-           "sub/pkg/gate.py": ("def admit(age):\n"
-                               "    if age > 5:\n"
-                               "        raise ValueError('too old')\n"
-                               "    return age\n"),
-           "sub/tests/test_gate.py": ("import pytest\n"
-                                      "from pkg import gate\n"
-                                      "\n"
-                                      "@pytest.mark.xfail(raises=ValueError)\n"
-                                      "def test_too_old_is_refused():\n"
-                                      "    gate.admit(10)\n")}
-    if own_pyproject:
-        old["sub/pyproject.toml"] = project
-    commit(mono, old)
-    ref = git(mono, "rev-parse", "HEAD").strip()
-    os.remove(os.path.join(mono, "pytest.ini"))
-    commit(mono, {"sub/pyproject.toml": project + "\n[tool.pytest.ini_options]"
-                                                  "\nxfail_strict = true\n"})
+    old = dict(MONOREPO)
+    if not own_pyproject:
+        del old["sub/pyproject.toml"]
+    ref = monorepo(mono, old)
+    if moved:
+        os.remove(os.path.join(mono, "pytest.ini"))
+        commit(mono, {"sub/pyproject.toml": MONOREPO["sub/pyproject.toml"]
+                      + "\n[tool.pytest.ini_options]\nxfail_strict = true\n"})
     monkeypatch.chdir(os.path.join(mono, "sub"))
 
     assert mutate.main(["--target", "pkg/gate.py", "--tests", "tests",
                         "--only", "RAISE", "--ref", ref]) == 0
-
     assert "1/1 killed (100.0%)" in capsys.readouterr().out
+
+    if not moved:
+        assert mutate.main(["--target", "pkg/gate.py", "--tests", "tests",
+                            "--only", "RAISE"]) == 2
+        assert ("refused: pytest reads %s, which is above the project's top"
+                % os.path.join(mono, "pytest.ini")) in capsys.readouterr().err
+
+
+def test_settings_above_a_repository_are_in_no_ref_s_tree(
+        tmp_path, monkeypatch, capsys):
+    """A `pytest.ini` above the repository's top is in no commit of it, so
+    a ref's tree never holds it, and every run in one would go without the
+    strict xfail it sets: the ref is refused, naming it, and not measured
+    with the mutant only that file kills reported as a survivor."""
+    no_pytest_settings_above(tmp_path)
+    outer = os.path.realpath(tmp_path / "outer")
+    mono = os.path.join(outer, "mono")
+    write_tree(outer, {"pytest.ini": MONOREPO["pytest.ini"]})
+    ref = monorepo(mono, {rel: text for rel, text in MONOREPO.items()
+                          if rel != "pytest.ini"})
+    monkeypatch.chdir(os.path.join(mono, "sub"))
+
+    assert mutate.main(["--target", "pkg/gate.py", "--tests", "tests",
+                        "--only", "RAISE", "--ref", ref]) == 2
+    said = capsys.readouterr()
+    assert ("refused: pytest reads %s, which is above the top of the "
+            "repository %s, so the ref's tree the mutants are run in does not "
+            "hold it" % (os.path.join(outer, "pytest.ini"), mono)) in said.err
+    assert "copy:" not in said.out
 
 
 def test_every_write_of_the_module_gets_a_second_of_its_own(repo, monkeypatch):
@@ -1514,9 +1536,10 @@ def test_a_baseline_that_runs_out_of_time_is_refused_for_that(repo, monkeypatch)
     ("pyproject.toml", True)])
 def test_a_forwarded_settings_file_the_tree_lacks_is_refused_for_that(
         repo, monkeypatch, ini, held):
-    """`-c` names a file every run loads, so one the tree does not hold
-    fails each run before a test is collected: refused as itself, with no
-    run made, and not as a red baseline. One the tree holds is handed on."""
+    """The settings file a pytest read is named to every run with `-c`, so
+    one the tree does not hold would fail each run before a test is
+    collected: refused as itself, with no run made, and not as a red
+    baseline. One the tree holds is handed on."""
     runs = []
 
     def timed_out(where, tests, timeout, selection, options, target):
@@ -1527,7 +1550,7 @@ def test_a_forwarded_settings_file_the_tree_lacks_is_refused_for_that(
 
     with pytest.raises(mutate.Refusal) as caught:
         mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"],
-                      None, options=("-c", ini))
+                      None, read=os.path.join(repo, ini))
     if held:
         assert runs == [("-c", ini)]
         assert "took longer than" in str(caught.value)
@@ -1586,7 +1609,7 @@ def test_a_ref_s_worktree_git_would_not_remove_is_not_left_listed(repo,
     monkeypatch.setattr(mutate, "run_tests",
                         lambda *a, **k: mutate.Verdict(True, 0, "", ""))
     mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"], None,
-                  tree=git_ref(repo, "HEAD"))
+                  ref="HEAD")
 
     assert len(git(repo, "worktree", "list").splitlines()) == 1
 

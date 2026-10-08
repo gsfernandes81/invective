@@ -24,10 +24,10 @@ import subprocess
 import sys
 import tempfile
 
-from invective.config import (outside_refusal, project_root,
-                               pytest_config_above, relative_to_root)
+from invective.config import project_root, pytest_settings, relative_to_root
 from invective.errors import Refusal
 from invective.mutate import _STOP_GRACE, _Terminated, _exit_by, stopping_on_sigterm
+from invective.tree import git_ref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -317,20 +317,34 @@ def main(argv=None):
         for given in [*args.src, args.tests_dir]:
             if not os.path.isdir(os.path.join(root, given)):
                 raise Refusal("%s is not a directory under %s" % (given, root))
-        # Every module's engine would refuse on its own; said once here,
-        # the sweep does not print a `?` for each.
-        left_out = pytest_config_above(root, [args.tests_dir])
-        if left_out:
-            raise outside_refusal(left_out, root)
+        _settle(args, root)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
+    except _Terminated as exc:
+        # The ref's tree is gone; now die by the signal, as `run` does.
+        _exit_by(exc)
     try:
         return _sweep(args, root)
     except _Terminated as exc:
         # The engine that was running is gone and its copy with it; now die
         # by the signal, as `run` does.
         _exit_by(exc)
+
+
+def _settle(args, root):
+    """Refuse the sweep, once rather than as a `?` for each module, when
+    every module's engine would refuse the pytest settings its runs would go
+    by (`config.pytest_settings`), decided on the tree the engines' mutants
+    are run in: on a ref the ref's own, made once for this; on the files as
+    they stand, those files, which every engine's copy is made of. What a
+    copy leaves out, or what is above the temporary directory, each engine
+    refuses on its own."""
+    if not args.ref:
+        pytest_settings(root, root, [args.tests_dir])
+        return
+    with stopping_on_sigterm(), git_ref(root, args.ref) as where:
+        pytest_settings(root, where, [args.tests_dir], ref=True)
 
 
 def _sweep(args, root):

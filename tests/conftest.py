@@ -154,6 +154,35 @@ MARKERLESS = {
 }
 
 
+#: A repository whose project `sub` takes its pytest settings from the
+#: repository's top, where an xfail is strict: the gate's one `RAISE` mutant
+#: makes the xfailing test pass, which only a strict xfail fails. `sub` has
+#: a `pyproject.toml` that sets nothing, which is its top.
+MONOREPO = {
+    "pytest.ini": "[pytest]\nxfail_strict = true\n",
+    "sub/pyproject.toml": "[project]\nname = 'sub'\nversion = '0'\n",
+    "sub/pkg/__init__.py": "",
+    "sub/pkg/gate.py": ("def admit(age):\n"
+                        "    if age > 5:\n"
+                        "        raise ValueError('too old')\n"
+                        "    return age\n"),
+    "sub/tests/test_gate.py": ("import pytest\n"
+                               "from pkg import gate\n"
+                               "\n"
+                               "@pytest.mark.xfail(raises=ValueError)\n"
+                               "def test_too_old_is_refused():\n"
+                               "    gate.admit(10)\n"),
+}
+
+
+def monorepo(path, files):
+    """A repository at *path* with *files* committed: the commit's hash."""
+    os.makedirs(path)
+    git(path, "init", "-q", "-b", "main")
+    commit(path, files)
+    return git(path, "rev-parse", "HEAD").strip()
+
+
 def write_tree(root, files):
     for rel, text in files.items():
         path = os.path.join(root, *rel.split("/"))

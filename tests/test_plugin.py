@@ -14,8 +14,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from conftest import (FILES, MARKERLESS, WORKSPACE, commit,
-                      no_pytest_settings_above, write_tree)
+from conftest import (FILES, MARKERLESS, MONOREPO, WORKSPACE, commit,
+                      monorepo, no_pytest_settings_above, write_tree)
 
 #: This checkout's own `src`, ahead of any installed copy, so that the pytest
 #: started here loads the plugin under test.
@@ -837,6 +837,51 @@ def test_a_settings_file_the_tree_lacks_is_refused_for_that(repo):
     assert "is RED on the unmutated tree" not in done.stdout
 
 
+def test_a_ref_s_settings_above_the_project_in_its_repository_are_read(
+        tmp_path):
+    """The repository's `pytest.ini`, which this pytest read above the
+    project, is in the ref's tree too, so every run there goes by it, and
+    the mutant only its strict xfail kills is killed; on the files as they
+    stand, a copy of the project would not hold it, and the run is
+    refused."""
+    no_pytest_settings_above(tmp_path)
+    mono = os.path.realpath(tmp_path / "mono")
+    ref = monorepo(mono, MONOREPO)
+    sub = os.path.join(mono, "sub")
+
+    done = pytest_in(sub, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
+                     "--mutate-ref", ref, "tests")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed (100.0%)" in done.stdout
+
+    done = pytest_in(sub, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
+                     "tests")
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "refused: pytest reads %s, which is above the project's top" % (
+        os.path.join(mono, "pytest.ini")) in done.stdout
+
+
+def test_settings_above_a_repository_refuse_a_ref(tmp_path):
+    """No commit holds a `pytest.ini` above the repository's top, so no
+    ref's tree does, and the mutant only it kills would survive there."""
+    no_pytest_settings_above(tmp_path)
+    outer = os.path.realpath(tmp_path / "outer")
+    mono = os.path.join(outer, "mono")
+    write_tree(outer, {"pytest.ini": MONOREPO["pytest.ini"]})
+    ref = monorepo(mono, {rel: text for rel, text in MONOREPO.items()
+                          if rel != "pytest.ini"})
+
+    done = pytest_in(os.path.join(mono, "sub"), "--mutate=pkg/gate.py",
+                     "--mutate-only", "RAISE", "--mutate-ref", ref, "tests")
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert ("refused: pytest reads %s, which is above the top of the "
+            "repository %s" % (os.path.join(outer, "pytest.ini"), mono)
+            in done.stdout)
+    assert "copy:" not in done.stdout
+
+
 @pytest.mark.parametrize("options, killed", [
     ([], 0),
     (["-W", "error::UserWarning"], 1),
@@ -880,39 +925,21 @@ def _plugin_here():
     return module
 
 
-def _config(inipath=None):
-    """A run's config as `_forwarded` reads it, read from *inipath*."""
+def _config():
+    """A run's config as `_forwarded` reads it."""
     option = SimpleNamespace(
         plugins=["myplugin", "no:terminal", "no:xdist", "pytest_invective"],
         override_ini=["xfail_strict=true"], importmode="importlib")
     given = {"pythonwarnings": ["error"], "runxfail": True,
              "strict_markers": False}
     return SimpleNamespace(
-        option=option, inipath=inipath,
+        option=option,
         getoption=lambda name, default=None: given.get(name, default))
 
 
-def test_the_options_forwarded_are_those_that_change_how_tests_run(tmp_path):
+def test_the_options_forwarded_are_those_that_change_how_tests_run():
     """Every `-p` the run was given, but for the plugins whose options each
     mutant's run is given anyway, and a flag only when it was set."""
-    assert _plugin_here()._forwarded(_config(), str(tmp_path)) == (
+    assert _plugin_here()._forwarded(_config()) == (
         "-p", "myplugin", "-o", "xfail_strict=true", "-W", "error",
         "--import-mode=importlib", "--runxfail")
-
-
-def test_the_settings_file_is_forwarded_from_the_top(tmp_path):
-    """Given from the root, where every run starts."""
-    root = tmp_path / "proj"
-    ini = root / "tests" / "pytest.ini"
-
-    assert _plugin_here()._forwarded(_config(ini), str(root))[-3:] == (
-        "--runxfail", "-c", os.path.join("tests", "pytest.ini"))
-
-
-def test_a_settings_file_outside_the_root_is_not_forwarded(tmp_path):
-    """No path from the copy leads to it; `pytest_file_left_out` decides
-    whether the run may go ahead without it."""
-    root = tmp_path / "proj"
-    ini = tmp_path / "pyproject.toml"
-
-    assert "-c" not in _plugin_here()._forwarded(_config(ini), str(root))

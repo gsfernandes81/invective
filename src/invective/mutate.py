@@ -54,10 +54,8 @@ from pytest import ExitCode
 
 import pytest_invective
 from invective.accept import read as read_accepts
-from invective.config import (Config, load as load_config, outside_refusal,
-                              project_root, pytest_config_above,
-                              pytest_settings_option, relative_to_root,
-                              repository_top)
+from invective.config import (Config, load as load_config, project_root,
+                              pytest_settings, relative_to_root)
 from invective.errors import Refusal
 from invective.tree import git_ref, working_tree
 
@@ -647,19 +645,20 @@ def run_tests(where: str, tests: list[str], timeout: float,
 
 
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
-           limit: int | None, say=print, tree=None,
-           selection: list[str] | None = None,
-           options: tuple[str, ...] | None = ()) -> dict:
+           limit: int | None, say=print, ref: str | None = None,
+           exclude: tuple[str, ...] = (), selection: list[str] | None = None,
+           options: tuple[str, ...] = (), read: str | None = None,
+           given: bool = False) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
-    The mutants are written in *tree*, a context manager giving a directory
-    that stands for *root* (`tree.working_tree` or `tree.git_ref`); by
-    default a copy of *root* as it stands. *selection* is a list of node ids
-    to run instead of whatever *tests* collects, and *options* go to every
-    run's pytest; with None, every run is given the settings file pytest
-    reads in the tree the mutants are made in, for a ref the ref's own and
-    not the working tree's. *say* receives each line of progress as it
-    happens.
+    The mutants are written in a copy of *root* as it stands, *exclude* left
+    out of it (`tree.working_tree`), or with *ref* in a worktree of that
+    commit (`tree.git_ref`). *selection* is a list of node ids to run
+    instead of whatever *tests* collects, and *options* go to every run's
+    pytest, with the settings file `config.pytest_settings` settles on for
+    the tree: the one pytest reads there for *tests*, or *read*, the one a
+    pytest that read it names (*given* with `-c`). *say* receives each line
+    of progress as it happens.
     """
     try:
         src_rel = relative_to_root(target, root)
@@ -674,7 +673,12 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     # too, and a plain pytest with the plugin installed never does.
     with stopping_on_sigterm(), \
             tempfile.TemporaryDirectory(prefix="invective-selection-") as box, \
-            (tree if tree is not None else working_tree(root)) as where:
+            (git_ref(root, ref) if ref
+             else working_tree(root, exclude)) as where:
+        # Settled before anything is said of the campaign: a run that could
+        # not go by the project's settings is refused as itself.
+        options = (*options, *pytest_settings(
+            root, where, tests, ref=bool(ref), read=read, given=given))
         listed = None
         if selection is not None:
             # One node id a line, in a file of invective's own: a selection
@@ -691,43 +695,6 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         path = os.path.join(where, src_rel)
         if not os.path.isfile(path):
             raise Refusal("%s is not in the tree the mutants are made in" % src_rel)
-        if options is None:
-            # A ref's tree ends at its repository's top, which the worktree
-            # carries, so a settings file the ref keeps above the project is
-            # read as the ref's own pytest reads it. With no repository the
-            # search ends at *where*.
-            options = pytest_settings_option(where, tests,
-                                             top=repository_top(where))
-        # A settings file named for every run by the run that chose it, which
-        # the tree lacks (ignored by git, excluded, or not in the ref), fails
-        # each run in pytest's config load: a baseline that reads as red when
-        # no test failed.
-        if "-c" in options:
-            ini = options[options.index("-c") + 1]
-            if not os.path.isfile(os.path.join(where, ini)):
-                raise Refusal(
-                    "pytest read its settings from %s, which the tree the "
-                    "mutants are made in does not hold (excluded, ignored by "
-                    "git, or not in the ref), so no run in there can go by "
-                    "the settings this one did" % ini)
-        else:
-            # With no `-c`, pytest found no settings file of the project's
-            # (it would have been named), so nothing between the tests and
-            # the top of the copy stops its search: it goes on above the
-            # copy, into the temporary directory's ancestors, where a
-            # settings file, or a `conftest.py` its rootdir brings in, would
-            # decide every run, the baseline's too. pytest's search starts
-            # from its working directory as the kernel spells it, so through
-            # a temporary directory reached by a link it climbs the target's.
-            left_out = pytest_config_above(os.path.realpath(where))
-            if left_out:
-                raise Refusal(
-                    "pytest reads %s, above the copy the mutants are run in "
-                    "at %s, so every run in there would go by it; give the "
-                    "project pytest settings of its own (an empty "
-                    "[tool.pytest.ini_options] table in pyproject.toml is "
-                    "enough), or a temporary directory with nothing above it"
-                    % (left_out, where))
         # **Where the writes land, links followed.** The copy keeps links as
         # links, so a module reached through one -- the file itself or a
         # directory on its path -- can be a file outside the copy, the
@@ -1056,19 +1023,8 @@ def main(argv: list[str] | None = None) -> int:
     tests = rewrite_tests(args.tests, os.getcwd(), root)
     try:
         config = load_config(root)
-        left_out = pytest_config_above(root, tests)
-        if left_out:
-            raise outside_refusal(left_out, root)
-        # A ref's runs go by the ref's own settings file, found in its tree.
-        # The working tree's is found here, so that a copy which leaves it
-        # out (`exclude`) is refused rather than run by another.
-        if args.ref:
-            tree, options = git_ref(root, args.ref), None
-        else:
-            tree = working_tree(root, config.exclude)
-            options = pytest_settings_option(root, tests)
         report = mutate(root, args.target, tests, only, args.limit,
-                        tree=tree, options=options)
+                        ref=args.ref, exclude=config.exclude)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2

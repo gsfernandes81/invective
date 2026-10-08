@@ -14,8 +14,9 @@ import pytest
 
 from invective import mutate, sweep
 
-from conftest import (FILES, SLOW_TEST, SRC, WORKSPACE, stop_group,
-                      wait_for, write_tree)
+from conftest import (FILES, MONOREPO, SLOW_TEST, SRC, WORKSPACE, monorepo,
+                      no_pytest_settings_above, stop_group, wait_for,
+                      write_tree)
 
 SOURCES = ["pkg", "loose"]
 TESTS_DIR = "pkg/tests"
@@ -892,4 +893,53 @@ def test_a_sweep_whose_pytest_settings_are_above_the_project_is_refused(
     said = capsys.readouterr()
     assert "refused: pytest reads %s" % os.path.join(top, "pyproject.toml") in (
         said.err)
+    assert "measured" not in said.out
+
+
+def test_a_ref_s_settings_above_the_project_in_its_repository_are_no_refusal(
+        tmp_path, monkeypatch, capsys):
+    """The repository's `pytest.ini` is above the project, and in the ref's
+    tree too, which the engine reads it from: the sweep starts it on a ref,
+    and refuses only on the files as they stand, which no copy of the
+    project would hold."""
+    no_pytest_settings_above(tmp_path)
+    mono = os.path.realpath(tmp_path / "mono")
+    ref = monorepo(mono, MONOREPO)
+    monkeypatch.chdir(os.path.join(mono, "sub"))
+    engine = _Engine(0, stdout="1/1 killed (100.0%), 0 survived\n")
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
+    argv = ["--src", "pkg", "--tests-dir", "tests", "--modules",
+            _p("pkg/gate.py")]
+
+    assert sweep.main([*argv, "--ref", ref]) == 0
+    ((cmd, _kwargs),) = engine.commands
+    assert cmd[cmd.index("--ref") + 1] == ref
+
+    assert sweep.main(argv) == 2
+    assert "refused: pytest reads %s, which is above the project's top" % (
+        os.path.join(mono, "pytest.ini")) in capsys.readouterr().err
+    assert len(engine.commands) == 1
+
+
+def test_settings_above_a_repository_refuse_a_ref_once(tmp_path, monkeypatch,
+                                                       capsys):
+    """No ref's tree holds a `pytest.ini` above the repository's top: said
+    once, with no engine started, as on the files as they stand."""
+    no_pytest_settings_above(tmp_path)
+    outer = os.path.realpath(tmp_path / "outer")
+    mono = os.path.join(outer, "mono")
+    write_tree(outer, {"pytest.ini": MONOREPO["pytest.ini"]})
+    ref = monorepo(mono, {rel: text for rel, text in MONOREPO.items()
+                          if rel != "pytest.ini"})
+    monkeypatch.chdir(os.path.join(mono, "sub"))
+    engine = _Engine(0, stdout="1/1 killed (100.0%), 0 survived\n")
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
+
+    assert sweep.main(["--src", "pkg", "--tests-dir", "tests",
+                       "--ref", ref]) == 2
+    said = capsys.readouterr()
+    assert ("refused: pytest reads %s, which is above the top of the "
+            "repository %s" % (os.path.join(outer, "pytest.ini"), mono)
+            in said.err)
+    assert engine.commands == []
     assert "measured" not in said.out
