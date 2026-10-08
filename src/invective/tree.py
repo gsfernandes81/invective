@@ -6,13 +6,13 @@ the last, so the files a person is working on never hold a mutant, and a run
 that is killed leaves nothing behind in them. Each is a context manager that
 gives the path of the copy's top level.
 
-**A copy carries the pid of the process it belongs to**, in `MARKER` at the
-top of its directory (for a ref, the directory the worktree is checked out
-into), and each context manager begins by removing the copies whose owner is
-dead. The removal at the end runs on an interrupt and a SIGTERM, which the
-engine turns into one, and on nothing else: a run killed outright leaves its
-copy, a whole working tree with whatever untracked files hold, and the marker
-is how the next invective to start knows it may be removed.
+**A copy carries the pid of the process it belongs to**, in `MARKER` in the
+copy's own directory (for a ref, the worktree is a subdirectory of it), and
+each context manager begins by removing the copies whose owner is dead. The
+removal at the end runs on an interrupt and a SIGTERM, which the engine
+turns into one, and on nothing else: a run killed outright leaves its copy,
+a whole working tree with whatever untracked files hold, and the marker is
+how the next invective to start knows it may be removed.
 """
 
 from __future__ import annotations
