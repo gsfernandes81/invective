@@ -1526,19 +1526,30 @@ def test_a_process_that_left_the_run_s_group_does_not_hold_invective(
     monkeypatch.setattr(mutate, "_STOP_GRACE", 0.5)
     (tmp_path / "pytest.ini").write_text("[pytest]\naddopts = -s\n",
                                          encoding="utf-8")
+    # The escaped process says who it is, so the test can stop what the run
+    # by design does not.
+    pid_file = tmp_path / "escaped.pid"
+    escaped = ("import os, time; open(%r, 'w').write(str(os.getpid())); "
+               "time.sleep(30)" % str(pid_file))
     (tmp_path / "test_escape.py").write_text(
         "import os, subprocess, sys, time\n"
         "\n"
         "def test_escape():\n"
-        "    subprocess.Popen([sys.executable, '-c', 'import time; "
-        "time.sleep(30)'], start_new_session=True)\n"
-        "    time.sleep(60)\n", encoding="utf-8")
+        "    subprocess.Popen([sys.executable, '-c', %r], "
+        "start_new_session=True)\n"
+        "    time.sleep(60)\n" % escaped, encoding="utf-8")
 
     started = time.monotonic()
-    got = mutate.run_tests(str(tmp_path), ["test_escape.py"], timeout=2)
+    try:
+        got = mutate.run_tests(str(tmp_path), ["test_escape.py"], timeout=2)
 
-    assert got.code == mutate.TIMED_OUT
-    assert time.monotonic() - started < 15, "waited on the escaped process"
+        assert got.code == mutate.TIMED_OUT
+        assert time.monotonic() - started < 15, "waited on the escaped process"
+    finally:
+        try:
+            os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
 
 
 ACCEPTING = (
