@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -180,7 +181,10 @@ def test_a_top_level_package_is_not_covered_by_a_library_module_ending_in_its_na
         tmp_path):
     """`email.utils`, `django.utils.text`, `unittest.mock` and `os.path` end
     in the name of a package of the project's own; a test using them uses
-    nothing of the project's but `app`."""
+    nothing of the project's but `app`. `from email import utils` binds the
+    library's module to the package's name, and `from . import utils` a
+    helper of the tests' own; neither loads the package, and `utils.` after
+    either is no more the package's than the bare stem of a loose module."""
     root = str(tmp_path)
     write_tree(root, {
         "src/utils/__init__.py": "",
@@ -195,6 +199,12 @@ def test_a_top_level_package_is_not_covered_by_a_library_module_ending_in_its_na
                              "import os.path\n"
                              "from app import core\n"
                              "HERE = os.path.dirname(__file__)\n",
+        "tests/test_mail.py": "from email import utils\n",
+        "tests/unit/test_mail.py": "from email import utils\n"
+                                   "utils.parseaddr('a')\n",
+        "tests/api/__init__.py": "",
+        "tests/api/utils.py": "x = 1\n",
+        "tests/api/test_api.py": "from . import utils\n",
     })
 
     for module in ("src/utils/__init__.py", "src/utils/text.py",
@@ -202,6 +212,173 @@ def test_a_top_level_package_is_not_covered_by_a_library_module_ending_in_its_na
         assert sweep.covering(root, _p(module), ["src"], "tests") == [], module
     assert sweep.covering(root, _p("src/app/core.py"), ["src"], "tests") == [
         _p("tests/test_app.py")]
+    # An import statement that names the package among others still loads it.
+    write_tree(root, {"tests/unit/test_u.py": "import os, utils\n"})
+    assert sweep.covering(root, _p("src/utils/__init__.py"), ["src"],
+                          "tests") == [_p("tests/unit/test_u.py")]
+
+
+def _top_level_rules(root, module, sources):
+    """`covering`'s rules at 5241e5f, which reads only the top of the tests
+    directory: the module's dotted name when its source directory is a
+    package, else its bare stem, and the patterns matched on that name.
+    Returns the name and the patterns."""
+    mod = os.path.abspath(os.path.join(root, module))
+    home = os.path.dirname(mod)
+    for base in sources:
+        base = os.path.abspath(os.path.join(root, base))
+        if mod.startswith(base + os.sep):
+            home = base
+            break
+    dotted = None
+    if os.path.isfile(os.path.join(home, "__init__.py")):
+        top = home
+        while os.path.isfile(os.path.join(os.path.dirname(top), "__init__.py")):
+            top = os.path.dirname(top)
+        rel = os.path.relpath(mod, os.path.dirname(top))
+        dotted = rel[:-3].replace(os.sep, ".").replace(".__init__", "")
+    stem = os.path.basename(module)[:-3]
+    if stem in ("__init__", "__main__"):
+        stem = os.path.basename(os.path.dirname(module))
+    if dotted:
+        return dotted, [
+            r"\bimport\s+%s\b" % re.escape(dotted),
+            r"from\s+%s\s+import" % re.escape(dotted),
+            r"from\s+%s\s+import\s+.*\b%s\b"
+            % (re.escape(dotted.rsplit(".", 1)[0]), re.escape(stem)),
+            r"\b%s\." % re.escape(dotted)]
+    return None, [r"^\s*import\s+%s\b" % re.escape(stem),
+                  r"^\s*from\s+%s\s+import" % re.escape(stem),
+                  r"\b%s\.\w" % re.escape(stem)]
+
+
+#: Each module, the source directories it is swept under, and the directory
+#: under `tests/` that mirrors its own: a top-level package and a module in
+#: it, a package below a namespace directory, a loose file, and a package
+#: that is its own source directory.
+_PROBED = [
+    ("src/utils/__init__.py", ["src"], "utils"),
+    ("src/utils/text.py", ["src"], "utils"),
+    ("src/acme/gate/__init__.py", ["src"], "acme/gate"),
+    ("src/acme/gate/core.py", ["src"], "acme/gate"),
+    ("src/acme/gate/core.py", ["src/acme"], "gate"),
+    ("scripts/config.py", ["scripts"], "."),
+    ("app/core.py", ["app"], "."),
+]
+
+#: Where a probing test file is written: the top of `tests/`, a directory
+#: that mirrors no module, and every module's mirror.
+_PLACES = [".", "unit", "utils", "acme/gate", "gate"]
+
+#: What a test file may say. Most of it loads none of the modules probed.
+_PROBES = [
+    "from email import utils",
+    "from email import utils\nutils.parseaddr('a')",
+    "from . import utils",
+    "from .utils import x",
+    "from email.utils import parseaddr",
+    "import email.utils",
+    "from django.utils.text import slugify",
+    "from django import utils\nutils.text.slugify('a')",
+    "import os.path\nos.path.join('a')",
+    "x = os.utils.text",
+    "# import utils",
+    "'import utils'",
+    "from pkg import utils, text, config, core, gate",
+    "from src.gate import core",
+    "from other.gate import core",
+    "from other.gate.core import x",
+    "import other.gate.core\nother.gate.core.x",
+    "gate.core.x",
+    "import gate",
+    "import core\ncore.x",
+    "from core import x",
+    "text.x",
+    "from logging import config\nconfig.dictConfig({})",
+    "import config",
+    "from config import X",
+    "import scripts.config",
+    "from app import core",
+    "import app.core\napp.core.x",
+    "import utils",
+    "import os, utils",
+    "import utils as u",
+    "from utils import f",
+    "from utils import text",
+    "from utils.text import slugify",
+    "import utils.text\nutils.text.x",
+    "import acme.gate",
+    "import acme.gate.core",
+    "import acme\nacme.gate.core.x",
+    "from acme.gate import core",
+    "from acme.gate.core import x",
+    "from src.acme.gate.core import x",
+]
+
+#: A test file that loads the module in a way the top-level rules cannot
+#: see: they name a package under a source directory that is not one by its
+#: bare stem, and read no import statement that lists other modules before
+#: it. These count wherever the file is.
+_LOADS = {
+    ("import utils", "src/utils/__init__.py"),
+    ("import os, utils", "src/utils/__init__.py"),
+    ("import utils as u", "src/utils/__init__.py"),
+    ("from utils import f", "src/utils/__init__.py"),
+    ("from utils import text", "src/utils/__init__.py"),
+    ("import utils.text\nutils.text.x", "src/utils/__init__.py"),
+    ("from utils import text", "src/utils/text.py"),
+    ("from utils.text import slugify", "src/utils/text.py"),
+    ("import utils.text\nutils.text.x", "src/utils/text.py"),
+    ("import gate", "src/acme/gate/__init__.py"),
+    ("import acme.gate", "src/acme/gate/__init__.py"),
+    ("import acme.gate.core", "src/acme/gate/__init__.py"),
+    ("from acme.gate import core", "src/acme/gate/__init__.py"),
+    ("import acme.gate.core", "src/acme/gate/core.py"),
+    ("import acme\nacme.gate.core.x", "src/acme/gate/core.py"),
+    ("from acme.gate import core", "src/acme/gate/core.py"),
+    ("from acme.gate.core import x", "src/acme/gate/core.py"),
+    ("from src.acme.gate.core import x", "src/acme/gate/core.py"),
+}
+
+#: The one shape of the dotted attribute rule that matches without loading
+#: the module: a library's module bound to the package's top name, followed
+#: by an attribute named like the module. The top-level rules match these at
+#: the top of `tests/` too, by the module's bare stem.
+_ALIKE = {
+    ("from django import utils\nutils.text.slugify('a')", "src/utils/text.py"),
+    ("gate.core.x", "src/acme/gate/core.py"),
+}
+
+
+def test_no_test_file_covers_a_module_the_top_level_rules_leave_uncovered(
+        tmp_path):
+    """The walk into subdirectories finds more test files, and finds them by
+    the rules that held at the top of the tests directory, applied where they
+    held: a dotted name anywhere, a bare stem only at the top and in the
+    mirror directory. No file covers a module those rules leave uncovered,
+    save one that loads it by a name they cannot see, and the attribute
+    shapes in `_ALIKE`."""
+    root = str(tmp_path)
+    write_tree(root, {m: "x = 1\n" for m, _s, _d in _PROBED})
+    write_tree(root, {"src/utils/__init__.py": "", "src/acme/gate/__init__.py": "",
+                      "app/__init__.py": ""})
+    wider = []
+    for probe in _PROBES:
+        write_tree(root, {"tests/%s/test_probe.py" % place: probe + "\n"
+                          for place in _PLACES})
+        for module, sources, mirror in _PROBED:
+            if (probe, module) in _LOADS | _ALIKE:
+                continue
+            found = sweep.covering(root, _p(module), sources, "tests")
+            dotted, patterns = _top_level_rules(root, module, sources)
+            matched = any(re.search(pat, probe + "\n", re.M) for pat in patterns)
+            for place in _PLACES:
+                held = matched and (dotted is not None or place in (".", mirror))
+                where = os.path.normpath(_p("tests/%s/test_probe.py" % place))
+                if where in found and not held:
+                    wider.append((probe, module, sources, place))
+
+    assert wider == []
 
 
 def test_a_package_at_the_project_s_top_is_imported_with_no_prefix(tmp_path):

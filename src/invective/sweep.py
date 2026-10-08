@@ -139,7 +139,9 @@ def covering(root, module, sources, tests_dir):
     stem = os.path.basename(module)[:-3]
     if stem in ("__init__", "__main__"):
         stem = os.path.basename(os.path.dirname(module))
-    wanted = []
+    # What counts anywhere in the tests directory, and what only at its top
+    # and in the mirror directory, where a bare name is the module's own.
+    anywhere, near_only = [], []
     if dotted:
         # A package below a namespace directory (one with no `__init__.py`)
         # is imported under the namespace's name, which `import_name` cannot
@@ -148,16 +150,27 @@ def covering(root, module, sources, tests_dir):
         # never any identifier: `gate.core` is matched inside
         # `acme.gate.core`, and `utils` is not matched inside `email.utils`,
         # nor a package `path` inside `os.path.join`.
+        # **An import statement, not the word `import`.** `from email
+        # import utils` holds `import utils` and loads nothing of the
+        # project's, so the name counts after `import` only at the start of
+        # an `import` statement, alone or in a list. For the same reason a
+        # top-level package's bare name followed by a dot counts only where a
+        # loose module's stem does, since `from email import utils` leaves
+        # `utils.` in any file; a dotted name followed by a dot counts
+        # anywhere.
         ns = _namespace(root, module, sources)
-        wanted += [r"\bimport\s+%s%s\b" % (ns, re.escape(dotted)),
-                   r"from\s+%s%s\s+import" % (ns, re.escape(dotted)),
-                   r"from\s+%s%s\s+import\s+.*\b%s\b"
-                   % (ns, re.escape(dotted.rsplit(".", 1)[0]), re.escape(stem)),
-                   r"(?<![\w.])%s%s\." % (ns, re.escape(dotted))]
+        anywhere += [
+            r"^\s*import\s+(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*%s%s\b"
+            % (ns, re.escape(dotted)),
+            r"from\s+%s%s\s+import" % (ns, re.escape(dotted)),
+            r"from\s+%s%s\s+import\s+.*\b%s\b"
+            % (ns, re.escape(dotted.rsplit(".", 1)[0]), re.escape(stem))]
+        attr = r"(?<![\w.])%s%s\." % (ns, re.escape(dotted))
+        (anywhere if "." in dotted else near_only).append(attr)
     else:
-        wanted += [r"^\s*import\s+%s\b" % re.escape(stem),
-                   r"^\s*from\s+%s\s+import" % re.escape(stem),
-                   r"\b%s\.\w" % re.escape(stem)]
+        near_only += [r"^\s*import\s+%s\b" % re.escape(stem),
+                      r"^\s*from\s+%s\s+import" % re.escape(stem),
+                      r"\b%s\.\w" % re.escape(stem)]
     named = "test_%s.py" % stem
     hits = []
     tests_abs = os.path.join(root, tests_dir)
@@ -183,8 +196,8 @@ def covering(root, module, sources, tests_dir):
                 body = fh.read()
             near = os.path.relpath(dirpath, tests_abs) in (os.curdir, mirror)
             by_name = f == named and near
-            by_import = (dotted or near) and any(
-                re.search(pat, body, re.M) for pat in wanted)
+            by_import = any(re.search(pat, body, re.M) for pat in
+                            anywhere + (near_only if near else []))
             if by_name or by_import:
                 hits.append(os.path.normpath(os.path.join(
                     tests_dir, os.path.relpath(path, tests_abs))))
