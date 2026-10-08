@@ -708,3 +708,50 @@ def test_a_ref_stopped_during_the_checkout_stops_what_git_started(
         signal.signal(signal.SIGALRM, previous)
         if filler is not None and _running(filler):
             os.kill(filler, signal.SIGKILL)
+
+
+def _left(tmp_path):
+    return [n for n in os.listdir(tmp_path) if n.startswith("invective-")]
+
+
+def test_a_stop_during_the_removal_of_the_copy_goes_on_once_the_copy_is_gone(
+        tmp_path, monkeypatch):
+    """The copy holds files a person keeps out of version control; a first
+    SIGTERM or ^C that cut the removal short would leave them in the
+    temporary directory until the next start."""
+    root = str(tmp_path / "project")
+    write_tree(root, {"pkg/a.py": "x = 1\n", ".env": "SECRET=1\n"})
+    real = trees.shutil.rmtree
+    calls = []
+
+    def rmtree(path, ignore_errors=False):
+        calls.append(path)
+        if len(calls) == 1:
+            raise mutate._Terminated(signal.SIGTERM)
+        # The pass after the stop is as quiet as the first: a file that will
+        # not go does not replace the stop with an error of its own.
+        if not ignore_errors:
+            raise PermissionError(path)
+        return real(path, ignore_errors=True)
+
+    monkeypatch.setattr(trees.shutil, "rmtree", rmtree)
+    with pytest.raises(mutate._Terminated):
+        with trees.working_tree(root):
+            pass
+    assert _left(tmp_path) == []
+
+
+def test_a_stop_during_the_removal_of_the_worktree_still_removes_the_copy(
+        repo, tmp_path, monkeypatch):
+    real = trees.subprocess.run
+
+    def run(argv, *args, **kwargs):
+        if "remove" in argv:
+            raise mutate._Terminated(signal.SIGTERM)
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(trees.subprocess, "run", run)
+    with pytest.raises(mutate._Terminated):
+        with trees.git_ref(repo, "HEAD"):
+            pass
+    assert _left(tmp_path) == []

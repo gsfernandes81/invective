@@ -121,7 +121,9 @@ def git_ref(root: str, ref: str):
 
 
 def _remove(where: str) -> None:
-    """Remove the copy *where*, raising nothing.
+    """Remove the copy *where*, raising nothing -- but for a stop (^C, or the
+    SIGTERM `stopping_on_sigterm` turns into one) that lands during it, which
+    is re-raised once the copy is gone.
 
     Renamed first, atomically, to `invective-dead-<name>`, as `reap()` does:
     removing a large tree takes seconds and may delete the marker first, and
@@ -137,7 +139,14 @@ def _remove(where: str) -> None:
         os.rename(where, dead)
     except OSError:
         return
-    shutil.rmtree(dead, ignore_errors=True)
+    try:
+        shutil.rmtree(dead, ignore_errors=True)
+    except KeyboardInterrupt:
+        # A stop that lands during the removal goes on only once the copy is
+        # gone. `stopping_on_sigterm` ignores a second SIGTERM, so this pass
+        # runs to its end.
+        shutil.rmtree(dead, ignore_errors=True)
+        raise
 
 
 def _discard(root: str, where: str) -> None:
@@ -155,11 +164,15 @@ def _discard(root: str, where: str) -> None:
     # not in the worktree, so a kill during git's deletion still leaves a
     # marked directory for the next reaper.
     try:
-        subprocess.run(["git", "-C", root, "worktree", "remove", "--force",
-                        "--force", os.path.join(where, "tree")], **quietly)
-    except FileNotFoundError:
-        pass
-    _remove(where)
+        try:
+            subprocess.run(["git", "-C", root, "worktree", "remove",
+                            "--force", "--force", os.path.join(where, "tree")],
+                           **quietly)
+        except FileNotFoundError:
+            pass
+    finally:
+        # A stop that lands in git's removal must not skip the copy's own.
+        _remove(where)
     # `prune` drops the entries of earlier runs' copies that a reaper removed.
     try:
         subprocess.run(["git", "-C", root, "worktree", "prune"], **quietly)
