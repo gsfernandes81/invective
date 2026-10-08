@@ -102,6 +102,20 @@ def project_root(start: str | None = None) -> str:
         here = up
 
 
+def repository_top(path: str) -> str | None:
+    """The nearest directory at or above *path* that is a repository's own,
+    one of `_REPOSITORY` in it (a worktree holds `.git` as a file); None
+    when there is none."""
+    here = os.path.abspath(path)
+    while True:
+        if any(os.path.exists(os.path.join(here, name)) for name in _REPOSITORY):
+            return here
+        up = os.path.dirname(here)
+        if up == here:
+            return None
+        here = up
+
+
 def _inside(path: str, root: str) -> str | None:
     """*path*, an absolute path, given from *root*; None when it is not
     inside it."""
@@ -233,11 +247,12 @@ def pytest_file_left_out(root: str, inifile: str | None) -> str | None:
 
 
 def pytest_reads(root: str, args: tuple[str, ...] | list[str] = (),
-                 within: bool = False) -> str | None:
+                 within: bool | str = False) -> str | None:
     """The settings file pytest reads for a run with *args*, as given from
     *root*: `_pytest_reads` from where pytest starts its search, the deepest
     directory every path among them is under, or *root* with none. *within*
-    ends the search at *root*'s top."""
+    ends the search: True at *root* itself, a path at that directory, a
+    top at or above *root*; False lets it go on to the filesystem's root."""
     dirs = []
     for arg in args:
         if arg.startswith("-"):
@@ -257,7 +272,10 @@ def pytest_reads(root: str, args: tuple[str, ...] | list[str] = (),
         # A path out of the project (on Windows, on another drive) is
         # refused on its own account; pytest's search is the one from here.
         start = os.path.abspath(root)
-    return _pytest_reads(start, os.path.abspath(root) if within else None)
+    if within is False:
+        return _pytest_reads(start, None)
+    return _pytest_reads(start, os.path.abspath(root if within is True
+                                                else within))
 
 
 def pytest_config_above(root: str, args: tuple[str, ...] | list[str] = ()
@@ -267,19 +285,26 @@ def pytest_config_above(root: str, args: tuple[str, ...] | list[str] = ()
     return pytest_file_left_out(root, pytest_reads(root, args))
 
 
-def pytest_settings_option(root: str, args: tuple[str, ...] | list[str] = ()
-                           ) -> tuple[str, ...]:
+def pytest_settings_option(root: str, args: tuple[str, ...] | list[str] = (),
+                           top: str | None = None) -> tuple[str, ...]:
     """The `-c` every run in a copy of *root* is given: the settings file a
     run of *root*'s own pytest with *args* reads, searched for no further
-    than *root*'s top, so that each run reads it and searches no further. A
-    run started in the copy would otherwise go on above the temporary
-    directory when the file is below the top or when pytest only falls back
-    on a `pyproject.toml`; what is above *root* is `pytest_config_above`'s
-    to refuse or let be. Empty when *root* holds no file pytest reads."""
-    read = pytest_reads(root, args, within=True)
+    than *top*, the top of the tree *root* is in, by default *root* itself,
+    so that each run reads it and searches no further. A run started in the
+    copy would otherwise go on above the temporary directory when the file
+    is below *root* or when pytest only falls back on a `pyproject.toml`.
+
+    A file above *root* but inside *top* is given with `..`, which pytest
+    resolves from its working directory, and every run then goes by it with
+    *top*'s side of the tree for its rootdir, as that tree's own pytest
+    does. What is above *top* is `pytest_config_above`'s to refuse or let
+    be. Empty when the tree holds no file pytest reads."""
+    read = pytest_reads(root, args, within=True if top is None else top)
     if read is None:
         return ()
-    return ("-c", relative_to_root(read, root))
+    if top is None:
+        return ("-c", relative_to_root(read, root))
+    return ("-c", os.path.relpath(read, root))
 
 
 def outside_refusal(left_out: str, root: str) -> Refusal:

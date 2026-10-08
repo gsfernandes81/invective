@@ -1155,6 +1155,47 @@ def test_a_ref_from_below_the_top_of_the_repository_is_that_directory(repo):
         assert sorted(os.listdir(where))[:2] == ["__init__.py", "gate.py"]
 
 
+@pytest.mark.parametrize("own_pyproject", [True, False])
+def test_a_ref_s_settings_above_the_project_in_its_repository_are_read(
+        tmp_path, monkeypatch, capsys, own_pyproject):
+    """At the ref, pytest's settings are the repository's `pytest.ini`,
+    above the project, where its xfail is strict; since then they have moved
+    into the project's own `pyproject.toml`. The ref's runs go by the ref's
+    file, which its tree holds, as the ref's own pytest does: the gate's one
+    `RAISE` mutant, which only a strict xfail fails, is killed. The ref's
+    project may have a `pyproject.toml` that sets nothing, or none at all."""
+    no_pytest_settings_above(tmp_path)
+    mono = os.path.realpath(tmp_path / "mono")
+    os.makedirs(mono)
+    git(mono, "init", "-q", "-b", "main")
+    project = "[project]\nname = 'sub'\nversion = '0'\n"
+    old = {"pytest.ini": "[pytest]\nxfail_strict = true\n",
+           "sub/pkg/__init__.py": "",
+           "sub/pkg/gate.py": ("def admit(age):\n"
+                               "    if age > 5:\n"
+                               "        raise ValueError('too old')\n"
+                               "    return age\n"),
+           "sub/tests/test_gate.py": ("import pytest\n"
+                                      "from pkg import gate\n"
+                                      "\n"
+                                      "@pytest.mark.xfail(raises=ValueError)\n"
+                                      "def test_too_old_is_refused():\n"
+                                      "    gate.admit(10)\n")}
+    if own_pyproject:
+        old["sub/pyproject.toml"] = project
+    commit(mono, old)
+    ref = git(mono, "rev-parse", "HEAD").strip()
+    os.remove(os.path.join(mono, "pytest.ini"))
+    commit(mono, {"sub/pyproject.toml": project + "\n[tool.pytest.ini_options]"
+                                                  "\nxfail_strict = true\n"})
+    monkeypatch.chdir(os.path.join(mono, "sub"))
+
+    assert mutate.main(["--target", "pkg/gate.py", "--tests", "tests",
+                        "--only", "RAISE", "--ref", ref]) == 0
+
+    assert "1/1 killed (100.0%)" in capsys.readouterr().out
+
+
 def test_every_write_of_the_module_gets_a_second_of_its_own(repo, monkeypatch):
     """The stale-bytecode verdict again, this time across the whole loop.
 

@@ -56,7 +56,8 @@ import pytest_invective
 from invective.accept import read as read_accepts
 from invective.config import (Config, load as load_config, outside_refusal,
                               project_root, pytest_config_above,
-                              pytest_settings_option, relative_to_root)
+                              pytest_settings_option, relative_to_root,
+                              repository_top)
 from invective.errors import Refusal
 from invective.tree import git_ref, working_tree
 
@@ -691,7 +692,12 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         if not os.path.isfile(path):
             raise Refusal("%s is not in the tree the mutants are made in" % src_rel)
         if options is None:
-            options = pytest_settings_option(where, tests)
+            # A ref's tree ends at its repository's top, which the worktree
+            # carries, so a settings file the ref keeps above the project is
+            # read as the ref's own pytest reads it. With no repository the
+            # search ends at *where*.
+            options = pytest_settings_option(where, tests,
+                                             top=repository_top(where))
         # A settings file named for every run by the run that chose it, which
         # the tree lacks (ignored by git, excluded, or not in the ref), fails
         # each run in pytest's config load: a baseline that reads as red when

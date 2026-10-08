@@ -351,6 +351,48 @@ def test_a_settings_file_above_the_top_is_given_to_no_run(tmp_path):
     assert config.pytest_settings_option(os.path.join(top, "m")) == ()
 
 
+def test_a_settings_file_above_the_project_inside_its_top_is_given_with_dots(
+        tmp_path):
+    """Searched for as far as a top given above the project, here the
+    repository's, the settings file found there is given from the project
+    with `..`; with no top given, the search ends at the project, whose
+    `pyproject.toml` pytest falls back on."""
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {"pytest.ini": "[pytest]\n", "m/.git": "",
+                     "m/sub/pyproject.toml": "[project]\n"})
+    sub = os.path.join(top, "m", "sub")
+
+    assert config.pytest_settings_option(sub) == ("-c", "pyproject.toml")
+    assert config.pytest_settings_option(
+        sub, top=os.path.join(top, "m")) == ("-c", "pyproject.toml")
+    os.rename(os.path.join(top, "pytest.ini"),
+              os.path.join(top, "m", "pytest.ini"))
+    assert config.pytest_settings_option(
+        sub, top=os.path.join(top, "m")) == ("-c", os.path.join("..",
+                                                                "pytest.ini"))
+    assert config.pytest_settings_option(sub) == ("-c", "pyproject.toml")
+
+
+@pytest.mark.parametrize("as_file", [True, False])
+def test_a_repository_s_top_is_the_nearest_directory_holding_its_own(
+        tmp_path, monkeypatch, as_file):
+    """`.git` is a file at a worktree's top; a directory with none on the
+    way up is in no repository. The marker is one only this test writes, so
+    that a repository the temporary directory is in does not answer."""
+    monkeypatch.setattr(config, "_REPOSITORY", (".invective-repository",))
+    top = os.path.realpath(tmp_path)
+    m = os.path.join(top, "m")
+    write_tree(top, {"m/sub/pkg/__init__.py": "", "other/pkg/__init__.py": ""})
+    if as_file:
+        write_tree(top, {"m/.invective-repository": "gitdir: elsewhere\n"})
+    else:
+        os.mkdir(os.path.join(m, ".invective-repository"))
+
+    assert config.repository_top(os.path.join(m, "sub", "pkg")) == m
+    assert config.repository_top(m) == m
+    assert config.repository_top(os.path.join(top, "other", "pkg")) is None
+
+
 def test_the_home_directory_is_not_offered_as_where_to_run_from(
         tmp_path, monkeypatch):
     """Running from the home directory would copy all of it into the temporary
