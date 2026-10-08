@@ -58,7 +58,7 @@ tests:     tests/test_gate.py
 baseline:  green in 0.4s
 mutants:   6
 
-  SURVIVED  src/pkg/gate.py:4  And -> Or          if member and age >= 65:
+  SURVIVED  src/pkg/gate.py:4  And -> Or                    if member and age >= 65:
 
 5/6 killed (83.3%), 1 survived
 ```
