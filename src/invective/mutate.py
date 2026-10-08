@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import copy
+import difflib
 import importlib.util
 import json
 import os
@@ -45,13 +47,16 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import NamedTuple
+import warnings
+from typing import NamedTuple, NoReturn
 
 from pytest import ExitCode
 
 import pytest_invective
 from invective.accept import read as read_accepts
-from invective.config import Config, load as load_config
+from invective.config import (Config, check_pytest_settings,
+                              load as load_config, project_root,
+                              relative_to_root)
 from invective.errors import Refusal
 from invective.tree import git_ref, working_tree
 
@@ -70,6 +75,10 @@ TIMED_OUT = -1  # invective: accept[equivalent: 1 -> 2] any code pytest cannot e
 #: How long the unmutated selection may take, so that a suite that hangs ends
 #: the campaign instead of holding it for ever.
 BASELINE_TIMEOUT = 600  # invective: accept[equivalent: 600 -> 601] any cap far above a suite's time serves
+
+#: The clause a refusal of a target the tests import from outside the copy is
+#: known by, here and in the sweep, which reads it in the engine's output.
+UNREACHED = "so no mutant of it can reach the tests"
 
 
 class Verdict(NamedTuple):
@@ -90,6 +99,10 @@ class Verdict(NamedTuple):
     killer: str
     #: The node ids of the selection the run could not find.
     missing: tuple[str, ...] = ()
+    #: The file the tests loaded the target from when it was not the copy's,
+    #: `""` otherwise. A mutant is written in the copy, so a run that says
+    #: this is a run no mutant can reach, and its verdict counts for nothing.
+    elsewhere: str = ""
 
 
 #: pytest can colour its output even when stdout is a pipe, and the tail is
@@ -121,10 +134,10 @@ _CMP_SWAP = {
 def _sites(tree: ast.AST) -> list[tuple[str, ast.AST, str]]:
     """Every place this file can be broken, as (kind, node, what changed).
 
-    Collected off the ORIGINAL tree so a site's reported line number is the
-    line somebody can go and look at. The mutation itself is applied to a deep
-    copy, because `ast.unparse` rewrites the whole file and a mutant's own line
-    numbers mean nothing.
+    Collected off the ORIGINAL tree, so a site's reported line number is the
+    line somebody can go and look at, and its node's position is the span of
+    the source that `_text_of` edits. The mutation itself is applied to a
+    copy.
     """
     found: list[tuple[str, ast.AST, str]] = []
     for node in ast.walk(tree):
@@ -155,8 +168,18 @@ def _sites(tree: ast.AST) -> list[tuple[str, ast.AST, str]]:
     return found
 
 
+#: 3.14's t-string interpolation, `None` before it.
+_INTERPOLATION = getattr(ast, "Interpolation", None)
+
+
 def _apply(tree: ast.AST, index: int) -> ast.AST:
-    """A copy of *tree* with site *index* broken, and nothing else touched."""
+    """A copy of *tree* with site *index* broken, and nothing else touched.
+
+    The edits here and in `_mutated_node` are the same by construction, one
+    made in the whole tree and one in the node alone, and must stay so:
+    `_text_of`'s comparison of the two trees is what catches a drift, by
+    writing every mutant as the whole file.
+    """
     clone = copy.deepcopy(tree)
     # Walk the clone in the same order, so the Nth site of the clone is the Nth
     # site of the original. `ast.walk` is deterministic (a BFS over a fixed
@@ -179,7 +202,44 @@ def _apply(tree: ast.AST, index: int) -> ast.AST:
             node.value = node.value + 1                        # type: ignore[attr-defined]
     elif kind == "RAISE":
         clone = _ToPass(node).visit(clone)                     # type: ignore[arg-type]
+    # **A t-string's interpolation carries its expression's source text**
+    # (3.14's `Interpolation.str`, the template's `.expression` at run
+    # time), which the parser fills and `ast.unparse` writes the
+    # interpolation back from. An edit inside one leaves that text naming the
+    # original expression, so it is brought in step for every interpolation
+    # the edited node sits in, and for no other: an untouched `{x+1}` keeps
+    # its own text, as the splice keeps it. A `raise` is a statement, never
+    # inside one, so the loop finds nothing for it. Innermost first: the BFS
+    # of `ast.walk` visits every ancestor before its descendants, and an
+    # outer interpolation's text is written from the inner one's, so the
+    # reverse rebuilds it from text already brought in step.
+    if _INTERPOLATION is not None:
+        edited = node.operand if kind == "NOT" else node       # type: ignore[attr-defined]
+        for outer in reversed(list(ast.walk(clone))):
+            if (isinstance(outer, _INTERPOLATION)
+                    and any(m is edited for m in ast.walk(outer.value))):
+                outer.str = ast.unparse(outer.value)
     return ast.fix_missing_locations(clone)
+
+
+def _dump(tree: ast.AST) -> str:
+    """*tree* as `ast.dump` gives it, with each t-string interpolation's
+    source text written as `ast.unparse` writes its expression.
+
+    The text is the source's spelling of an expression the tree already
+    holds, so two trees that differ only there are the same program up to
+    its spacing: a splice of `x+1` to `x+2` parses to the text `x+2`, where
+    `_apply` can only give `ast.unparse`'s `x + 2`. An outer interpolation's
+    text is written from its inner one's, so the inner is normalised first,
+    as `_apply`'s refresh does.
+    """
+    if _INTERPOLATION is None:
+        return ast.dump(tree)
+    tree = copy.deepcopy(tree)
+    for node in reversed(list(ast.walk(tree))):
+        if isinstance(node, _INTERPOLATION):
+            node.str = ast.unparse(node.value)
+    return ast.dump(tree)
 
 
 class _Unwrap(ast.NodeTransformer):
@@ -201,6 +261,176 @@ class _ToPass(ast.NodeTransformer):
 
     def visit_Raise(self, node: ast.Raise):
         return ast.Pass() if node is self.target else node
+
+
+# --------------------------------------------------------------------------
+# **A mutant is the file with one span edited, not the file unparsed.** The
+# whole file through `ast.unparse` drops every comment, re-wraps every line
+# and moves every line number: a traceback in a killed run points at lines
+# the source does not have, a diff of the mutant is the whole file, and a
+# test that reads the module's own source (`inspect.getsource`, a check on a
+# file's text, a line-number assertion) fails on every mutant for the
+# formatting and not the mutation, a false kill of all of them. So only the
+# site's span is rewritten, and the rest of the file is its own text.
+
+#: The three endings Python's tokenizer counts as a line break, and nothing
+#: else: not `str.splitlines`, which also splits on `\f`, `\v`, `\x1c`-`\x1e`,
+#: `\x85` and `\u2028`, none of which moves a `lineno`. Captured, so a split
+#: gives the lines at the even indexes and their endings at the odd ones.
+_LINE_END = re.compile(r"(\r\n|\r|\n)")
+
+
+def _report_lines(text: str) -> list[str]:
+    """*text*'s lines as the report numbers them, without their endings.
+
+    A file that ends in a line break splits into one more piece than it has
+    lines, an empty one after the last break, which is no line of the file:
+    a diff would show it as a context line the file does not have, or as a
+    blank line taken out where `ast.unparse` writes no final break.
+    """
+    parts = _LINE_END.split(text)[::2]
+    return parts[:-1] if parts and parts[-1] == "" else parts
+
+
+#: The kinds whose replacement is an expression. Parentheses make one safe
+#: whatever its parent's precedence, which the bare text is not always: the
+#: inner `and` of `a and b or c` turned to `or` must read `(a or b) or c`,
+#: since `a or b or c` is one flat `or`, a different tree with the same
+#: meaning. Bare first all the same, so the usual survivor's diff reads
+#: `if member or age >= 65:` and not `if (member or age >= 65):`. A `CONST`
+#: is never wrapped: a literal binds tightest already, and a parenthesised
+#: key in a `case {1: x}` pattern is a syntax error. `RAISE` is a statement.
+_WRAPPED = frozenset(("CMP", "BOOL", "NOT"))
+
+
+def _mutated_node(tree: ast.AST, index: int) -> tuple[str, ast.AST, ast.AST]:
+    """Site *index*: its kind, its node in *tree*, and a copy of that node
+    alone with the kind's edit made to it.
+
+    The edits here and in `_apply` are the same by construction and must
+    stay so: `_text_of`'s comparison of the two trees is what catches a
+    drift, by writing every mutant as the whole file.
+    """
+    kind, node, _what = _sites(tree)[index]
+    edited = copy.deepcopy(node)
+    if kind == "CMP":
+        edited.ops[0] = _CMP_SWAP[type(edited.ops[0])]()        # type: ignore[attr-defined]
+    elif kind == "BOOL":
+        edited.op = ast.Or() if isinstance(edited.op, ast.And) else ast.And()   # type: ignore[attr-defined]
+    elif kind == "NOT":
+        edited = edited.operand                                # type: ignore[attr-defined]
+    elif kind == "CONST":
+        if edited.value is True or edited.value is False:      # type: ignore[attr-defined]
+            edited.value = not edited.value                    # type: ignore[attr-defined]
+        else:
+            edited.value = edited.value + 1                    # type: ignore[attr-defined]
+    elif kind == "RAISE":
+        edited = ast.Pass()
+    return kind, node, edited
+
+
+def _splice(source: str, node: ast.AST, head: str, tail: str = "") -> str:
+    """*source* with the span of *node* replaced by *head*, then the line
+    endings the span held that *head* does not, then *tail*.
+
+    The endings are given back so that every line after the node keeps its
+    number: between *head* and *tail*, which is inside the parenthesis of a
+    wrapped expression, where a line break is a continuation, and after
+    `pass`, since a blank line is legal at any indentation. They are the
+    span's own endings, not the file's first, given back for the line breaks
+    *head* lacks; a line break *head* carries itself is `\\n` whatever the
+    file's ending, as in a 3.14 interpolation whose expression spans lines,
+    which `ast.unparse` writes from the source text the tokenizer stored.
+
+    Positions are the parser's: `col_offset` and `end_col_offset` count
+    BYTES of the UTF-8 line, so the edit is made on bytes. `end_col_offset`
+    never reaches a `\\r` of a `\\r\\n` ending: the tokenizer had translated
+    it before the positions were assigned.
+    """
+    pieces = _LINE_END.split(source)
+    lines, ends = pieces[::2], pieces[1::2]
+    starts = [0]
+    for line, end in zip(lines, ends):
+        starts.append(starts[-1] + len(line.encode("utf-8")) + len(end))
+    first, last = node.lineno, node.end_lineno                 # type: ignore[attr-defined]
+    a = starts[first - 1] + node.col_offset                    # type: ignore[attr-defined]
+    b = starts[last - 1] + node.end_col_offset                 # type: ignore[attr-defined]
+    kept = "".join(ends[first - 1 + head.count("\n"):last - 1])
+    data = source.encode("utf-8")
+    return (data[:a] + (head + kept + tail).encode("utf-8") + data[b:]
+            ).decode("utf-8")
+
+
+def _reparsed(text: str) -> ast.AST:
+    """*text* parsed only to be compared, silently: a warning it raises is
+    the target's own, which the parse that found its sites has said once."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return ast.parse(text)
+
+
+def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
+    """The mutant's text, and whether it is *source* edited inside the
+    site's span only (True) or the whole file unparsed (False).
+
+    **The splice is checked, not trusted.** Its result is parsed and
+    compared, as a tree, with the mutant `_apply` makes, and must have the
+    source's line count: so no quirk of a Python version's positions or of
+    `ast.unparse` can hand the tests a mutant that is valid and not the one
+    the report describes. When the bare text fails that, an expression is
+    tried once more in parentheses; when that fails too, or for any other
+    exception from the attempt (an out-of-range position, a splice that
+    does not parse, a null byte's `ValueError`), the mutant is the whole
+    file unparsed (`ast.unparse` of the mutated tree), and the report says
+    so beside it. A refusal would stop a campaign for one awkward site, and
+    skipping the site would make the count of mutants depend on the
+    interpreter. The whole file is checked the same way, and one that does
+    not parse back to the mutant is a `Refusal`: written anyway, it would
+    be another program than the report names, most likely the original.
+
+    **Before 3.12 `ast.unparse` cannot write some f-strings at all**: a
+    string holding a character `repr` escapes, inside an f-string's
+    expression, raises `ValueError`, since that grammar has no backslash
+    there. The node's own text is then not tried, and when the whole file
+    cannot be written either, this is a `Refusal`: there is no text of this
+    mutant to hand the tests.
+    """
+    kind, node, edited = _mutated_node(tree, index)
+    whole = _apply(tree, index)
+    want = _dump(whole)
+    forms = []
+    try:
+        text = ast.unparse(edited)
+    except ValueError:
+        pass
+    else:
+        forms.append((text, ""))
+        if kind in _WRAPPED:
+            forms.append(("(" + text, ")"))
+    for head, tail in forms:
+        try:
+            out = _splice(source, node, head, tail)
+            if (_dump(_reparsed(out)) == want
+                    and len(_LINE_END.split(out)) == len(_LINE_END.split(source))):
+                return out, True
+        except Exception:
+            pass
+    try:
+        text = ast.unparse(whole)
+    except ValueError as exc:
+        raise Refusal("cannot be written inside its node's span, and this "
+                      "Python's ast.unparse cannot write the file: %s" % exc
+                      ) from exc
+    try:
+        same = _dump(_reparsed(text)) == want
+    except (SyntaxError, ValueError):
+        # `ast.unparse` can write what the parser then rejects: 3.14's
+        # t-string debug field around a bare lambda.
+        same = False
+    if not same:
+        raise Refusal("cannot be written inside its node's span, and the "
+                      "file unparsed is not this mutant")
+    return text, False
 
 
 # --------------------------------------------------------------------------
@@ -271,12 +501,107 @@ def _stop(proc: subprocess.Popen) -> None:
         proc.wait()
 
 
+class _Terminated(KeyboardInterrupt):
+    """A SIGTERM, raised where it landed. A `KeyboardInterrupt`, so that
+    every path that unwinds on a ^C -- the live run stopped with its group,
+    the copy removed, pytest's own session ended as interrupted -- unwinds on
+    it unchanged. *signum* is the signal, for the exit by it at the end."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+@contextlib.contextmanager
+def stopping_on_sigterm():
+    """A SIGTERM during the body raises `_Terminated` in it, once.
+
+    Without a handler the process dies where it stands and no `finally`
+    runs, so a copy of the project stays in the temporary directory. With
+    one that raises, the signal unwinds exactly as a ^C does: it interrupts
+    the `communicate` that waits on a run (the syscall is retried only when
+    the handler returns), the run's group is stopped on the way out, and
+    the copy is removed. **Once**: a second SIGTERM while the copy is being
+    removed would raise inside that removal and cut it short, so later ones
+    are ignored until the previous handler is back. SIGKILL remains the way
+    to stop a cleanup that hangs, and the copy's marker covers what that
+    leaves. A SIGTERM ignored on entry stays ignored, and no handler is
+    installed. Windows never delivers SIGTERM (`TerminateProcess` ends a
+    process outright), so there the handler is installed and never runs.
+    """
+    # The shell's `trap '' TERM` asked for that; the marker covers the copy
+    # of a run then killed outright.
+    if signal.getsignal(signal.SIGTERM) is signal.SIG_IGN:
+        yield
+        return
+    fired = False
+
+    def handler(signum, frame):
+        nonlocal fired
+        if fired:
+            return
+        fired = True
+        raise _Terminated(signum)
+
+    try:
+        previous = signal.signal(signal.SIGTERM, handler)
+    except ValueError:
+        # Not the main thread, the only one a handler can be set from: the
+        # signal keeps its default, and the marker is what covers the copy.
+        yield
+        return
+    try:
+        yield
+    finally:
+        # `None` is a handler Python did not install (an embedding host's, a
+        # C extension's), which it cannot put back: `signal.signal` refuses
+        # it, and the error would replace whatever is unwinding.
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _exit_by(exc: _Terminated) -> NoReturn:
+    """End this process by the signal *exc* carries, as it would have ended
+    without a handler. A shell, `timeout(1)` or CI's cancel then sees the
+    status it expects of a process it terminated (143 in a shell), and not an
+    exit code that reads as a verdict; as a pid namespace's init, which the
+    signal cannot end, it exits with 128 + the signal's number. What was
+    printed is written out first: the signal ends the process without
+    flushing a buffer, and a run's output sent to a file or a pipe is
+    buffered."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            # A standard stream closed when the process started: nothing
+            # was written to it.
+            continue
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            # A closed or broken stream must not replace the exit.
+            pass
+    signal.signal(exc.signum, signal.SIG_DFL)
+    os.kill(os.getpid(), exc.signum)
+    # Reached only where the kernel ignores a signal a process sends itself
+    # at its default action: a pid namespace's init, such as a container's
+    # entry point. 128 + N is the status a shell reports for a process the
+    # signal ended, and CPython's own exit on an uncaught KeyboardInterrupt
+    # falls back to it the same way.
+    raise SystemExit(128 + exc.signum)
+
+
 def run_tests(where: str, tests: list[str], timeout: float,
-              selection: str | None = None, options: tuple[str, ...] = ()
-              ) -> Verdict:
+              selection: str | None = None, options: tuple[str, ...] = (),
+              target: str = "") -> Verdict:
     """The selection, in *where*: *tests* as pytest arguments, and when
     *selection* names a file of node ids, one a line, those tests and no
-    others. *options* come before invective's own.
+    others, *tests* then deciding only where pytest's search for its
+    settings starts. *options* come after `-p pytest_invective` and before
+    the rest of invective's own: the plugin notes which modules were loaded
+    before it, and a forwarded `-p` plugin that imports the target has to
+    come after that note for the file it loaded to be the plugin's to name.
+    *target*, the mutated module's path from the top of *where*, is what the
+    plugin checks the tests loaded from the copy; none, and it checks
+    nothing.
 
     **No `-q` here, and that is load-bearing.** The run's working directory is
     the copy, so it reads the project's own pytest
@@ -296,12 +621,16 @@ def run_tests(where: str, tests: list[str], timeout: float,
         env = {**os.environ, pytest_invective.VERDICT: verdict}
         if selection is not None:
             env[pytest_invective.SELECTION] = selection
+            env[pytest_invective.TYPED] = str(len(tests))
+        if target:
+            env[pytest_invective.TARGET] = target
         # `-p no:randomly` keeps the order, and so `-x`'s first failure, the
         # same from run to run; `-p no:` of a plugin that is not installed is
-        # a no-op.
+        # a no-op. The `no:` exclusions and `-n 0` are order-free: pytest
+        # applies a `no:` before it imports anything.
         proc = subprocess.Popen(
-            [sys.executable, "-m", "pytest", *options, "-x", "-rf",
-             "-p", "no:randomly", *_NO_WORKERS, "-p", pytest_invective.__name__,
+            [sys.executable, "-m", "pytest", "-p", pytest_invective.__name__,
+             *options, "-x", "-rf", "-p", "no:randomly", *_NO_WORKERS,
              "--no-header", *tests],
             cwd=where, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env, **_OWN_GROUP)
@@ -323,41 +652,55 @@ def run_tests(where: str, tests: list[str], timeout: float,
             with open(verdict, encoding="utf-8") as fh:
                 said = json.load(fh)
             killer, missing = said["killer"], tuple(said["missing"])
+            # `.get`: the field may be absent from the verdict of a run cut short.
+            elsewhere = said.get("elsewhere", "")
         except (OSError, ValueError, KeyError):
             # A run that ended before its session did -- pytest could not
             # start, or a mutant broke the plugin itself -- names no test.
-            killer, missing = "", ()
+            killer, missing, elsewhere = "", (), ""
     # Both streams: pytest says why it could not start on stderr.
     out = _ANSI.sub("", stdout + stderr)
     # invective: accept[equivalent: 400 -> 401] any length that holds pytest's last words serves
     return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer,
-                   missing)
+                   missing, elsewhere)
 
 
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
-           limit: int | None, say=print, tree=None,
-           selection: list[str] | None = None,
+           limit: int | None, say=print, ref: str | None = None,
+           exclude: tuple[str, ...] = (), selection: list[str] | None = None,
            options: tuple[str, ...] = ()) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
-    The mutants are written in *tree*, a context manager giving a directory
-    that stands for *root* (`tree.working_tree` or `tree.git_ref`); by
-    default a copy of *root* as it stands. *selection* is a list of node ids
-    to run instead of whatever *tests* collects, and *options* go to every
-    run's pytest. *say* receives each line of progress as it happens.
+    The mutants are written in a copy of *root* as it stands, *exclude* left
+    out of it (`tree.working_tree`), or with *ref* in a worktree of that
+    commit (`tree.git_ref`). *selection* is a list of node ids to run
+    instead of whatever *tests* collects, *tests* then only steering
+    pytest's search for its settings, and *options* go to every run's
+    pytest. A campaign whose runs would not go by the project's pytest
+    settings is refused (`config.check_pytest_settings`). *say* receives
+    each line of progress as it happens.
     """
     try:
-        src_rel = os.path.relpath(os.path.abspath(target), root)
+        src_rel = relative_to_root(target, root)
     except ValueError:
-        # Windows: the target is on another drive than the project.
-        src_rel = os.pardir
-    if src_rel == os.pardir or src_rel.startswith(os.pardir + os.sep):
-        # Joined to the copy, this path leads out of it, and a mutant would
-        # be written over whatever file it lands on.
-        raise Refusal("%s is outside the project at %s" % (target, root))
+        # Joined to the copy, this path would lead out of it, and a mutant
+        # would be written over whatever file it lands on.
+        raise Refusal("%s is outside the project at %s"
+                      % (target, root)) from None
 
-    with tempfile.TemporaryDirectory(prefix="invective-selection-") as box, \
-            (tree if tree is not None else working_tree(root)) as where:
+    # The handler lives exactly as long as the copy: here and not in the
+    # commands' entry points, so `pytest --mutate`, which has none, gets it
+    # too, and a plain pytest with the plugin installed never does.
+    with stopping_on_sigterm(), \
+            tempfile.TemporaryDirectory(prefix="invective-selection-") as box, \
+            (git_ref(root, ref) if ref
+             else working_tree(root, exclude)) as where:
+        # Settled before anything is said of the campaign: a run that could
+        # not go by the project's settings is refused as itself.
+        # A run given its settings file with `-c`, as `pytest --mutate`
+        # forwards one, searches for none.
+        if "-c" not in options:
+            check_pytest_settings(root, where, tests, ref=bool(ref))
         listed = None
         if selection is not None:
             # One node id a line, in a file of invective's own: a selection
@@ -366,6 +709,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             with open(listed, "w", encoding="utf-8") as fh:
                 fh.write("".join(node + "\n" for node in selection))
         say("copy:      %s" % where)
+        say("project:   %s" % root)
         say("target:    %s" % src_rel)
         say("tests:     %s" % (" ".join(tests) if selection is None else
                                "%d collected by pytest" % len(selection)))
@@ -382,9 +726,15 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         if not real.startswith(os.path.join(os.path.realpath(where), "")):
             raise Refusal("%s reaches %s through a link, outside the copy the "
                           "mutants are written in" % (src_rel, real))
-        with open(path, encoding="utf-8") as fh:
+        # **`newline=""`, the mirror of `_write`'s.** A mutant must differ
+        # from the file only at the mutation, so it is built from the file's
+        # own line endings: read with the default's translation, every `\r\n`
+        # of a Windows checkout would be written back as `\n`, and the mutant
+        # would differ at every line. The one line rule is `_LINE_END`'s, so
+        # a line of the report is a line the parser counted.
+        with open(path, encoding="utf-8", newline="") as fh:
             source = fh.read()
-        lines = source.split("\n")
+        lines = _report_lines(source)
         tree_ = ast.parse(source)
         accepts = read_accepts(source, src_rel)
         every = [(n.lineno, w) for _k, n, w in _sites(tree_)]   # type: ignore[attr-defined]
@@ -395,7 +745,37 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                           % (src_rel, ",".join(only or sorted(OPERATORS))))
 
         def run(timeout):
-            return run_tests(where, tests, timeout, listed, options)
+            got = run_tests(where, tests, timeout, listed, options,
+                            src_rel.replace(os.sep, "/"))
+            if got.elsewhere:
+                # **The tests did not load the copy's file, so no mutant
+                # written there can reach them**, and every one would
+                # survive, silently. An editable install's `.pth` line, or a
+                # `sys.path` entry, puts the project's own `src` on the path;
+                # the copy's is there only when something puts it there,
+                # since `python -m pytest` adds the directory it started in,
+                # the copy's top, and that does not reach a `src/`. pytest's
+                # `pythonpath` setting does: each run reads it from the
+                # settings file in the copy, and so from the copy's rootdir,
+                # and pytest 8.4 and later apply it before loading any
+                # plugin, which a conftest comes after. The baseline is
+                # where this fires; every run is checked because the check
+                # is one field and this is the one place it is read.
+                raise Refusal((
+                    "%s was imported from %s, not from the copy at %s, "
+                    + UNREACHED + ". An editable install, "
+                    "or a sys.path entry, points the tests at the project "
+                    "itself; pytest's `pythonpath` setting naming the "
+                    "directory the package is in (`src`), or a conftest.py "
+                    "that puts the directory of the copy's own `src` first "
+                    "on sys.path, computed from its own __file__, makes them "
+                    "import the copy. A plugin pytest loads before any "
+                    "conftest (an entry point, PYTEST_PLUGINS, a -p in "
+                    "addopts) that imports it first is ahead of a conftest; "
+                    "only the `pythonpath` setting, on pytest 8.4 or later, "
+                    "is ahead of such a plugin.")
+                    % (src_rel, got.elsewhere, where))
+            return got
 
         started = time.time()
         first = run(BASELINE_TIMEOUT)
@@ -454,9 +834,13 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # differs from the copy by exactly one edit.
         clock = int(time.time())
         for n, (idx, kind, node, what) in enumerate(sites, 1):
-            _write(path, ast.unparse(_apply(tree_, idx)), clock + n)
-            got = run(budget)
             line = node.lineno                                  # type: ignore[attr-defined]
+            try:
+                written, spliced = _text_of(source, tree_, idx)
+            except Refusal as exc:
+                raise Refusal("%s:%d %s %s" % (src_rel, line, what, exc)) from exc
+            _write(path, written, clock + n)
+            got = run(budget)
             text = lines[line - 1].strip()
             if (got.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED)
                     and not got.killer):
@@ -470,7 +854,27 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "a kill would score a run that never ran a test.\n%s"
                     % (src_rel, line, what, got.code, got.tail))
             covering = [a for a in accepts if a.covers(line, what)]
-            mutant = {"kind": kind, "line": line, "change": what}
+            # The edit as a reader sees it, for every entry the mutant makes:
+            # kind, line and change find a site but do not show what a `NOT`
+            # or `RAISE` across several lines became, or which of two sites on
+            # one line this was. Split by `_LINE_END`, as the splice and the
+            # report's `line` are, so the `@@` numbers are the report's lines,
+            # no `\r` is left on a line, and a `\r\n` file's diff is the
+            # edited lines alone, both sides having lost their endings alike.
+            # The headers spell the path with `/` on every platform, as git
+            # writes a diff and as the report's node ids are spelt: they are
+            # part of a text another tool reads, unlike `target`, which is a
+            # path on this machine and keeps its native separators.
+            shown = src_rel.replace(os.sep, "/")
+            diff = "\n".join(difflib.unified_diff(
+                lines, _report_lines(written), fromfile=shown,
+                tofile=shown + " (mutant)", lineterm=""))
+            mutant = {"kind": kind, "line": line, "change": what, "diff": diff}
+            if not spliced:
+                # Said beside the entry and not only in the closing lines,
+                # because this is the mutant whose line numbers are not the
+                # file's and whose diff is the whole file.
+                mutant["whole_file"] = True
             if got.ok and covering:
                 accepted.append({**mutant, "source": text,
                                  "reason": covering[0].reason,
@@ -551,6 +955,16 @@ def summary(report: dict) -> list[str]:
         # of this kind is not a well-tested file.
         lines.append("           %d of the kills were collection or internal "
                      "errors, not a test failing" % report["broken"])
+    # `.get`: the key is only there when the fallback was used, over the
+    # three lists a report already has.
+    whole = sum(e.get("whole_file", False) for e in
+                report["survivors"] + report["kills"] + report["accepted"])
+    if whole:
+        # Said out loud: for these, and these alone, a traceback's line
+        # numbers are the reformatted file's and not the source's.
+        lines.append("           %d of the mutants could not be written "
+                     "inside their node's span and were written as a "
+                     "reformatted file" % whole)
     return lines
 
 
@@ -574,18 +988,48 @@ def gate(report: dict, config: Config) -> list[str]:
     return failures
 
 
-def main(argv: list[str] | None = None) -> int:
+def rewrite_tests(args: list[str], cwd: str, root: str) -> list[str]:
+    """pytest's arguments as typed in *cwd*, each path given from *root*,
+    where every run starts.
+
+    pytest's arguments are not all paths, so one is taken for a path only
+    when its text before any `::` names a file or directory that is there:
+    an option, an expression or a node id of a file that is not there is
+    passed as typed, and pytest says what it makes of it. A path that leads
+    out of the project is given whole, so it still names the place it named.
+    """
+    def place(text):
+        path, sep, rest = text.partition("::")
+        if not path or not os.path.exists(os.path.join(cwd, path)):
+            return text
+        where = os.path.abspath(os.path.join(cwd, path))
+        try:
+            where = relative_to_root(where, root)
+        except ValueError:
+            pass
+        return where + sep + rest
+
+    return [place(arg) for arg in args]
+
+
+def parser() -> argparse.ArgumentParser:
+    """`invective run`'s command line, apart from `main` so a test can read it."""
     ap = argparse.ArgumentParser(prog="invective run", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", required=True, help="the module to break")
     ap.add_argument("--tests", required=True, nargs="+",
-                    help="pytest arguments, relative to the current directory, "
-                         "the project's top level")
+                    help="pytest arguments, their paths relative to the "
+                         "current directory")
     ap.add_argument("--only", help="comma-separated: %s" % ",".join(sorted(OPERATORS)))
     ap.add_argument("--limit", type=int, help="cap the number of mutants")
     ap.add_argument("--json", help="write the report here as well")
     ap.add_argument("--ref", help="run on this git commit, branch or tag "
                                   "instead of the files as they stand")
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = parser()
     args = ap.parse_args(argv)
 
     only = [k.strip().upper() for k in args.only.split(",")] if args.only else None
@@ -594,16 +1038,22 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             print("unknown operator(s): %s" % ", ".join(unknown), file=sys.stderr)
             return 2
-    root = os.getcwd()
+    # **The project's top, from anywhere inside it.** Every run starts at
+    # the top of the copy, so the tests' paths are rewritten to be read from
+    # there; the target needs nothing, as `mutate` reads it from here.
+    root = project_root()
+    tests = rewrite_tests(args.tests, os.getcwd(), root)
     try:
         config = load_config(root)
-        tree = (git_ref(root, args.ref) if args.ref
-                else working_tree(root, config.exclude))
-        report = mutate(root, args.target, args.tests, only, args.limit,
-                        tree=tree)
+        report = mutate(root, args.target, tests, only, args.limit,
+                        ref=args.ref, exclude=config.exclude)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
+    except _Terminated as exc:
+        # The copy is gone and the run's group with it; now die by the
+        # signal, as the process would have without the handler.
+        _exit_by(exc)
 
     print()
     for line in summary(report):

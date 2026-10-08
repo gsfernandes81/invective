@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging.handlers
 import os
+import queue
+import re
 import subprocess
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from conftest import commit, write_tree
+from conftest import (FILES, MARKERLESS, MONOREPO, WORKSPACE, commit,
+                      monorepo, no_pytest_settings_above, write_tree)
 
 #: This checkout's own `src`, ahead of any installed copy, so that the pytest
 #: started here loads the plugin under test.
@@ -144,6 +148,8 @@ def test_a_test_whose_path_is_not_ascii_is_found(repo, tmp_path):
 
 def test_a_test_outside_the_project_is_refused(repo, tmp_path):
     """No run at the last commit has it."""
+    # pytest starts its search above the project, where the test is.
+    no_pytest_settings_above(tmp_path)
     outside = tmp_path / "outside" / "test_outside.py"
     outside.parent.mkdir()
     outside.write_text("def test_outside():\n    pass\n", encoding="utf-8")
@@ -153,6 +159,233 @@ def test_a_test_outside_the_project_is_refused(repo, tmp_path):
     assert done.returncode == 2
     assert "is outside the project" in done.stdout
     assert "copy:" not in done.stdout
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt",
+                    reason="a symbolic link without privileges")
+def test_a_test_typed_through_a_link_to_the_project_is_the_project_s(
+        tree, tmp_path):
+    """Given an absolute path through a link to the project, as every one is
+    from a logical `$PWD` entered through it, pytest keeps the test's path
+    as typed while the project's top is the real directory: the test is the
+    project's own, given from its top, and not one outside it."""
+    link = tmp_path / "link"
+    os.symlink(tree, link)
+
+    done = pytest_in(str(link), "--mutate=pkg/gate.py", "--mutate-only",
+                     "RAISE", str(link / "pkg" / "tests" / "test_gate.py"))
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed (100.0%)" in done.stdout
+
+
+def test_mutate_from_a_subdirectory_copies_the_whole_project(repo, tmp_path):
+    """Started in `pkg`, the run copies the project from its top. A copy of
+    `pkg` alone holds no `pkg` to import, so its baseline is red.
+
+    The project's `pythonpath` puts its top on `sys.path`, which `python -m`
+    does only for the directory pytest is started in.
+    """
+    write_tree(repo, {"pyproject.toml":
+                      "[tool.pytest.ini_options]\npythonpath = ['.']\n"})
+    out = tmp_path / "reports.json"
+
+    done = pytest_in(os.path.join(repo, "pkg"), "--mutate", "gate.py",
+                     "--mutate-only", "RAISE", "--mutate-json", str(out),
+                     "tests/test_gate.py")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    (gate,) = json.loads(out.read_text(encoding="utf-8"))
+    assert gate["target"] == _p("pkg/gate.py")
+    assert gate["tests"] == [MINOR, ADULT]
+    assert (gate["mutants"], gate["killed"]) == (1, 1)
+
+
+def test_a_project_without_a_marker_inside_a_repository_is_its_own_top(
+        tmp_path):
+    """A repository's directory is no project's top by itself: a service of
+    a monorepo with no marker is copied from where pytest was started, where
+    its tests import it, and not as the whole repository."""
+    no_pytest_settings_above(tmp_path)
+    mr = os.path.realpath(tmp_path / "mr")
+    write_tree(mr, {".git/HEAD": "ref: refs/heads/main\n", **MARKERLESS})
+    api = os.path.join(mr, "api")
+
+    done = pytest_in(api, "--mutate", "app/gate.py", "--mutate-only",
+                     "RAISE", "tests")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "project:   %s" % api in done.stdout
+    assert "1/1 killed (100.0%)" in done.stdout
+
+
+def test_mutate_whose_pytest_settings_are_above_the_project_is_refused(
+        tmp_path):
+    """This pytest reads the workspace's settings, a copy of the member `m`
+    would not have them, and the mutant only they kill would survive. From
+    the top, the copy holds them."""
+    top = os.path.realpath(tmp_path / "ws")
+    write_tree(top, WORKSPACE)
+
+    done = pytest_in(os.path.join(top, "m"), "--mutate", "pkg/gate.py",
+                     "--mutate-only", "RAISE", "tests/test_gate.py")
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "refused: pytest reads %s, which is above the project's top" % (
+        os.path.join(top, "pyproject.toml")) in done.stdout
+    assert "copy:" not in done.stdout
+
+    done = pytest_in(top, "--mutate", "m/pkg/gate.py", "--mutate-only",
+                     "RAISE", "m/tests/test_gate.py")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed (100.0%)" in done.stdout
+
+
+def test_a_settings_file_given_outside_the_project_is_read_by_every_run(
+        tmp_path):
+    """`-c` skips pytest's search, so the file given is what this run goes
+    by, outside the project too: every mutant's run is given the same file,
+    whose strict xfail alone kills the mutant."""
+    project = os.path.realpath(tmp_path / "proj")
+    write_tree(project, {rel: text for rel, text in BELOW_THE_TOP.items()
+                         if rel != "tests/pytest.ini"})
+    given = os.path.realpath(tmp_path / "elsewhere" / "strict.ini")
+    write_tree(str(tmp_path), {"elsewhere/strict.ini":
+                               "[pytest]\nxfail_strict = true\n"})
+
+    done = pytest_in(project, "-c", given, "--mutate=pkg/gate.py",
+                     "--mutate-only", "RAISE", "tests")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed (100.0%)" in done.stdout
+
+
+def test_a_settings_file_found_above_the_project_that_sets_nothing_is_let_be(
+        tree, tmp_path):
+    """pytest's own search stops above the project only when the project
+    has no settings of its own, and every run in the copy finds none there
+    either: a file up there that sets nothing changes nothing."""
+    # The fixture's own settings table would stop the search at the tree.
+    write_tree(tree, {"pyproject.toml": ""})
+    write_tree(str(tmp_path), {"pytest.ini": "[pytest]\n"})
+
+    done = pytest_in(tree, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
+                     "pkg/tests/test_gate.py")
+
+    assert "rootdir: %s\nconfigfile: pytest.ini\n" % os.path.realpath(
+        tmp_path) in done.stdout
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed (100.0%)" in done.stdout
+
+
+#: A project whose pytest settings sit below its top, in `tests/`: pytest
+#: started with `tests` as its path reads them, and only they make the
+#: expected failure strict, so only they tell the `RAISE` mutant apart.
+BELOW_THE_TOP = {
+    "pyproject.toml": "[project]\nname = 'p'\nversion = '0'\n",
+    "pkg/__init__.py": "",
+    "pkg/gate.py": ("def check(x):\n"
+                    "    if x < 0:\n"
+                    "        raise ValueError('neg')\n"
+                    "    return x\n"),
+    "tests/pytest.ini": "[pytest]\nxfail_strict = true\npythonpath = ..\n",
+    "tests/test_gate.py": ("import pytest\n"
+                           "from pkg.gate import check\n"
+                           "\n"
+                           "@pytest.mark.xfail(raises=ValueError)\n"
+                           "def test_neg():\n"
+                           "    check(-1)\n"),
+}
+
+
+@pytest.mark.parametrize("given", [[], ["-c", _p("tests/pytest.ini")]],
+                         ids=["found", "given"])
+def test_settings_below_the_top_reach_every_mutant_s_run(tmp_path, given):
+    """Each run starts at the top of the copy and collects the selection's
+    files, but its search for settings starts where this pytest's did, from
+    `tests`, or reads the file given with `-c`; from the top it would read
+    the top's `pyproject.toml`, the xfail would not be strict, and the
+    mutant would survive.
+
+    `--mutate=pkg/gate.py` and not `--mutate pkg/gate.py`: pytest settles
+    its settings before it knows the plugin's options, so it takes a
+    separate `pkg/gate.py` for a path to test, searches from the directory
+    above both paths, and reads the top's `pyproject.toml` itself."""
+    project = os.path.realpath(tmp_path / "proj")
+    write_tree(project, BELOW_THE_TOP)
+
+    done = pytest_in(project, *given, "--mutate=pkg/gate.py",
+                     "--mutate-only", "RAISE", "tests")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed" in done.stdout
+
+
+#: A project whose tests directory holds a file that kills the gate's
+#: `>= 65` mutant as it is imported, and a test directory whose
+#: `conftest.py` marks every mutant's run that imports it.
+UNSELECTED = {
+    "pyproject.toml": "[project]\nname = 'p'\n[tool.pytest.ini_options]\n",
+    "pkg/__init__.py": "",
+    "pkg/gate.py": ("def admit(age, member):\n"
+                    "    if age < 18:\n"
+                    "        raise ValueError('under age')\n"
+                    "    if member and age >= 65:\n"
+                    "        return 'senior'\n"
+                    "    return 'adult'\n"),
+    "tests/test_gate.py": ("from pkg import gate\n"
+                           "\n"
+                           "def test_adult():\n"
+                           "    assert gate.admit(30, False) == 'adult'\n"),
+    "tests/test_other.py": ("from pkg import gate\n"
+                            "assert gate.admit(65, True) == 'senior'\n"
+                            "\n"
+                            "def test_other():\n"
+                            "    pass\n"),
+    "tests/test_dir/conftest.py": (
+        "import os, pathlib\n"
+        "if os.environ.get('INVECTIVE_VERDICT'):\n"
+        "    pathlib.Path(os.environ['MARK']).write_text('imported')\n"),
+    "tests/test_dir/test_more.py": "def test_more():\n    pass\n",
+}
+
+
+@pytest.mark.parametrize("paths", [
+    ["tests", "--ignore=tests/test_other.py"],
+    ["tests", "-k", "test_adult"],
+    ["tests/test_gate.py", "tests/test_other.py", "-k", "test_adult"],
+], ids=["ignored", "deselected-directory", "deselected-file"])
+def test_every_mutant_s_run_collects_the_selection_alone(tmp_path, paths):
+    """The paths this pytest was given start each run's search for
+    settings, and no more: a file the selection leaves out is not collected
+    to kill a mutant, nor a `conftest.py` imported for a directory that
+    holds no test of it."""
+    project = os.path.realpath(tmp_path / "proj")
+    write_tree(project, UNSELECTED)
+    mark = tmp_path / "imported.txt"
+
+    done = pytest_in(project, "--mutate=pkg/gate.py", "--mutate-only", "CMP",
+                     *paths, env={"MARK": str(mark)})
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "0/2 killed" in done.stdout
+    assert not mark.exists()
+
+
+def test_each_run_s_search_starts_from_the_paths_this_one_s_did():
+    """The paths among the arguments that are there, as typed; with none,
+    pytest searched from the directory it was started in."""
+    here = os.path.join(SRC, "..")
+
+    def searched(typed):
+        return _plugin_here()._searched_from(SimpleNamespace(
+            option=SimpleNamespace(file_or_dir=typed),
+            invocation_params=SimpleNamespace(dir=here)))
+
+    assert searched(["tests", "nowhere.py", "tests/test_cli.py::test_x"]) == [
+        "tests", "tests/test_cli.py::test_x"]
+    assert searched(["nowhere.py"]) == [here]
+    assert searched([]) == [here]
 
 
 def test_mutate_inside_a_mutant_s_own_run_is_a_usage_error(repo, tmp_path):
@@ -193,7 +426,13 @@ def test_without_mutate_the_plugin_leaves_the_run_alone(repo):
 
     assert done.returncode == 0, done.stdout + done.stderr
     assert "2 passed" in done.stdout
-    assert "invective" not in done.stdout.replace("plugins: invective", "")
+    # pytest's header lists the installed plugins, in an order that is the
+    # site directory's and not alphabetical, so the whole line goes. The
+    # fixture's path goes too, from the `rootdir:` line: a temporary
+    # directory under one named for invective would say it.
+    said = re.sub(r"(?m)^plugins: .*$", "", done.stdout)
+    said = said.replace(repo, "")
+    assert "invective" not in said
 
 
 def test_a_kind_of_edit_that_does_not_exist_is_a_usage_error(repo):
@@ -231,11 +470,397 @@ def test_the_verdict_is_the_first_test_to_fail(tmp_path):
 
     assert done.returncode == 1, done.stdout + done.stderr
     assert json.loads(verdict.read_text(encoding="utf-8")) == {
-        "killer": "test_two.py::test_first", "missing": []}
+        "killer": "test_two.py::test_first", "missing": [], "elsewhere": ""}
+
+
+#: A package the tests import, as a project lays one out under `src/`.
+PKG = {"src/pkg/__init__.py": "",
+       "src/pkg/gate.py": FILES["pkg/gate.py"]}
+
+#: Passes, and imports nothing of the project's.
+IDLE_TEST = {"tests/test_idle.py": "def test_idle():\n    pass\n"}
+
+
+def _elsewhere(tmp_path, copy, target, *on_path, extra=()):
+    """The verdict's `elsewhere` for a run in `copy/` with *target* given as
+    the mutated module, *on_path* joined to this checkout's `src` as the
+    run's `PYTHONPATH`, the plugin asked for as the engine asks for it."""
+    where = os.path.realpath(tmp_path / "copy")
+    write_tree(where, copy)
+    verdict = tmp_path / "verdict.json"
+    done = pytest_in(
+        where, "-n", "0", "-p", "pytest_invective", *extra, "tests",
+        env={"PYTHONPATH": os.pathsep.join([SRC, *on_path]),
+             "INVECTIVE_VERDICT": str(verdict), "INVECTIVE_TARGET": target})
+    assert done.returncode == 0, done.stdout + done.stderr
+    return json.loads(verdict.read_text(encoding="utf-8"))["elsewhere"]
+
+
+def _file(tmp_path, rel):
+    # As the filesystem spells it, which is how the verdict names a file:
+    # `normcase` would lowercase it on Windows.
+    return os.path.realpath(tmp_path / _p(rel))
+
+
+def test_the_verdict_names_the_target_when_it_was_loaded_elsewhere(tmp_path):
+    """Two trees with the package, and the other one's `src` on the path:
+    the tests import `pkg.gate` from there, and the verdict says so, naming
+    the file. The copy's `__init__.py` is what gives the target that name;
+    without it the target would be a loose `gate`."""
+    write_tree(tmp_path / "other", PKG)
+
+    assert _elsewhere(
+        tmp_path, {**PKG, "tests/test_gate.py": FILES["pkg/tests/test_gate.py"]},
+        "src/pkg/gate.py", str(tmp_path / "other" / "src"),
+    ) == _file(tmp_path, "other/src/pkg/gate.py")
+
+
+def test_the_plugin_itself_is_never_the_module_loaded_elsewhere(tmp_path):
+    """pytest loads the plugin from wherever invective is installed, before
+    any conftest could redirect it, and in a run of invective on its own
+    code that is the checkout: its mutants are seen by the tests that start
+    pytest afresh, and a check that named it would refuse that run."""
+    assert _elsewhere(
+        tmp_path, {"src/pytest_invective/__init__.py": "", **IDLE_TEST},
+        "src/pytest_invective/__init__.py") == ""
+
+
+def test_a_module_loaded_before_the_plugin_is_never_the_one_named(tmp_path):
+    """`platform` is in `sys.modules` before the plugin is imported, from
+    the standard library, under exactly the name the copy gives this loose
+    file, and the tests never load it. The library's file is not where the
+    tests got the target from."""
+    assert _elsewhere(
+        tmp_path, {"tools/platform.py": "def check(n):\n    return n\n",
+                   **IDLE_TEST},
+        "tools/platform.py") == ""
+
+
+def test_a_target_a_plugin_in_addopts_loaded_from_elsewhere_is_still_named(
+        tmp_path):
+    """A plugin in the project's `addopts` is imported before invective's,
+    so what it loaded is among the modules loaded before the plugin, and
+    would be let be as the library's are. Loaded at the target's own layout
+    outside the copy, `pkg/gate.py`, it is the file the tests got."""
+    write_tree(tmp_path / "other", {**PKG, "src/early.py": "import pkg.gate\n"})
+
+    assert _elsewhere(
+        tmp_path, {**PKG, **IDLE_TEST,
+                   "pytest.ini": "[pytest]\naddopts = -p early\n"},
+        "src/pkg/gate.py", str(tmp_path / "other" / "src"),
+    ) == _file(tmp_path, "other/src/pkg/gate.py")
+
+
+def test_a_package_s_own_init_loaded_from_elsewhere_is_refused(tmp_path):
+    """The target is `src/pkg/__init__.py`, which is `pkg` itself and not a
+    module inside it. The tests import `pkg` from the other tree's `src`, on
+    the path as an editable install's `.pth` line would put it, and the run
+    is refused naming that tree's file."""
+    package = {"src/pkg/__init__.py": ("def admit(age):\n"
+                                       "    if age < 18:\n"
+                                       "        raise ValueError(age)\n"
+                                       "    return True\n")}
+    write_tree(tmp_path / "other", package)
+    project = os.path.realpath(tmp_path / "project")
+    write_tree(project, {**package,
+                         "pyproject.toml": "[tool.pytest.ini_options]\n",
+                         "tests/test_pkg.py": (
+                             "import pytest\n"
+                             "from pkg import admit\n"
+                             "\n"
+                             "def test_a_minor():\n"
+                             "    with pytest.raises(ValueError):\n"
+                             "        admit(17)\n")})
+
+    done = pytest_in(project, "--mutate", "src/pkg/__init__.py",
+                     "tests/test_pkg.py",
+                     env={"PYTHONPATH": os.pathsep.join(
+                         [SRC, str(tmp_path / "other" / "src")])})
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "refused: " in done.stdout
+    assert " was imported from %s, not from the copy" % _file(
+        tmp_path, "other/src/pkg/__init__.py") in done.stdout
+
+
+#: The target's package as the copy holds it in the cases below, which call
+#: `_loaded_elsewhere` in this process with modules made up for them.
+NESTED = {"src/pkg/__init__.py": "", "src/pkg/sub/__init__.py": "",
+          "src/pkg/sub/mod.py": "def f():\n    return 1\n"}
+MOD = "src/pkg/sub/mod.py"
+#: The other tree's copy of the target.
+OTHER_MOD = "other/src/pkg/sub/mod.py"
+#: A module of the other tree under a name the target could have, but not
+#: at the target's layout, `pkg/sub/mod.py`.
+NOT_AT_LAYOUT = "other/lib/sub/mod.py"
+
+#: The names those modules are put under, emptied first, so that nothing
+#: this process holds answers for them.
+NAMES = ("pkg", "pkg.sub", "pkg.sub.mod", "sub", "sub.mod", "mod",
+         "packaging")
+
+
+def _decide(tmp_path, monkeypatch, target, loaded, before=(), copy=NESTED,
+            library=None):
+    """`_loaded_elsewhere` of this checkout's plugin for a copy at `copy/`
+    holding *copy*, with `other/` beside it holding the same package, and
+    with *loaded* in `sys.modules`: name -> the module's `__file__`, given
+    from *tmp_path* unless it is None (a module with no `__file__`) or
+    absolute. The plugin takes *before* for the modules loaded ahead of it,
+    and *library*, when given, for the interpreter's own library."""
+    plugin = _plugin_here()
+    monkeypatch.setattr(plugin, "_LOADED_BEFORE", frozenset(before))
+    if library is not None:
+        # Through `normcase`, as the plugin's own `_LIBRARY` is.
+        monkeypatch.setattr(plugin, "_LIBRARY", (
+            os.path.join(os.path.normcase(_file(tmp_path, library)), ""),))
+    write_tree(tmp_path / "copy", copy)
+    write_tree(tmp_path / "other", {**NESTED, "lib/sub/mod.py": ""})
+    for name in NAMES:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    for name, file in loaded.items():
+        module = ModuleType(name)
+        if file is not None:
+            module.__file__ = (file if os.path.isabs(file)
+                               else str(tmp_path / _p(file)))
+        monkeypatch.setitem(sys.modules, name, module)
+    return plugin._loaded_elsewhere(str(tmp_path / "copy"), target)
+
+
+def test_the_name_loaded_from_another_tree_is_that_tree_s_file(
+        tmp_path, monkeypatch):
+    """The name is `pkg.sub.mod`, the outermost package first."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": OTHER_MOD}) \
+        == _file(tmp_path, OTHER_MOD)
+
+
+def test_a_module_that_fails_on_its_file_is_not_the_one_named(
+        tmp_path, monkeypatch):
+    """A lazily loaded module under the target's name can fail on any
+    attribute; the verdict does not turn into the plugin's own error."""
+    class Lazy(ModuleType):
+        def __getattr__(self, name):
+            raise RuntimeError("the load failed")
+
+    plugin = _plugin_here()
+    monkeypatch.setattr(plugin, "_LOADED_BEFORE", frozenset())
+    write_tree(tmp_path / "copy", NESTED)
+    monkeypatch.setitem(sys.modules, "pkg.sub.mod", Lazy("pkg.sub.mod"))
+
+    assert plugin._loaded_elsewhere(str(tmp_path / "copy"), MOD) == ""
+
+
+def test_a_module_that_fails_on_its_file_does_not_stop_the_clearing(
+        tmp_path, monkeypatch):
+    """A refusal is cleared by finding the copy's file loaded under another
+    name; a lazily loaded module met on the way is not that file, and its
+    error is not the session's."""
+    class Lazy(ModuleType):
+        def __getattr__(self, name):
+            raise RuntimeError("the load failed")
+
+    monkeypatch.setitem(sys.modules, "zz_lazy", Lazy("zz_lazy"))
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": OTHER_MOD}) \
+        == _file(tmp_path, OTHER_MOD)
+
+
+@pytest.mark.parametrize("file", [OTHER_MOD + "c", None],
+                         ids=["pyc", "no-file"])
+def test_a_module_with_no_source_file_is_never_the_one_named(
+        tmp_path, monkeypatch, file):
+    """A `.pyc`, or a module with no `__file__`, is not a file a mutant
+    could be in."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": file}) == ""
+
+
+def test_a_relative_file_is_read_from_the_top_of_the_copy(
+        tmp_path, monkeypatch):
+    """A relative `sys.path` entry gives a relative `__file__`, relative to
+    where the run started, which is the top of the copy: the copy's own
+    file, whatever this process's directory, here the other tree."""
+    write_tree(tmp_path / "other", NESTED)
+    monkeypatch.chdir(tmp_path / "other")
+    plugin = _plugin_here()
+    monkeypatch.setattr(plugin, "_LOADED_BEFORE", frozenset())
+    write_tree(tmp_path / "copy", NESTED)
+    module = ModuleType("pkg.sub.mod")
+    module.__file__ = _p(MOD)
+    monkeypatch.setitem(sys.modules, "pkg.sub.mod", module)
+
+    assert plugin._loaded_elsewhere(str(tmp_path / "copy"), MOD) == ""
+
+
+@pytest.mark.parametrize("loaded, named", [
+    ({"sub.mod": OTHER_MOD}, OTHER_MOD),
+    ({"mod": OTHER_MOD}, OTHER_MOD),
+    ({"sub.mod": NOT_AT_LAYOUT}, None),
+    ({"sub.mod": "copy/" + MOD}, None),
+], ids=["sub.mod", "mod", "not-at-layout", "in-the-copy"])
+def test_under_a_shorter_name_only_the_target_s_layout_elsewhere_is_named(
+        tmp_path, monkeypatch, loaded, named):
+    """With nothing under `pkg.sub.mod`, each shorter name is looked up,
+    `sub.mod` then `mod`, and its module is the target only at
+    `.../pkg/sub/mod.py` outside the copy."""
+    assert _decide(tmp_path, monkeypatch, MOD, loaded) == (
+        _file(tmp_path, named) if named else "")
+
+
+def test_a_shorter_name_loaded_before_the_plugin_is_let_be(
+        tmp_path, monkeypatch):
+    """Even at the target's layout: only the target's own name has the
+    exception for what a plugin in `addopts` loaded."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"sub.mod": OTHER_MOD},
+                   before={"sub.mod"}) == ""
+
+
+@pytest.mark.parametrize("file, named", [
+    (OTHER_MOD, OTHER_MOD),
+    (NOT_AT_LAYOUT, None),
+], ids=["at-layout", "not-at-layout"])
+def test_the_name_loaded_before_the_plugin_is_named_only_at_its_layout(
+        tmp_path, monkeypatch, file, named):
+    """What the harness had loaded under the target's name is let be, but
+    for the target's own layout outside the copy, which is what a plugin in
+    `addopts` that imports the target loaded."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": file},
+                   before={"pkg.sub.mod"}) == (
+        _file(tmp_path, named) if named else "")
+
+
+def test_the_top_of_the_copy_is_never_part_of_the_name(tmp_path, monkeypatch):
+    """The run starts at the top of the copy, so that directory is on
+    `sys.path` and nothing above it is, an `__init__.py` there or not."""
+    assert _decide(tmp_path, monkeypatch, "pkg/sub/mod.py",
+                   {"pkg.sub.mod": OTHER_MOD},
+                   copy={"__init__.py": "", "pkg/__init__.py": "",
+                         "pkg/sub/__init__.py": "", "pkg/sub/mod.py": ""}) \
+        == _file(tmp_path, OTHER_MOD)
+
+
+def test_a_package_s_init_is_the_package(tmp_path, monkeypatch):
+    assert _decide(tmp_path, monkeypatch, "src/pkg/__init__.py",
+                   {"pkg": "other/src/pkg/__init__.py"}) \
+        == _file(tmp_path, "other/src/pkg/__init__.py")
+
+
+#: A regular package below a namespace package: `src/acme` has no
+#: `__init__.py`, so the target is named `logging.handlers` from the copy,
+#: which is the standard library's name, while the tests import it as
+#: `acme.logging.handlers`.
+UNDER_A_NAMESPACE = {"src/acme/logging/__init__.py": "",
+                     "src/acme/logging/handlers.py": "def f():\n    return 1\n"}
+HANDLERS = "src/acme/logging/handlers.py"
+
+
+def test_a_target_whose_name_is_the_library_s_is_cleared_by_its_own_file(
+        tmp_path, monkeypatch):
+    """The tests loaded the copy's file under its full name, and the
+    library's `logging.handlers` besides."""
+    assert _decide(tmp_path, monkeypatch, HANDLERS, {
+        "acme.logging.handlers": "copy/" + HANDLERS,
+        "logging.handlers": logging.handlers.__file__},
+        copy=UNDER_A_NAMESPACE) == ""
+
+
+@pytest.mark.parametrize("target, copy, loaded", [
+    (HANDLERS, UNDER_A_NAMESPACE,
+     {"logging.handlers": logging.handlers.__file__}),
+    ("src/acme/logging/__init__.py", UNDER_A_NAMESPACE,
+     {"logging": logging.__file__}),
+    ("tools/queue.py", {"tools/queue.py": ""}, {"queue": queue.__file__}),
+], ids=["module", "package", "loose"])
+def test_the_interpreter_s_own_library_is_never_the_one_named(
+        tmp_path, monkeypatch, target, copy, loaded):
+    """The tests import the library's module the copy's file is named like,
+    and nothing says they loaded the copy's: the library is never where a
+    project's file is, so it is not named. The loose file's tests run it in
+    a child interpreter."""
+    assert _decide(tmp_path, monkeypatch, target, loaded, copy=copy) == ""
+
+
+@pytest.mark.parametrize("file, named", [
+    ("lib/python3.X/pkg/sub/mod.py", None),
+    ("lib/python3.X/site-packages/pkg/sub/mod.py", True),
+    ("lib/python3.X/dist-packages/pkg/sub/mod.py", True),
+], ids=["library", "site-packages", "dist-packages"])
+def test_a_project_installed_inside_the_library_s_directory_is_named(
+        tmp_path, monkeypatch, file, named):
+    """Outside a virtual environment the site directory lies inside the
+    library's, and a project installed there is a file to name."""
+    assert _decide(tmp_path, monkeypatch, MOD, {"pkg.sub.mod": file},
+                   library="lib/python3.X") == (
+        _file(tmp_path, file) if named else "")
+
+
+@pytest.mark.parametrize("loaded, named", [
+    ({"acme.logging.handlers": "copy/" + HANDLERS,
+      "logging.handlers": "other/lib/logging/handlers.py"}, None),
+    ({"logging.handlers": "other/lib/logging/handlers.py"}, True),
+], ids=["copy-s-own-loaded", "not-loaded"])
+def test_a_name_another_package_holds_is_cleared_by_the_copy_s_own_file(
+        tmp_path, monkeypatch, loaded, named):
+    """A third party's `logging.handlers` holds the name the copy gives the
+    target. The copy's own file loaded under any name is the mutant the
+    tests saw; without it, the other file is named."""
+    assert _decide(tmp_path, monkeypatch, HANDLERS, loaded,
+                   copy=UNDER_A_NAMESPACE) == (
+        _file(tmp_path, "other/lib/logging/handlers.py") if named else "")
+
+
+@pytest.mark.parametrize("file, named", [
+    ("other/lib/packaging/__init__.py", None),
+    ("other/lib/packaging.py", True),
+], ids=["a-package", "a-module-file"])
+def test_a_loose_target_is_not_the_package_the_tests_import_under_its_name(
+        tmp_path, monkeypatch, file, named):
+    """`tools/packaging.py` and the third-party package `packaging` share a
+    name, but a package's `__init__.py` is no file the loose module could
+    be, so the tests' import of it says nothing of the target; another
+    module file under the name is the target loaded from elsewhere."""
+    assert _decide(tmp_path, monkeypatch, "tools/packaging.py",
+                   {"packaging": file}, copy={"tools/packaging.py": ""}) == (
+        _file(tmp_path, file) if named else "")
+
+
+def test_a_package_below_a_namespace_named_like_the_library_s_runs(tmp_path):
+    """The tests import the library's `logging.handlers` and the copy's
+    `acme.logging.handlers`, and the copy's `src` comes first on the path,
+    so the mutant is the file they ran against and is killed."""
+    project = os.path.realpath(tmp_path / "proj")
+    write_tree(project, {
+        "pyproject.toml": ("[project]\nname = 'acme'\nversion = '0'\n"
+                           "[tool.pytest.ini_options]\n"),
+        "src/acme/logging/__init__.py": "",
+        "src/acme/logging/handlers.py": ("def handle(x):\n"
+                                         "    if x < 0:\n"
+                                         "        raise ValueError(x)\n"
+                                         "    return x\n"),
+        "tests/conftest.py": (
+            "import os\n"
+            "import sys\n"
+            "\n"
+            "sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname("
+            "os.path.abspath(__file__))), 'src'))\n"),
+        "tests/test_handlers.py": ("import logging.handlers\n"
+                                   "\n"
+                                   "import pytest\n"
+                                   "\n"
+                                   "from acme.logging import handlers\n"
+                                   "\n"
+                                   "def test_negative():\n"
+                                   "    with pytest.raises(ValueError):\n"
+                                   "        handlers.handle(-1)\n")})
+
+    done = pytest_in(project, "--mutate", HANDLERS, "--mutate-only", "RAISE",
+                     "tests/test_handlers.py")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed" in done.stdout
 
 
 def test_a_run_that_breaks_the_project_s_rules_fails_as_a_test_would(repo):
     write_tree(repo, {"pyproject.toml":
+                      "[tool.pytest.ini_options]\n"
                       "[tool.invective]\nfail-on-survivors = true\n"})
 
     done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only", "BOOL",
@@ -261,6 +886,86 @@ def test_a_ref_that_lacks_a_selected_test_is_refused(repo):
     assert done.returncode == 2
     assert "1 of the tests selected are not in the tree" in done.stdout
     assert "test_added_since" in done.stdout
+
+
+def test_a_ref_s_runs_go_by_the_ref_s_settings_as_invective_run_s_do(
+        repo, tmp_path):
+    """An uncommitted `pytest.ini`, which this pytest read and the ref does
+    not hold: every run goes by the settings the ref holds, as `invective
+    run --ref` does, so both give the same score, and the mutant only the
+    uncommitted strict xfail would kill survives."""
+    commit(repo, {"pkg/tests/test_strict.py": (
+        "import pytest\n"
+        "from pkg import gate\n"
+        "\n"
+        "@pytest.mark.xfail(raises=ValueError)\n"
+        "def test_a_minor_fails():\n"
+        "    gate.admit(10, False)\n")})
+    write_tree(repo, {"pkg/tests/pytest.ini":
+                      "[pytest]\nxfail_strict = true\n"})
+    out = tmp_path / "plugin.json"
+
+    done = pytest_in(repo, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
+                     "--mutate-ref", "HEAD", "--mutate-json", str(out),
+                     "pkg/tests/test_strict.py")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    ran = subprocess.run(
+        [sys.executable, "-m", "invective", "run", "--target", "pkg/gate.py",
+         "--tests", "pkg/tests/test_strict.py", "--only", "RAISE", "--ref",
+         "HEAD", "--json",
+         str(tmp_path / "run.json")], cwd=repo, capture_output=True,
+        text=True, timeout=300, env={**os.environ, "PYTHONPATH": SRC})
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    (plugin,) = json.loads(out.read_text(encoding="utf-8"))
+    run = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    assert (plugin["killed"], plugin["mutants"]) == (
+        run["killed"], run["mutants"]) == (0, 1)
+
+
+def test_a_ref_s_settings_above_the_project_in_its_repository_are_read(
+        tmp_path):
+    """The repository's `pytest.ini`, which this pytest read above the
+    project, is in the ref's tree too, so every run there goes by it, and
+    the mutant only its strict xfail kills is killed; on the files as they
+    stand, a copy of the project would not hold it, and the run is
+    refused."""
+    no_pytest_settings_above(tmp_path)
+    mono = os.path.realpath(tmp_path / "mono")
+    ref = monorepo(mono, MONOREPO)
+    sub = os.path.join(mono, "sub")
+
+    done = pytest_in(sub, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
+                     "--mutate-ref", ref, "tests")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1/1 killed (100.0%)" in done.stdout
+
+    done = pytest_in(sub, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
+                     "tests")
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "refused: pytest reads %s, which is above the project's top" % (
+        os.path.join(mono, "pytest.ini")) in done.stdout
+
+
+def test_settings_above_a_repository_refuse_a_ref(tmp_path):
+    """No commit holds a `pytest.ini` above the repository's top, so no
+    ref's tree does, and the mutant only it kills would survive there."""
+    no_pytest_settings_above(tmp_path)
+    outer = os.path.realpath(tmp_path / "outer")
+    mono = os.path.join(outer, "mono")
+    write_tree(outer, {"pytest.ini": MONOREPO["pytest.ini"]})
+    ref = monorepo(mono, {rel: text for rel, text in MONOREPO.items()
+                          if rel != "pytest.ini"})
+
+    done = pytest_in(os.path.join(mono, "sub"), "--mutate=pkg/gate.py",
+                     "--mutate-only", "RAISE", "--mutate-ref", ref, "tests")
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert ("refused: pytest reads %s, which is above the top of the "
+            "repository %s" % (os.path.join(outer, "pytest.ini"), mono)
+            in done.stdout)
+    assert "copy:" not in done.stdout
 
 
 @pytest.mark.parametrize("options, killed", [
@@ -306,18 +1011,21 @@ def _plugin_here():
     return module
 
 
-def test_the_options_forwarded_are_those_that_change_how_tests_run():
-    """Every `-p` the run was given, but for the plugins whose options each
-    mutant's run is given anyway, and a flag only when it was set."""
+def _config():
+    """A run's config as `_forwarded` reads it."""
     option = SimpleNamespace(
         plugins=["myplugin", "no:terminal", "no:xdist", "pytest_invective"],
         override_ini=["xfail_strict=true"], importmode="importlib")
     given = {"pythonwarnings": ["error"], "runxfail": True,
              "strict_markers": False}
-    config = SimpleNamespace(
-        option=option, getoption=lambda name, default=None: given.get(name,
-                                                                      default))
+    return SimpleNamespace(
+        option=option,
+        getoption=lambda name, default=None: given.get(name, default))
 
-    assert _plugin_here()._forwarded(config) == (
+
+def test_the_options_forwarded_are_those_that_change_how_tests_run():
+    """Every `-p` the run was given, but for the plugins whose options each
+    mutant's run is given anyway, and a flag only when it was set."""
+    assert _plugin_here()._forwarded(_config()) == (
         "-p", "myplugin", "-o", "xfail_strict=true", "-W", "error",
         "--import-mode=importlib", "--runxfail")
