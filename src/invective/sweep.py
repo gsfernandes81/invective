@@ -10,8 +10,10 @@ coverage map the repository already maintains by writing tests that import what
 they test. A module with no such file is reported as unmeasured rather than
 skipped silently -- that distinction is the whole point.
 
-Run it from the project's top level; `--src` and `--tests-dir` are relative
-to it. It exits 1 when a module breaks the project's `[tool.invective]` rules.
+Run it from anywhere inside the project; `--src`, `--tests-dir` and
+`--modules` are relative to the directory it is run in. It exits 2 when the
+tests import a module from outside the copy, as `invective run` does, and 1
+when a module breaks the project's `[tool.invective]` rules.
 
     invective sweep --src src/pkg --tests-dir tests [--limit N] [--only OPS]
 """
@@ -23,7 +25,12 @@ import subprocess
 import sys
 import tempfile
 
+from invective.config import (check_pytest_settings, project_root,
+                              relative_to_root)
 from invective.errors import Refusal
+from invective.mutate import (_STOP_GRACE, UNREACHED, _Terminated, _exit_by,
+                              stopping_on_sigterm)
+from invective.tree import git_ref
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -61,14 +68,27 @@ def import_name(root, module, sources):
     A source directory that is a package (it holds an `__init__.py`) is
     imported from the first directory above it that is not one, so
     `src/pkg/a/b.py` under `--src src/pkg` is `pkg.a.b`. A source directory
-    that is not a package holds loose files: its tests put the directory on
-    `sys.path` and import each module by its bare name.
+    that is not a package holds loose files and packages below it, each named
+    from its own top: its tests put the directory on `sys.path` and import a
+    loose module by its bare name.
     """
+    top = _package_top(root, module, sources)
+    if top is None:
+        return None
+    rel = os.path.relpath(os.path.abspath(os.path.join(root, module)),
+                          os.path.dirname(top))
+    return rel[:-3].replace(os.sep, ".").replace(".__init__", "")
+
+
+def _package_top(root, module, sources):
+    """The outermost package directory *module* is imported through, or None
+    for a loose file."""
     mod = os.path.abspath(os.path.join(root, module))
     home = os.path.dirname(mod)
     for base in sources:
         base = os.path.abspath(os.path.join(root, base))
-        if mod.startswith(base + os.sep):
+        if (mod.startswith(base + os.sep)
+                and os.path.isfile(os.path.join(base, "__init__.py"))):
             home = base
             break
     if not os.path.isfile(os.path.join(home, "__init__.py")):
@@ -76,12 +96,36 @@ def import_name(root, module, sources):
     top = home
     while os.path.isfile(os.path.join(os.path.dirname(top), "__init__.py")):
         top = os.path.dirname(top)
-    rel = os.path.relpath(mod, os.path.dirname(top))
-    return rel[:-3].replace(os.sep, ".").replace(".__init__", "")
+    return top
+
+
+def _namespace(root, module, sources):
+    """A pattern for the optional dotted prefix a test may import *module*'s
+    package under: the project's own directories between *root* and the
+    package's top, outermost first, an outer one only with the ones inside
+    it (`src/acme` gives `acme.`, `src.acme.` or nothing)."""
+    rel = os.path.relpath(os.path.dirname(_package_top(root, module, sources)),
+                          os.path.abspath(root))
+    if rel == os.curdir or rel.startswith(os.pardir):
+        return ""
+    rx = ""
+    for part in rel.split(os.sep):
+        rx = r"(?:%s%s\.)?" % (rx, re.escape(part))
+    return rx
 
 
 def covering(root, module, sources, tests_dir):
     """Test files that IMPORT this module, plus the one named after it.
+
+    A file named after the module counts at the top of *tests_dir* and in the
+    directory that mirrors the module's own under *sources*
+    (`src/app/api/models.py` and `tests/api/test_models.py`); anywhere else a
+    test file covers a module only by importing it, since `test_models.py`
+    in another directory is another module's. A loose module, one outside
+    any package, is imported by its bare stem, and that covers it at the
+    same two places only: a bare stem in another directory is as likely that
+    directory's own helper. A dotted import is specific enough to count
+    anywhere.
 
     **Matched on the import, never on the bare stem.** Matching on whether
     the module's name appears anywhere in a test file selects dozens of
@@ -98,35 +142,152 @@ def covering(root, module, sources, tests_dir):
     stem = os.path.basename(module)[:-3]
     if stem in ("__init__", "__main__"):
         stem = os.path.basename(os.path.dirname(module))
-    wanted = []
+    # What counts anywhere in the tests directory, and what only at its top
+    # and in the mirror directory, where a bare name is the module's own.
+    anywhere, near_only = [], []
     if dotted:
-        wanted += [r"\bimport\s+%s\b" % re.escape(dotted),
-                   r"from\s+%s\s+import" % re.escape(dotted),
-                   r"from\s+%s\s+import\s+.*\b%s\b"
-                   % (re.escape(dotted.rsplit(".", 1)[0]), re.escape(stem)),
-                   r"\b%s\." % re.escape(dotted)]
+        # A package below a namespace directory (one with no `__init__.py`)
+        # is imported under the namespace's name, which `import_name` cannot
+        # see: a namespace has no file to find. The prefix is optional, and
+        # it is only the project's own directories above the package's top,
+        # never any identifier: `gate.core` is matched inside
+        # `acme.gate.core`, and `utils` is not matched inside `email.utils`,
+        # nor a package `path` inside `os.path.join`.
+        # **An import statement, not the word `import`.** `from email
+        # import utils` holds `import utils` and loads nothing of the
+        # project's, so the name counts after `import` only at the start of
+        # an `import` statement, alone or in a list. For the same reason a
+        # top-level package's bare name followed by a dot counts only where a
+        # loose module's stem does, since `from email import utils` leaves
+        # `utils.` in any file; a dotted name followed by a dot counts
+        # anywhere.
+        ns = _namespace(root, module, sources)
+        anywhere += [
+            r"^\s*import\s+(?:[\w.]+(?:\s+as\s+\w+)?\s*,\s*)*%s%s\b"
+            % (ns, re.escape(dotted)),
+            r"from\s+%s%s\s+import" % (ns, re.escape(dotted)),
+            r"from\s+%s%s\s+import\s+.*\b%s\b"
+            % (ns, re.escape(dotted.rsplit(".", 1)[0]), re.escape(stem))]
+        attr = r"(?<![\w.])%s%s\." % (ns, re.escape(dotted))
+        (anywhere if "." in dotted else near_only).append(attr)
+        # A `from` statement naming a submodule loads the package, as
+        # `import NAME.sub` does, so it counts anywhere. Anchored to the
+        # start of the statement: `from email.utils.x import` and
+        # `from .utils.text import` are not the project's.
+        anywhere.append(r"^\s*from\s+%s%s\.\w" % (ns, re.escape(dotted)))
     else:
-        wanted += [r"^\s*import\s+%s\b" % re.escape(stem),
-                   r"^\s*from\s+%s\s+import" % re.escape(stem),
-                   r"\b%s\.\w" % re.escape(stem)]
+        near_only += [r"^\s*import\s+%s\b" % re.escape(stem),
+                      r"^\s*from\s+%s\s+import" % re.escape(stem),
+                      r"\b%s\.\w" % re.escape(stem)]
     named = "test_%s.py" % stem
     hits = []
     tests_abs = os.path.join(root, tests_dir)
-    for f in sorted(os.listdir(tests_abs)):
-        if not (f.startswith("test_") and f.endswith(".py")):
-            continue
-        with open(os.path.join(tests_abs, f), encoding="utf-8", errors="replace") as fh:
-            body = fh.read()
-        if f == named or any(re.search(pat, body, re.M) for pat in wanted):
-            hits.append(os.path.normpath(os.path.join(tests_dir, f)))
+    mirror = os.curdir
+    for base in sources:
+        base = os.path.join(root, base)
+        if os.path.abspath(os.path.join(root, module)).startswith(
+                os.path.abspath(base) + os.sep):
+            mirror = os.path.relpath(
+                os.path.dirname(os.path.join(root, module)), base)
+            break
+    # The walk is sorted in place, so the top-level files come first and each
+    # subdirectory follows in name order: the same list on every run. A
+    # directory link is not followed (`followlinks` is off), as `modules()`
+    # does not follow one, and a `__pycache__` holds no test the project wrote.
+    for dirpath, dirnames, filenames in os.walk(tests_abs):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for f in sorted(filenames):
+            if not (f.startswith("test_") and f.endswith(".py")):
+                continue
+            path = os.path.join(dirpath, f)
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+            near = os.path.relpath(dirpath, tests_abs) in (os.curdir, mirror)
+            by_name = f == named and near
+            by_import = any(re.search(pat, body, re.M) for pat in
+                            anywhere + (near_only if near else []))
+            if by_name or by_import:
+                hits.append(os.path.normpath(os.path.join(
+                    tests_dir, os.path.relpath(path, tests_abs))))
     return hits
 
 
-def main(argv=None):
+#: How long an engine told to stop is given to unwind: its own grace for the
+#: run it stops, and the copy's removal on top.
+_GRACE = 2 * _STOP_GRACE  # invective: accept[equivalent: 2 -> 3] any bound past the engine's own grace serves
+
+
+def _engine(cmd, cwd):
+    """The engine's exit code, stdout and stderr, run to its end.
+
+    **Not `subprocess.run`, which on any exception kills its child outright,
+    copy and all.** When this process is stopped while the engine runs, the
+    engine is told, waited for, and only then is the exception let go: a
+    SIGTERM to the sweep, which `main`'s handler raises as `_Terminated`
+    wherever it lands, is forwarded as one the engine unwinds on, and the
+    copy is gone before the sweep is. `communicate` itself
+    catches an interrupt, the subclass included, waits a quarter second for
+    the child and re-raises, so a SIGTERM takes that much longer per level
+    to come out; harmless.
+    """
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = proc.communicate()
+    # `_Terminated` is a `KeyboardInterrupt`, so this clause has to come
+    # before that one: the other way round a SIGTERM to the sweep would fall
+    # into the wait-only branch, the engine would never be told, and after
+    # the wait it would be killed outright with its copy stranded.
+    except _Terminated:
+        proc.terminate()
+        _finish(proc)
+        raise
+    except KeyboardInterrupt:
+        # A ^C: the engine is in the same foreground group and got the
+        # SIGINT itself, so it is unwinding already, and a SIGTERM now would
+        # raise inside its cleanup and cut it short. Told only when the wait
+        # runs out, which is a `kill -INT` to this process alone, one the
+        # engine never saw.
+        _finish(proc)
+        raise
+    except BaseException:
+        # `SystemExit` and the rest: the engine has heard nothing.
+        proc.terminate()
+        _finish(proc)
+        raise
+    return proc.returncode, stdout, stderr
+
+
+def _finish(proc):
+    """Wait for the engine to end; when it does not, tell it to stop, which
+    its once-only handler makes harmless if it was told already, and wait
+    once more before killing it outright."""
+    try:
+        proc.wait(timeout=_GRACE)
+        return
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+    try:
+        proc.wait(timeout=_GRACE)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def _from_root(given, root):
+    """*given*, typed here, as a path from *root*."""
+    try:
+        return relative_to_root(given, root)
+    except ValueError:
+        raise Refusal("%s is outside the project at %s" % (given, root)) from None
+
+
+def parser():
+    """The sweep's command line, apart from `main` so a test can read it."""
     ap = argparse.ArgumentParser(prog="invective sweep", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--src", required=True, nargs="+",
-                    help="directories of modules to mutate, relative to the repo root")
+                    help="directories of modules to mutate")
     ap.add_argument("--tests-dir", required=True,
                     help="the directory holding the test_*.py files")
     ap.add_argument("--only", default="RAISE")
@@ -136,25 +297,76 @@ def main(argv=None):
     # than taking the first N, so a cap does not mean "the top of the file".
     ap.add_argument("--limit", type=int, default=25)
     ap.add_argument("--json", default=None)
-    ap.add_argument("--modules", nargs="*")
+    ap.add_argument("--modules", nargs="*",
+                    help="sweep only these module files, relative to the "
+                         "current directory, instead of discovering them "
+                         "under --src")
     ap.add_argument("--ref", help="run on this git commit, branch or tag "
                                   "instead of the files as they stand")
+    return ap
+
+
+def main(argv=None):
+    ap = parser()
     args = ap.parse_args(argv)
 
-    root = os.getcwd()
+    root = project_root()
     try:
+        # **Typed paths are read from where they were typed**, as every
+        # other tool reads them, and given from the top, where the engine
+        # is started and its copy begins.
+        args.src = [_from_root(given, root) for given in args.src]
+        args.tests_dir = _from_root(args.tests_dir, root)
+        if args.modules is not None:
+            args.modules = [_from_root(given, root) for given in args.modules]
         # A directory that is not there walks as empty, and an empty sweep
         # prints "0 module(s) measured" -- which reads as a result, not as a
         # mistyped path.
         for given in [*args.src, args.tests_dir]:
             if not os.path.isdir(os.path.join(root, given)):
                 raise Refusal("%s is not a directory under %s" % (given, root))
+        _settle(args, root)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
+    except _Terminated as exc:
+        # The ref's tree is gone; now die by the signal, as `run` does.
+        _exit_by(exc)
+    # **The handler covers the whole sweep, not only an engine's run.** A
+    # SIGTERM between engines -- the walk for the next module's tests, a
+    # row being printed, the JSON being written -- would otherwise take the
+    # default action, and the rows printed to a file or a pipe so far would
+    # die in the buffer with the process.
+    try:
+        with stopping_on_sigterm():
+            return _sweep(args, root)
+    except _Terminated as exc:
+        # Any engine that was running is gone and its copy with it; now
+        # write out what was printed and die by the signal, as `run` does.
+        _exit_by(exc)
 
-    report, unmeasured, failing = [], [], []
-    for module in (args.modules or modules(root, args.src, args.tests_dir)):
+
+def _settle(args, root):
+    """Refuse the sweep, once rather than as a `?` for each module, when
+    every module's engine would refuse the pytest settings its runs would go
+    by (`config.check_pytest_settings`), decided on the tree the engines'
+    mutants are run in: on a ref the ref's own, made once for this; on the
+    files as they stand, those files, which every engine's copy is made
+    of."""
+    if not args.ref:
+        check_pytest_settings(root, root, [args.tests_dir])
+        return
+    with stopping_on_sigterm(), git_ref(root, args.ref) as where:
+        check_pytest_settings(root, where, [args.tests_dir], ref=True)
+
+
+def _sweep(args, root):
+    """Every module measured and printed as it is, and the exit code."""
+    report, unmeasured, failing, unreached = [], [], [], []
+    # A bare `--modules` names no file and sweeps none: an empty list is what
+    # a shell expansion of the changed files expands to when nothing changed.
+    for module in (args.modules if args.modules is not None
+                   else modules(root, args.src, args.tests_dir)):
         tests = covering(root, module, args.src, args.tests_dir)
         if not tests:
             unmeasured.append(module)
@@ -178,9 +390,8 @@ def main(argv=None):
         # finding no percentage can show.
         with tempfile.TemporaryDirectory(prefix="invective-sweep-") as box:
             one = os.path.join(box, "report.json")
-            got = subprocess.run(cmd + ["--json", one], capture_output=True,
-                                 text=True, cwd=root)
-            body = got.stdout + got.stderr
+            code, stdout, stderr = _engine(cmd + ["--json", one], root)
+            body = stdout + stderr
             detail = {}
             try:
                 with open(one, encoding="utf-8") as fh:
@@ -193,14 +404,26 @@ def main(argv=None):
                     print("      (could not read %s's own report)" % module)
         summary = re.search(r"(\d+)/(\d+) killed \(([\d.]+)%\), (\d+) survived", body)
         if not summary:
+            # A refusal is one sentence the engine chose and a person has to
+            # read whole; any other last line is only cut to a display width.
+            said_lines = body.strip().splitlines() or ["no output"]
+            refusal = next((ln for ln in said_lines
+                            if ln.startswith("refused:")), None)
+            # **The one refusal that fails the sweep.** The tests load the
+            # project's own file, so no campaign on it measures anything,
+            # whichever entry point starts it; `invective run` exits 2 on it,
+            # and a gate on the sweep must not read green for the same tree.
+            if refusal is not None and UNREACHED in refusal:
+                unreached.append(module)
+
             # "no mutation sites" and "RED baseline" are answers ABOUT the
             # module; anything else is this driver failing to get an answer
             # at all, and the two must not print the same way -- a bare "?"
             # would hide a broken driver behind what looks like an ordinary
-            # empty result. So the third arm says the exit code and the
-            # last thing the engine actually said, which turns "0
-            # module(s) measured" from a shrug into a thing somebody
-            # chases.
+            # empty result. So the third arm says the exit code and what
+            # the engine said, its refusal whole or else its last line,
+            # which turns "0 module(s) measured" from a shrug into a thing
+            # somebody chases.
             # **The engine's own sentence, not the word.** A bare `"red" in
             # body` is true of "occurred", "required" and "ignored", so a
             # traceback from a driver that could not start was labelled a red
@@ -208,9 +431,10 @@ def main(argv=None):
             note = "no mutation sites" if "no mutation sites" in body else \
                    ("RED baseline" if "is RED on the unmutated tree" in body else
                     "DRIVER FAILED rc=%d: %s" % (
-                        got.returncode,
+                        code,
+                        refusal if refusal is not None else
                         # invective: accept[equivalent: 90 -> 91] a display width
-                        (body.strip().splitlines() or ["no output"])[-1][:90]))
+                        said_lines[-1][:90]))
             report.append({"module": module, "note": note, "tests": tests})
             print("%-46s %s" % (module, note))
             continue
@@ -218,13 +442,22 @@ def main(argv=None):
         lines = [ln for ln in body.splitlines() if "SURVIVED" in ln]
         fails = [ln.partition(":")[2].strip() for ln in body.splitlines()
                  if ln.startswith("fails:")]
-        if got.returncode == 1:
+        if code == 1:
             failing.append(module)
         report.append({"module": module, "tests": tests, "killed": int(killed),
                        "mutants": int(total), "score": float(pct),
                        "survivors": lines,
-                       # From the engine's own report, and unknown -- not
-                       # none -- when that could not be read.
+                       # **The engine's report, whole**, which is what
+                       # `invective run --json` writes for this module:
+                       # survivors, accepted and stale entries as data (the
+                       # `survivors` above are the printed lines; `report`
+                       # holds the entries), and whatever else the engine puts
+                       # in its entries. Unknown -- not none -- when it could
+                       # not be read, `detail` being `{}` then. `kills` and
+                       # `broken` are the same report's, kept for the
+                       # consumer that reads them here; `report` is the one
+                       # to read.
+                       "report": detail or None,
                        "kills": detail.get("kills"),
                        "broken": detail.get("broken"),
                        "fails": fails})
@@ -246,6 +479,11 @@ def main(argv=None):
     if failing:
         print("\n%d module(s) break the project's rules: %s"
               % (len(failing), ", ".join(failing)))
+    if unreached:
+        print("\nrefused: the tests import %d module(s) from outside the "
+              "copy, so no mutant of them can reach the tests: %s"
+              % (len(unreached), ", ".join(unreached)), file=sys.stderr)
+        return 2
     return 1 if failing else 0
 
 

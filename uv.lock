@@ -31,9 +31,10 @@ wheels = [
 
 [[package]]
 name = "invective"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "iniconfig" },
     { name = "pytest" },
 ]
 
@@ -43,7 +44,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pytest", specifier = ">=8.2" }]
+requires-dist = [
+    { name = "iniconfig", specifier = ">=2" },
+    { name = "pytest", specifier = ">=8.2" },
+]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest-xdist", specifier = ">=3.8.0" }]

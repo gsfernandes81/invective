@@ -6,7 +6,7 @@ build-backend = "uv_build"
 
 [project]
 name = "invective"
-version = "0.1.0"
+version = "0.2.0"
 description = "Mutation testing for a pytest suite: break one line at a time and report every edit the tests let through"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -15,7 +15,10 @@ requires-python = ">=3.11"
 # The engine runs `python -m pytest` with the interpreter it was started by,
 # so pytest has to be importable wherever invective is. 8.2 is the oldest
 # the checks are run against (the `lowest-direct` leg of `checks`).
-dependencies = ["pytest>=8.2"]
+# iniconfig is pytest's own reader of `.ini` and `.cfg` files, and invective
+# reads them with it so that one reads as pytest reads it; pytest depends on
+# it, and invective imports it, so it is named here too.
+dependencies = ["pytest>=8.2", "iniconfig>=2"]
 
 [project.scripts]
 invective = "invective.__main__:main"

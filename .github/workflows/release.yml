@@ -1,0 +1,187 @@
+name: release
+
+# Tags a commit on `main` `v<version>`, `[project].version` read from
+# `pyproject.toml`, once `checks` has passed on it, and publishes its wheel
+# and sdist as a GitHub release. A version that is already tagged is left
+# alone, so a commit that did not bump the version releases nothing, and a tag
+# is never moved. Every step can be rerun: a tag already on this commit and a
+# release already made are carried on from, not refused.
+
+on:
+  # Only `main`'s copy of this file answers `workflow_run`, after a run of
+  # `checks` on `main`; the job keeps the green pushes.
+  # `checks` cancels a run a later push supersedes, and a cancelled run tags
+  # nothing: the later push's run tags the later commit. `mutation` is not
+  # waited for, since it fails only on a run it cannot trust and may not run
+  # at all for a commit its paths leave out.
+  workflow_run:
+    workflows: [checks]
+    types: [completed]
+    # Filters on the triggering run's head branch.
+    branches: [main]
+  # By hand, for the tip of `main` when this workflow's own run failed or was
+  # cancelled; it acts on the tip of `main` only. A tag pushed for an earlier
+  # commit whose release did not follow is not repaired from here: re-run
+  # that commit's own failed run of this workflow. A commit whose `checks` run
+  # was cancelled, because a second push to `main` came before it finished,
+  # has no green run, so it is released by re-running that run of `checks`.
+  # Left alone, its version goes out with the next green commit, unless that
+  # one bumps the version again.
+  workflow_dispatch:
+
+# `actions: read` is what lets the manual run find `checks`' runs.
+permissions:
+  contents: write
+  actions: read
+
+defaults:
+  run:
+    # Named, so that a pipe fails the step when its first command does.
+    shell: bash
+
+jobs:
+  release:
+    # On the job, so that a run its `if` skips never enters the group: at the
+    # workflow level every completed `checks` run, a pull request's included,
+    # would queue here, and the group holds one waiting run, so one of them
+    # could replace the run of a merge. Two merges in quick succession tag in
+    # turn rather than at once. A third that queues behind them replaces the
+    # one still waiting; the commit of the replaced run is released by
+    # re-running its `checks`, as above.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    if: >-
+      (github.event_name == 'workflow_run'
+       && github.event.workflow_run.conclusion == 'success'
+       && github.event.workflow_run.event == 'push'
+       && github.event.workflow_run.head_branch == 'main')
+      || (github.event_name == 'workflow_dispatch'
+          && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      # The commit `checks` ran on. `github.sha` in a `workflow_run` is the
+      # tip of `main` when this run started, which may be a later commit.
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: '0.10.11'
+
+      # The `workflow_run` path has this from its event; by hand it is
+      # looked up, with the same three conditions.
+      - name: Check the commit is green
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          green=$(gh run list --workflow checks --branch main --event push \
+            --commit "$SHA" --status success --json databaseId --jq length)
+          if [ "$green" = 0 ]; then
+            echo "::error::no successful push run of checks on main for $SHA"
+            exit 1
+          fi
+
+      - name: Read the version
+        id: version
+        run: |
+          version=$(uv version --short)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      # The tags made here are lightweight, so the remote's plain
+      # `refs/tags/<tag>` line is the commit. An annotated tag someone made by
+      # hand shows its tag object there instead, which is never `$SHA`, so it
+      # is treated as a tag on another commit: it passes only when its
+      # release is published, and fails the run otherwise, so the version is
+      # never left silently undownloadable.
+      - name: Find the tag
+        id: tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          at=$(git ls-remote --tags origin "refs/tags/$TAG" \
+            | awk -v ref="refs/tags/$TAG" '$2 == ref {print $1}')
+          if [ -z "$at" ]; then
+            echo "state=absent" >> "$GITHUB_OUTPUT"
+          elif [ "$at" = "$SHA" ]; then
+            echo "$TAG is already on $SHA: carrying on with its release"
+            echo "state=here" >> "$GITHUB_OUTPUT"
+          else
+            # A tag on another commit is a release made, or one a run of that
+            # commit pushed the tag for and then failed to publish. Only that
+            # commit's own run can finish it (it has the build), so a run
+            # here that finds no published release says so rather than going
+            # green over a version nobody can download.
+            draft=$(gh release view "$TAG" --json isDraft --jq .isDraft \
+              2>&1) || draft=none
+            if [ "$draft" != false ]; then
+              echo "::error::$TAG is on $at but has no published release; re-run the release run of $at (its payload names that commit)"
+              exit 1
+            fi
+            echo "$TAG is already tagged at $at and released, nothing to do"
+            echo "state=elsewhere" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Before the tag, so that a build that fails leaves no tag behind.
+      - name: Build
+        if: steps.tag.outputs.state != 'elsewhere'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          uv build
+          test -f "dist/invective-$VERSION-py3-none-any.whl"
+          test -f "dist/invective-$VERSION.tar.gz"
+
+      # git refuses the push if the tag appeared since it was looked for;
+      # nothing here forces. A tag pushed with the workflow's token starts no
+      # other workflow, and none listens for tags. A tag ruleset or tag
+      # protection rule on the repository would refuse this token's push:
+      # the job goes red with nothing tagged, and the push then needs an
+      # actor the rule exempts, a deploy key or an app's token.
+      - name: Tag
+        if: steps.tag.outputs.state == 'absent'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: git push origin "$SHA:refs/tags/$TAG"
+
+      # A rerun finishes what the last run left. A new release is created
+      # with its assets, which `gh` makes a draft, uploads to and only then
+      # publishes, so a failed upload leaves no public release without a
+      # wheel. A draft left behind by a run that stopped in between has its
+      # assets replaced and is published. A published release is given only
+      # the assets it lacks, since `--clobber` deletes an asset before it
+      # uploads the new one.
+      - name: Release
+        if: steps.tag.outputs.state != 'elsewhere'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if view=$(gh release view "$TAG" --json isDraft --jq .isDraft \
+              2>&1); then
+            draft=$view
+            if [ "$draft" = true ]; then
+              gh release upload "$TAG" dist/* --clobber
+              gh release edit "$TAG" --draft=false
+            else
+              have=$(gh release view "$TAG" --json assets \
+                --jq '.assets[].name')
+              for f in dist/*; do
+                grep -qxF "$(basename "$f")" <<< "$have" \
+                  || gh release upload "$TAG" "$f"
+              done
+            fi
+          elif grep -q 'release not found' <<< "$view"; then
+            gh release create "$TAG" --verify-tag --title "$TAG" \
+              --generate-notes dist/*
+          else
+            # Any other failure of the lookup says nothing about whether a
+            # release exists; creating one could duplicate it.
+            echo "$view"
+            exit 1
+          fi
