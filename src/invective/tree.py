@@ -217,20 +217,18 @@ def _mark(where: str, root: str) -> None:
 
 
 def _namespace() -> str | None:
-    """Where a pid in a marker names a process: on Linux, the boot and the
-    pid namespace (`<boot id>/pid:[<inode>]`); `None` elsewhere, or when
-    either cannot be read.
+    """Where a pid in a marker names a process: on Linux, the pid namespace
+    (`pid:[<inode>]`); `None` elsewhere, or when it cannot be read.
 
     Containers on one host can share a temporary directory, and each counts
     pids from 1 in a namespace of its own, so a live copy of one names a pid
-    that is dead, or somebody else's, in the other. The boot id alone is
-    shared by every container on the host."""
+    that is dead, or somebody else's, in the other. Live pid namespaces on
+    one host never share an id, so a live copy is never matched by another
+    namespace's reaper. Whether the owner is alive is decided by its pid."""
     if not sys.platform.startswith("linux"):
         return None
     try:
-        with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as fh:
-            boot = fh.read().strip()
-        return boot + "/" + os.readlink("/proc/self/ns/pid")
+        return os.readlink("/proc/self/ns/pid")
     except OSError:
         return None
 

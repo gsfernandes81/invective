@@ -47,7 +47,7 @@ for the next reaper.
 ## The marker and the reaper
 
 Every copy carries `.invective-owner` at its top: `{"pid": <owner's pid>,
-"root": "<the project>", "ns": "<boot id>/<pid namespace>"}`, written
+"root": "<the project>", "ns": "<pid namespace>"}`, written
 before the copy is filled. `ns` (`tree._namespace`) is `null` where it
 cannot be read. Every `invective run`, every engine the sweep starts, and
 every `pytest --mutate` begins by removing copies in the temporary

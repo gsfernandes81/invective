@@ -6,6 +6,7 @@ import ast
 import inspect
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -332,16 +333,15 @@ def test_a_ref_s_copy_is_marked_before_git_fills_it(repo, monkeypatch):
     assert seen == [True]
 
 
-def test_the_namespace_is_the_boot_and_the_pid_namespace_on_linux():
-    """Each half alone is shared: the boot id by every container on the
-    host, a pid namespace's inode by namespaces on other boots. Nothing
-    else has the two to read, and there the namespace is `None`."""
+def test_the_namespace_is_the_pid_namespace_on_linux():
+    """The pid namespace's own id, and nothing else: nowhere but Linux has
+    one to read, and there the namespace is `None`."""
     if not sys.platform.startswith("linux"):
         assert trees._namespace() is None
         return
-    with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as fh:
-        boot = fh.read().strip()
-    assert trees._namespace() == boot + "/" + os.readlink("/proc/self/ns/pid")
+    ns = trees._namespace()
+    assert re.fullmatch(r"pid:\[\d+\]", ns), ns
+    assert ns == os.readlink("/proc/self/ns/pid")
 
 
 def test_a_namespace_that_cannot_be_read_is_none(monkeypatch):
@@ -370,8 +370,8 @@ def _unshare():
 
 
 def test_a_process_in_another_pid_namespace_has_another_namespace():
-    """Containers on one host share the boot id, so the pid namespace is what
-    tells a copy made in one from a copy made in another."""
+    """The pid namespace is what tells a copy made in one container from a
+    copy made in another on the same host."""
     command = _unshare()
     if command is None:
         pytest.skip("`unshare` cannot make a pid namespace here")
@@ -607,9 +607,9 @@ def test_a_ref_begins_by_removing_the_copies_of_dead_owners(repo, tmp_path):
 
 
 @pytest.mark.parametrize("theirs, ours", [
-    ("boot/pid:[4026532262]", "boot/pid:[4026531836]"),
-    (None, "boot/pid:[4026531836]"),
-    ("boot/pid:[4026532262]", None),
+    ("pid:[4026532262]", "pid:[4026531836]"),
+    (None, "pid:[4026531836]"),
+    ("pid:[4026532262]", None),
 ], ids=["another-container", "unread-there", "unread-here"])
 def test_a_copy_made_in_another_namespace_is_never_reaped(tmp_path,
                                                           monkeypatch, theirs,
@@ -626,7 +626,7 @@ def test_a_copy_made_in_another_namespace_is_never_reaped(tmp_path,
     assert kept.is_dir()
 
 
-@pytest.mark.parametrize("ns", ["boot/pid:[4026531836]", None],
+@pytest.mark.parametrize("ns", ["pid:[4026531836]", None],
                          ids=["read", "unread"])
 def test_a_dead_owner_in_this_namespace_is_reaped(tmp_path, monkeypatch, ns):
     """Only another namespace keeps a copy: where neither side can be read
@@ -643,7 +643,7 @@ def test_a_marker_without_a_namespace_is_judged_by_its_pid(tmp_path,
                                                           monkeypatch):
     """An invective before 0.2.1 writes no `ns`, and its dead owner's copy
     is still reaped here, where the namespace can be read."""
-    monkeypatch.setattr(trees, "_namespace", lambda: "boot/pid:[4026531836]")
+    monkeypatch.setattr(trees, "_namespace", lambda: "pid:[4026531836]")
     _dead_owners_copy(tmp_path, "invective-eeeeeeee")
 
     trees.reap()
