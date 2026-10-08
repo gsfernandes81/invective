@@ -477,13 +477,16 @@ def test_no_mutant_copies_the_whole_tree(monkeypatch):
     given = []
 
     def spy(x, *args):
-        given.append(type(x))
+        given.append(x)
         return deepcopy(x, *args)
 
     monkeypatch.setattr(copy, "deepcopy", spy)
     for index in range(len(module.sites)):
         mutate._text_of(module, index)
-    assert given and ast.Module not in given
+    # Only a site's own node is deep-copied, never an ancestor: a class or a
+    # function around the site is most of the tree on many a file.
+    nodes = [node for _kind, node, _what in module.sites]
+    assert given and all(any(x is node for node in nodes) for x in given)
 
 
 def test_a_campaign_walks_its_target_for_sites_once(tree, monkeypatch):
