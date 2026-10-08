@@ -362,9 +362,15 @@ def test_the_home_directory_is_not_offered_as_where_to_run_from(
     ws = str(config.outside_refusal(str(tmp_path / "ws" / "pyproject.toml"),
                                     str(tmp_path / "ws" / "proj")))
 
+    top = os.path.join(os.path.abspath(os.sep), "pytest.ini")
+    root = str(config.outside_refusal(top, str(tmp_path / "proj")))
+
     assert "run invective from" not in home
     assert "move them into the project" in home
     assert "run invective from" not in above
+    # The filesystem's top is above the home directory like any other.
+    assert "run invective from" not in root
+    assert "move them into the project" in root
     assert "run invective from %s," % (tmp_path / "ws") in ws
 
 
