@@ -61,8 +61,6 @@ CI is the main use, 2 is the one worth building.
 
 ## Open
 
-- Decide whether 2's survivor confirmation re-runs the full selection or
-  only the tests the subset skipped.
 - Decide where a prior report lives for 3, and how mutants are matched
   across runs (by kind, change and source line text, not line number).
 - Measure 1 first, on a real project; it is the largest and the cheapest.

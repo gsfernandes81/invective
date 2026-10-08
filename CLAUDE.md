@@ -54,8 +54,8 @@ fact that is wrong, a broken reference, a typo -- without rewording the
 surrounding prose.
 
 What counts as documentation: `README.md`, `CLAUDE.md`, everything under
-`docs/`, and any handoff or plan page (`HANDOFF.md` and its equivalents).
-Code comments and docstrings are not covered by this rule.
+`docs/`, plans included. Code comments and docstrings are not covered by
+this rule.
 
 ### No history
 

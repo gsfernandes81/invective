@@ -179,8 +179,8 @@ tail = out[-400:]  # invective: accept[equivalent: 400 -> 401] any length serves
 subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True)
 ```
 
-The reason is `equivalent`, `untestable` or `out_of_scope`, the same as
-pytest-gremlins' pardons, and the text after it is required. A change after
+The reason is `equivalent`, `untestable` or `out_of_scope`, and the text
+after it is required. A change after
 the reason, as the report names it, accepts that one mutant of the line;
 without one, every mutant of the line is accepted, including any a later edit
 adds. A comment above a line applies to it, and several can stand there.
@@ -201,15 +201,18 @@ max-accepted = 10          # so do more accepted survivors than this
 exclude = ["var/*"]        # left out of the copy
 ```
 
-`invective run` and `invective sweep` exit 1 when a module breaks these
-rules, 2 when a run could not be trusted (a red baseline, a target loaded
-from outside the copy, pytest settings above the project's top), and 0
-otherwise. The sweep also exits 2 when any module is imported from outside
-the copy, and exits 0 for a RED baseline, "no mutation sites" or a driver
-failure on an individual module. `pytest --mutate` exits 4 on a usage error,
-2 on a refusal or SIGTERM, and 1 when rules are broken. A SIGTERM ends
-`invective run` by the signal (143 in a shell). An unknown key in
-`[tool.invective]` is refused, so a misspelt one is not read as absent.
+| command | exit code | meaning |
+|---|---|---|
+| `invective run` / `invective sweep` | 0 | completed (survivors are a finding, not a failure, unless the project's rules say otherwise); the sweep also exits 0 for a RED baseline, "no mutation sites" or a driver failure on a single module |
+| `invective run` / `invective sweep` | 1 | a module broke the project's rules (`fail-on-survivors`, `max-accepted`) |
+| `invective run` / `invective sweep` | 2 | a refusal (red baseline, empty selection, target loaded from outside the copy, pytest settings above the project's top); the sweep also exits 2 when any module is imported from outside the copy |
+| `invective run` | 143 | SIGTERM (128 + signal number in a shell) |
+| `pytest --mutate` | 1 | rules broken |
+| `pytest --mutate` | 2 | a refusal or SIGTERM |
+| `pytest --mutate` | 4 | a usage error (xdist workers on, unknown `--mutate-only` kind) |
+
+An unknown key in `[tool.invective]` is refused, so a misspelt one is not
+read as absent.
 
 ## What it will not do
 

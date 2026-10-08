@@ -63,20 +63,4 @@ it started. The killer comes from the plugin, which writes it to the file
 
 ## Exit codes
 
-`invective run` and `invective sweep`:
-
-- **0**: the run completed. Survivors are a finding to read; the run passes
-  unless `[tool.invective]` says otherwise. The sweep also exits 0 for a
-  RED baseline, "no mutation sites" or a driver failure on a single module.
-- **1**: a module broke the project's rules (`fail-on-survivors`,
-  `max-accepted`).
-- **2**: a refusal (a red baseline, an empty selection, a target loaded from
-  outside the copy, pytest settings above the project's top). The sweep
-  also exits 2 when any module is imported from outside the copy. A
-  SIGTERM ends `invective run` by the signal (143 in a shell).
-
-`pytest --mutate`:
-
-- **4**: a usage error (xdist workers on, an unknown `--mutate-only` kind).
-- **2**: a refusal or SIGTERM.
-- **1**: rules broken.
+See the exit-code table in `README.md` ("Failing a run on survivors").

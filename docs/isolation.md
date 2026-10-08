@@ -103,10 +103,7 @@ mutant's run, so they go by the same file.
 ## Not to build
 
 Each of these trades the on-disk, fresh-process guarantee for a speedup,
-and fails in the silent direction invective exists to refuse. pytest-gremlins
-takes the first: it instruments a module in-process and switches mutants with
-an environment variable, so a child interpreter a test starts imports the
-original file and every mutant it would catch survives silently.
+and fails in the silent direction invective exists to refuse.
 
 - Mutation switching by environment variable or in-process, warm pytest
   pools and fork servers: they miss import-time mutants, leak state between
@@ -129,7 +126,5 @@ original file and every mutant it would catch survives silently.
 > `farpy.py` 9/19). Only the sweep separates clearly; the two `run`
 > rows are within noise. The cost is every module a run imports other
 > than the mutant, recompiled on every run; the copy already carries no
-> `__pycache__`, and the mtime stamping already holds on the file where
-> or3's old engine went 9/11/9 of 19. A second guard that costs 6-17%
-> is not worth it unless a filesystem whose mtimes the stamping cannot
-> rely on turns up.
+> `__pycache__`. A second guard that costs 6-17% is not worth it unless
+> a filesystem whose mtimes the stamping cannot rely on turns up.

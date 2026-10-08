@@ -47,20 +47,7 @@ describes. The acceptance says why the mutant may survive.
 
 ## The docs test
 
-`tests/test_docs.py` checks that the documentation stays in step with the
-code. It parses every fenced `invective run` and `invective sweep` line
-against the real parser, checks every `pytest --mutate` option against what
-the plugin registers, and resolves every backticked path and dotted symbol.
-It also reads the README's restatements as data and compares them: the
-edits table and CMP pairs against `mutate.OPERATORS` and `mutate._CMP_SWAP`,
-the sweep's defaults against the parser's, the reasons against
-`accept.REASONS`, the acceptance examples through `accept.read`, both
-`[tool.invective]` tables through `config.load`, each `--mutate-*` option
-against its `invective run` flag, and the forwarded options against
-`pytest_invective._forwarded`. The docs/ pages are held to the handshake
-variables and `tree.SKIPPED`. Mechanical rules from `docs/documentation.md`
-(the header shape, the 90-character prose wrap, no line-number citations,
-no dash asides) are enforced over every page.
+See "Checks" in `docs/documentation.md`.
 
 ## PR and version rules
 
