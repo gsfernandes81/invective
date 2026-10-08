@@ -370,9 +370,9 @@ def wait_ended(*pids, seconds=30):
 
 
 def stop_group(pid):
-    """Stop the process *pid* and everything in its group, as the engine's
-    `_stop` does. `/F`, because without it `taskkill` only asks, and a run
-    still winding down holds the copy as its working directory."""
+    """Stop the process *pid* and everything in its group, as
+    `process.stop` does. `/F`, because without it `taskkill` only asks, and
+    a run still winding down holds the copy as its working directory."""
     if os.name == "nt":
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                        capture_output=True)

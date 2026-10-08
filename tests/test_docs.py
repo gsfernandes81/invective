@@ -151,7 +151,7 @@ def test_every_path_the_prose_names_exists(page):
 # Symbols
 
 _SYMBOL = re.compile(r"(?:invective|pytest_invective|__main__|mutate|sweep|tree"
-                     r"|accept|config|errors)(?:\.[A-Za-z_]\w*)+")
+                     r"|accept|config|errors|process)(?:\.[A-Za-z_]\w*)+")
 _EXTENSIONS = {"py", "md", "toml", "cfg", "ini", "yml", "json", "lock", "txt"}
 
 

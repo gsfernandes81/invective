@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -13,10 +16,10 @@ import time
 
 import pytest
 
-from invective import mutate
+from invective import mutate, process
 from invective import tree as trees
 
-from conftest import (commit, git, slow_run, stop_group, wait_ended,
+from conftest import (SRC, commit, git, slow_run, stop_group, wait_ended,
                       write_tree)
 
 
@@ -297,7 +300,8 @@ def test_the_copy_is_marked_with_its_owner_before_it_is_filled(tmp_path,
     with pytest.raises(mutate.Refusal):
         with trees.working_tree(root):
             pass
-    assert seen == [{"pid": os.getpid(), "root": root}]
+    assert seen == [{"pid": os.getpid(), "root": root,
+                     "ns": trees._namespace()}]
 
 
 def test_a_ref_s_copy_is_marked_with_its_owner_too(repo, tmp_path):
@@ -306,7 +310,8 @@ def test_a_ref_s_copy_is_marked_with_its_owner_too(repo, tmp_path):
     with trees.git_ref(repo, "HEAD"):
         (box,) = _marked(tmp_path)
         with open(tmp_path / box / trees.MARKER, encoding="utf-8") as fh:
-            assert json.load(fh) == {"pid": os.getpid(), "root": repo}
+            assert json.load(fh) == {"pid": os.getpid(), "root": repo,
+                                     "ns": trees._namespace()}
 
 
 def test_a_ref_s_copy_is_marked_before_git_fills_it(repo, monkeypatch):
@@ -326,6 +331,64 @@ def test_a_ref_s_copy_is_marked_before_git_fills_it(repo, monkeypatch):
     with trees.git_ref(repo, "HEAD"):
         pass
     assert seen == [True]
+
+
+def test_the_namespace_is_the_pid_namespace_on_linux():
+    """The pid namespace's own id, and nothing else: nowhere but Linux has
+    one to read, and there the namespace is `None`."""
+    if not sys.platform.startswith("linux"):
+        assert trees._namespace() is None
+        return
+    ns = trees._namespace()
+    assert re.fullmatch(r"pid:\[\d+\]", ns), ns
+    assert ns == os.readlink("/proc/self/ns/pid")
+
+
+def test_a_namespace_that_cannot_be_read_is_none(monkeypatch):
+    """A `/proc` that is not mounted, or not readable, must not stop every
+    copy from being made."""
+    def unreadable(path):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(trees.os, "readlink", unreadable)
+    assert trees._namespace() is None
+
+
+def _unshare():
+    """An `unshare` command that can make a pid namespace here, or None."""
+    if shutil.which("unshare") is None:
+        return None
+    # As root, `--pid` alone; as anyone else, inside a user namespace of
+    # their own where the kernel lets them have one, or through a sudo that
+    # asks for no password (GitHub's runners, whose AppArmor refuses the user
+    # namespace).
+    for command in (["unshare", "--pid", "--fork"],
+                    ["unshare", "--user", "--map-root-user", "--pid",
+                     "--fork"],
+                    ["sudo", "-n", "unshare", "--pid", "--fork"]):
+        made = subprocess.run([*command, "true"], capture_output=True)
+        if made.returncode == 0:
+            return command
+    return None
+
+
+def test_a_process_in_another_pid_namespace_has_another_namespace():
+    """The pid namespace is what tells a copy made in one container from a
+    copy made in another on the same host."""
+    command = _unshare()
+    if command is None:
+        pytest.skip("`unshare` cannot make a pid namespace here")
+    # This checkout's `src` goes in by the code rather than PYTHONPATH, which
+    # sudo drops from the environment.
+    theirs = subprocess.run(
+        [*command, sys.executable, "-c",
+         "import sys; sys.path.insert(0, %r); "
+         "from invective import tree; print(tree._namespace())" % SRC],
+        capture_output=True, text=True, check=True).stdout.strip()
+
+    ours = trees._namespace()
+    assert ours is not None
+    assert theirs not in (ours, "None")
 
 
 def test_a_copy_killed_while_it_is_removed_is_left_under_a_name_the_reaper_removes(
@@ -403,11 +466,11 @@ def test_a_ref_stopped_during_the_checkout_leaves_no_copy_and_no_worktree(
         if args[:2] == ("worktree", "add"):
             # As git leaves it when the stop lands before it has finished.
             git(repo, "worktree", "lock", args[3])
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         return out
 
     monkeypatch.setattr(trees, "_git", stopped_after_the_add)
-    with pytest.raises(mutate._Terminated):
+    with pytest.raises(process.Terminated):
         with trees.git_ref(repo, "HEAD"):
             pass
 
@@ -438,11 +501,11 @@ def test_a_ref_stopped_during_the_checkout_through_a_linked_temp_dir_leaves_no_w
         out = real(root, *args)
         if args[:2] == ("worktree", "add"):
             git(repo, "worktree", "lock", args[3])
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         return out
 
     monkeypatch.setattr(trees, "_git", stopped_after_the_add)
-    with pytest.raises(mutate._Terminated):
+    with pytest.raises(process.Terminated):
         with trees.git_ref(repo, "HEAD"):
             pass
 
@@ -505,13 +568,14 @@ def test_every_pid_an_os_hands_out_is_asked_about(tmp_path, monkeypatch):
     assert _marked(tmp_path) == []
 
 
-def _dead_owners_copy(tmp_path, name):
+def _dead_owners_copy(tmp_path, name, **more):
     gone = subprocess.Popen([sys.executable, "-c", ""])
     gone.wait()
     dead = tmp_path / name
     os.mkdir(dead)
     (dead / trees.MARKER).write_text(
-        json.dumps({"pid": gone.pid, "root": "elsewhere"}), encoding="utf-8")
+        json.dumps({"pid": gone.pid, "root": "elsewhere", **more}),
+        encoding="utf-8")
     return dead
 
 
@@ -545,6 +609,59 @@ def test_a_ref_begins_by_removing_the_copies_of_dead_owners(repo, tmp_path):
 
     with trees.git_ref(repo, "HEAD"):
         assert not dead.exists()
+
+
+@pytest.mark.parametrize("theirs, ours", [
+    ("pid:[4026532262]", "pid:[4026531836]"),
+    (None, "pid:[4026531836]"),
+    ("pid:[4026532262]", None),
+], ids=["another-container", "unread-there", "unread-here"])
+def test_a_copy_made_in_another_namespace_is_never_reaped(tmp_path,
+                                                          monkeypatch, theirs,
+                                                          ours):
+    """A container sharing the temporary directory counts pids from 1 in a
+    namespace of its own, so the pid of its live copy's owner is dead here,
+    or somebody else's. A namespace that could not be read on one side is
+    not the other side's either."""
+    monkeypatch.setattr(trees, "_namespace", lambda: ours)
+    kept = _dead_owners_copy(tmp_path, "invective-eeeeeeee", ns=theirs)
+
+    trees.reap()
+
+    assert kept.is_dir()
+
+
+@pytest.mark.parametrize("ns", ["pid:[4026531836]", None],
+                         ids=["read", "unread"])
+def test_a_dead_owner_in_this_namespace_is_reaped(tmp_path, monkeypatch, ns):
+    """Only another namespace keeps a copy: where neither side can be read
+    (Windows, macOS), `None` is the same namespace, and the pid decides."""
+    monkeypatch.setattr(trees, "_namespace", lambda: ns)
+    _dead_owners_copy(tmp_path, "invective-eeeeeeee", ns=ns)
+
+    trees.reap()
+
+    assert _marked(tmp_path) == []
+
+
+def test_a_marker_without_a_namespace_is_judged_by_its_pid(tmp_path,
+                                                          monkeypatch):
+    """An invective before 0.2.1 writes no `ns`, and its dead owner's copy
+    is still reaped here, where the namespace can be read."""
+    monkeypatch.setattr(trees, "_namespace", lambda: "pid:[4026531836]")
+    _dead_owners_copy(tmp_path, "invective-eeeeeeee")
+
+    trees.reap()
+
+    assert _marked(tmp_path) == []
+
+
+def test_git_imports_nothing_when_it_runs():
+    """Its process group and its stop are `process`'s, imported with this
+    module: a local import there runs on every git command."""
+    body = ast.parse(inspect.getsource(trees._git))
+    assert not [node for node in ast.walk(body)
+                if isinstance(node, (ast.Import, ast.ImportFrom))]
 
 
 @pytest.mark.parametrize("name", ["invective-leak1234",
@@ -686,14 +803,14 @@ def test_a_ref_stopped_during_the_checkout_stops_what_git_started(
         # The stop lands once the filler is running, however slowly the
         # processes before it started.
         if filler_pid.exists() and filler_pid.read_text():
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         signal.setitimer(signal.ITIMER_REAL, 0.1)
 
     previous = signal.signal(signal.SIGALRM, stop)
     filler = None
     try:
         signal.setitimer(signal.ITIMER_REAL, 0.5)
-        with pytest.raises(mutate._Terminated):
+        with pytest.raises(process.Terminated):
             with trees.git_ref(repo, "HEAD"):
                 pass
         filler = int(filler_pid.read_text())
@@ -727,7 +844,7 @@ def test_a_stop_during_the_removal_of_the_copy_goes_on_once_the_copy_is_gone(
     def rmtree(path, ignore_errors=False):
         calls.append(path)
         if len(calls) == 1:
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         # The pass after the stop is as quiet as the first: a file that will
         # not go does not replace the stop with an error of its own.
         if not ignore_errors:
@@ -735,7 +852,7 @@ def test_a_stop_during_the_removal_of_the_copy_goes_on_once_the_copy_is_gone(
         return real(path, ignore_errors=True)
 
     monkeypatch.setattr(trees.shutil, "rmtree", rmtree)
-    with pytest.raises(mutate._Terminated):
+    with pytest.raises(process.Terminated):
         with trees.working_tree(root):
             pass
     assert _left(tmp_path) == []
@@ -747,11 +864,11 @@ def test_a_stop_during_the_removal_of_the_worktree_still_removes_the_copy(
 
     def run(argv, *args, **kwargs):
         if "remove" in argv:
-            raise mutate._Terminated(signal.SIGTERM)
+            raise process.Terminated(signal.SIGTERM)
         return real(argv, *args, **kwargs)
 
     monkeypatch.setattr(trees.subprocess, "run", run)
-    with pytest.raises(mutate._Terminated):
+    with pytest.raises(process.Terminated):
         with trees.git_ref(repo, "HEAD"):
             pass
     assert _left(tmp_path) == []
