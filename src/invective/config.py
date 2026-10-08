@@ -6,6 +6,7 @@
     max-accepted = 10          # so do more accepted survivors than this
     exclude = ["var/*"]        # left out of the copy the mutants are run in
     workers = 1                # mutants run at once; "auto" for one per CPU
+    confirm = false            # with workers, confirm each kill alone
 
 An unknown key is a refusal, so that a misspelt one is not read as absent.
 
@@ -41,12 +42,13 @@ class Config(NamedTuple):
     max_accepted: int | None = None
     exclude: tuple[str, ...] = ()
     workers: int | str = 1
+    confirm: bool = False
 
 
 #: Each key and its type; `workers`, a count or "auto", has a check of its
 #: own (`workers`).
 _KEYS = {"fail-on-survivors": bool, "max-accepted": int, "exclude": list,
-         "workers": (int, str)}
+         "workers": (int, str), "confirm": bool}
 _SAID = {bool: "true or false", int: "a whole number", list: "a list"}
 
 #: The most copies "auto" makes: each is a whole copy of the project, and
@@ -382,4 +384,4 @@ def load(root: str) -> Config:
         raise Refusal("[tool.invective] exclude must be a list of strings")
     return Config(table.get("fail-on-survivors", False),
                   table.get("max-accepted"), tuple(exclude),
-                  table.get("workers", 1))
+                  table.get("workers", 1), table.get("confirm", False))

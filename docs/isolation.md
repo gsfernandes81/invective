@@ -92,14 +92,26 @@ and exit 128 + the signal's number.
 With `workers` above 1, each worker has a copy of its own, made from the first
 (`tree.working_tree`'s `source`), or a worktree of the one commit `--ref`
 resolves to. The first copy runs the selection alone, then every copy runs it at
-once, and each must be green. Every kill is confirmed after the last mutant has
-run, with nothing else running, in the first copy restored to the original: its
-killer alone, which must also pass alone on the original, or else the whole
-selection. Before any kill is confirmed, the whole selection is run there once
-more, and the run is refused unless it passes. A test that fails because
-another copy's run holds a port, a path or a database therefore never scores a
-kill. The reverse is not caught: a test that passes because of another copy's
-run lets a mutant survive, so such a suite runs with one worker.
+once, and each must be green: a selection green alone and red at once is
+refused, as one whose tests are not safe to run in parallel or depend on their
+order.
+
+The copies' runs go on side by side, so the suite is taken to be one whose
+tests are independent of their order and safe to run in parallel, the bar
+pytest-xdist sets. A test that holds a port, a fixed path or a database another
+copy's run uses can fail and score a kill that is no mutant's, or pass and let
+a mutant survive. For a suite that breaks this, the verdicts are not
+guaranteed; with one worker, the runs are one at a time.
+
+Confirmation is the diagnosis, asked for with `--confirm` (`--mutate-confirm`,
+`confirm` in `[tool.invective]`). Every kill is then confirmed after the last
+mutant has run, with nothing else running, in the first copy restored to the
+original: its killer alone, which must also pass alone on the original, or else
+the whole selection, whose verdict stands. Before any kill is confirmed, the
+whole selection is run there once more, and the run is refused unless it
+passes. A kill its killer does not make alone is named in the report
+(`unreproduced`) and in the closing lines: its killer is likely a test that
+depends on its order or on another copy's run. A survivor is not run again.
 
 ## The import-from-outside refusal
 

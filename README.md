@@ -55,12 +55,22 @@ stand.
 
 `--workers N` runs N mutants at once, each in a copy of its own; `auto` is
 one per available CPU, at most 8. `workers` in `[tool.invective]` sets the
-default, which is 1. With more than one worker, every kill is confirmed once
-the others are done, with nothing else running: its killer is run alone, or
-else the whole selection again, and the kill carries `confirmed` (`alone` or
-`full`) in the report. A suite whose tests share a port, a fixed path or a
-database can still have a mutant survive because of another copy's run; give
-it one worker.
+default, which is 1.
+
+With more than one worker, the suite has to be one whose tests are
+independent of their order and safe to run in parallel, the bar pytest-xdist
+sets. A test that shares a port, a fixed path or a database with its copy in
+another worker's run, or that needs another test to run before it, can kill a
+mutant or let one survive because of what else ran, and for such a suite the
+verdicts are not guaranteed. A selection green alone and red when every copy
+runs it at once is refused for that.
+
+`--confirm` (`confirm` in `[tool.invective]`) looks for such tests. Once the
+last mutant has run, every kill is run again with nothing else running: its
+killer alone, or else the whole selection, and the kill carries `confirmed`
+(`alone` or `full`) in the report. A kill its killer does not make alone is
+listed under `unreproduced` and in the closing lines, with that killer, the
+test to look at. With one worker there is nothing to confirm.
 
 ```text
 copy:      /tmp/invective-k2m1x9ab
@@ -110,10 +120,11 @@ pytest --mutate src/pkg/gate.py tests/test_gate.py -k refus
 The mutants are run against exactly the tests pytest collected, so `-k`, `-m`,
 `--deselect` and node ids all narrow the selection. `--mutate` can be given
 more than once; `--mutate-only`, `--mutate-limit`, `--mutate-json`,
-`--mutate-ref` and `--mutate-workers` work as `--only`, `--limit`, `--json`,
-`--ref` and `--workers` do for `invective run`. The tests are not run as an
-ordinary session: pytest's last line says how many were deselected or that no
-tests ran. The report is the section above it.
+`--mutate-ref`, `--mutate-workers` and `--mutate-confirm` work as `--only`,
+`--limit`, `--json`, `--ref`, `--workers` and `--confirm` do for `invective
+run`. The tests are not run as an ordinary session: pytest's last line says
+how many were deselected or that no tests ran. The report is the section above
+it.
 
 pytest-xdist's workers have to be off for the outer run (`-n 0`): with
 workers on, `--mutate` stops at startup with a usage error (exit 4).
@@ -211,6 +222,7 @@ fail-on-survivors = true   # a survivor no comment accepts, or a stale
 max-accepted = 10          # so do more accepted survivors than this
 exclude = ["var/*"]        # left out of the copy
 workers = 1                # mutants run at once; "auto" for one per CPU
+confirm = false            # with workers, confirm each kill alone
 ```
 
 | command | exit code | meaning |

@@ -63,12 +63,12 @@ def test_each_module_is_measured_against_the_collected_tests(repo, tmp_path):
 
 
 def test_workers_are_given_as_invective_run_takes_them(repo, tmp_path):
-    """Two copies, and the kill confirmed by its killer alone."""
+    """Two copies, and asked to, the kill confirmed by its killer alone."""
     out = tmp_path / "reports.json"
 
     done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
-                     "raise,bool", "--mutate-workers", "2", "--mutate-json",
-                     str(out), "pkg/tests/test_gate.py")
+                     "raise,bool", "--mutate-workers", "2", "--mutate-confirm",
+                     "--mutate-json", str(out), "pkg/tests/test_gate.py")
 
     assert done.returncode == 0, done.stdout + done.stderr
     (gate,) = json.loads(out.read_text(encoding="utf-8"))

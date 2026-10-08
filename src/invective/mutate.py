@@ -1086,7 +1086,8 @@ def _landed(mutant: Mutant, outcome: Outcome) -> None:
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
            limit: int | None, say=print, ref: str | None = None,
            exclude: tuple[str, ...] = (), selection: list[str] | None = None,
-           options: tuple[str, ...] = (), workers: int | str = 1) -> dict:
+           options: tuple[str, ...] = (), workers: int | str = 1,
+           confirm: bool = False) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
     The mutants are written in a copy of *root* as it stands, *exclude* left
@@ -1099,8 +1100,11 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     each line of progress as it happens.
 
     *workers* mutants are run at once, each in a copy of its own
-    (`config.workers` says what it may be). With more than one, every kill
-    is confirmed once the last mutant has run, with nothing else running.
+    (`config.workers` says what it may be). The suite is taken to be one
+    whose tests are independent of their order and safe to run in parallel;
+    with *confirm* and more than one worker, every kill is confirmed once
+    the last mutant has run, with nothing else running, and the report
+    names each kill its killer did not make alone (`unreproduced`).
     """
     try:
         src_rel = relative_to_root(target, root)
@@ -1192,6 +1196,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             say("copy:      %s" % where)
             places.append(where)
         say("workers:   %d" % count)
+        if confirm and count == 1:
+            # Said, not refused: `confirm` in the settings is for the runs
+            # with workers, and a run with one is a serial campaign.
+            say("confirm:   nothing to confirm with one worker")
         say("project:   %s" % root)
         say("target:    %s" % src_rel)
         say("tests:     %s" % (" ".join(tests) if selection is None else
@@ -1212,7 +1220,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
 
         held_open.push(ended)
 
-        def baseline(copy: Copy, together: bool = False) -> float:
+        def baseline(copy: Copy) -> tuple[float, Verdict]:
+            """How long the selection took on *copy*'s original, and what it
+            said: refused here unless it ran, green or red, whole."""
             started = time.time()
             got = copy.run(None, BASELINE_TIMEOUT)
             took = time.time() - started
@@ -1227,16 +1237,6 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "(pytest exited %d), so there is no suite here to notice "
                     "a mutation. Every mutant would score as killed by a run "
                     "that never ran a test.\n%s" % (got.code, got.tail))
-            if not got.ok:
-                # At once, a run can be red because of another copy's: a
-                # port, a path or a database the suite shares.
-                raise Refusal(
-                    "the selection is RED on the unmutated tree%s, so every "
-                    "mutant would be 'killed' for a reason that is not the "
-                    "mutation and the score would read perfect. Fix the "
-                    "suite first.\n%s"
-                    % (" at %s, run in %d copies at once" % (copy.where, count)
-                       if together else "", got.tail))
             if got.missing:
                 # The selection was collected somewhere else -- a checkout
                 # that has moved on, or a commit the tests are not at.
@@ -1245,16 +1245,39 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "are made in, among them %s"
                     # invective: accept[equivalent: 3 -> 4] how many are named
                     % (len(got.missing), ", ".join(got.missing[:3])))
-            return took
+            return took, got
 
         # **The first copy runs the selection alone, then every copy runs
         # it at once.** Alone, it proves the suite green with nothing else
-        # running, and is what a kill is confirmed against; at once, each
-        # copy must be green too, and the slowest run is the load every
-        # mutant's runs will be under, which the budget is measured from.
-        alone = base = baseline(copies[0])
+        # running; at once, each copy must be green too, and the slowest
+        # run is the load every mutant's runs will be under, which the
+        # budget is measured from.
+        alone, got = baseline(copies[0])
+        if not got.ok:
+            raise Refusal(
+                "the selection is RED on the unmutated tree, so every mutant "
+                "would be 'killed' for a reason that is not the mutation and "
+                "the score would read perfect. Fix the suite first.\n%s"
+                % got.tail)
+        base = alone
         if count > 1:
-            base = max(pool.each(lambda copy: baseline(copy, True)))
+            together = pool.each(baseline)
+            red = [copy.where for copy, (_took, got) in zip(copies, together)
+                   if not got.ok]
+            if red:
+                # **Green alone and red beside its own copies** is a suite
+                # whose tests share something (a port, a path, a database)
+                # or need their order, and every mutant's run in it would be
+                # judged by which runs it met.
+                raise Refusal(
+                    "the selection is green alone and RED in %d of %d copies "
+                    "running it at once (%s): its tests are not safe to run "
+                    "in parallel, or depend on their order, and a mutant "
+                    "could be 'killed' by another copy's run. Run it with one "
+                    "worker.\n%s"
+                    % (len(red), count, ", ".join(red), next(
+                        got.tail for _took, got in together if not got.ok)))
+            base = max(took for took, _got in together)
         say("baseline:  green in %.1fs" % base)
 
         # invective: accept[equivalent: 3 -> 4] any budget well above the baseline serves, and a kill by time is counted apart
@@ -1304,10 +1327,11 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             return _measure(mutant, copy, attempts, budget)
 
         def final(outcome: Outcome) -> bool:
-            # A kill made while other copies ran is final only once it is
-            # confirmed: a test can fail because another copy's run holds a
-            # port, a path or a database.
-            return count == 1 or outcome.verdict.ok or outcome.via == "cache"
+            # Asked to confirm, a kill made while other copies ran is final
+            # only once it is: a test that is not safe in parallel can fail
+            # because another copy's run holds a port, a path or a database.
+            return (count == 1 or not confirm or outcome.verdict.ok
+                    or outcome.via == "cache")
 
         # The edit as a reader sees it, for every entry the mutant makes:
         # kind, line and change find a site but do not show what a `NOT`
@@ -1400,6 +1424,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         ahead: collections.deque[Mutant] = collections.deque()
         idle = list(range(count))
         unconfirmed: list[tuple[Job, Outcome]] = []
+        unreproduced: list[dict] = []
         finished = 0
         try:
             while jobs or ahead or running:
@@ -1435,11 +1460,15 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         pool.close()
 
         if unconfirmed:
-            # **Every kill is confirmed with nothing else running**, in the
-            # first copy with the original back in it. Its first run is the
-            # whole selection on the original: the mutants' runs there can
-            # have left something behind that a test reads, and a copy no
-            # longer green on the original would score a kill for that.
+            # **Asked to, every kill is confirmed with nothing else
+            # running**, in the first copy with the original back in it.
+            # Each kill whose killer, a test, does not make it alone is
+            # named: the killer can be one that depends on its order or on
+            # another copy's run, which is what the suite was taken not to
+            # do. The first run is the whole selection on the original: the
+            # mutants' runs there can have left something behind that a test
+            # reads, and a copy no longer green on the original would score
+            # a kill for that.
             confirming = copies[0]
             confirming.restore()
             guard = confirming.run(None, alone_budget)
@@ -1455,7 +1484,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # chose: on the command line, an option among the tests would
             # be left out with them.
             usable = {}
-            if selection is not None or _plain_tests(tests, first):
+            gated = selection is not None or _plain_tests(tests, first)
+            if gated:
                 killers = dict.fromkeys(
                     outcome.verdict.killer for _job, outcome in unconfirmed
                     if "::" in outcome.verdict.killer)
@@ -1470,11 +1500,16 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 mutant = made(job)
                 killer = outcome.verdict.killer
                 confirmed = None
+                alone_said = ""
                 if killer in usable:
                     got = confirming.run(mutant, alone_budget, usable[killer])
                     if (got.code == ExitCode.TESTS_FAILED
                             and got.killer == killer and not got.missing):
                         confirmed = outcome._replace(confirmed="alone")
+                    else:
+                        alone_said = "passes alone on the mutant"
+                elif "::" in killer and gated:
+                    alone_said = "fails alone on the original"
                 if confirmed is None:
                     # The whole selection again decides it, a survivor
                     # included: this run is the only one with nothing else
@@ -1482,6 +1517,12 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     confirmed = Outcome(
                         _final(confirming.run(mutant, alone_budget), mutant,
                                src_rel), confirmed="full")
+                if alone_said:
+                    unreproduced.append({
+                        "kind": job.kind, "line": job.line, "change": job.what,
+                        "killer": killer, "alone": alone_said,
+                        "again": ("survived" if confirmed.verdict.ok
+                                  else "killed")})
                 lands(mutant, confirmed)
 
         if reported != len(sites):
@@ -1501,15 +1542,21 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             say("  STALE     %s:%d  accept[%s]  %s" % (
                 src_rel, item["line"], item["reason"], item["problem"]))
 
-        return {"target": src_rel, "tests": tests if selection is None else selection,
-                "mutants": len(sites), "killed": killed, "kills": kills,
-                "survivors": survivors, "accepted": accepted, "stale": stale_,
-                # Killed by a mutation the runner could not even import or
-                # collect past, rather than by a test failing on it. Still a
-                # kill -- the suite did notice -- but a blunter one, and a
-                # campaign that cannot see the split cannot tell a
-                # well-guarded module from an unimportable one.
-                "broken": broken, "workers": count}
+        report = {
+            "target": src_rel, "tests": tests if selection is None else selection,
+            "mutants": len(sites), "killed": killed, "kills": kills,
+            "survivors": survivors, "accepted": accepted, "stale": stale_,
+            # Killed by a mutation the runner could not even import or
+            # collect past, rather than by a test failing on it. Still a
+            # kill -- the suite did notice -- but a blunter one, and a
+            # campaign that cannot see the split cannot tell a
+            # well-guarded module from an unimportable one.
+            "broken": broken, "workers": count}
+        if confirm and count > 1:
+            # There whenever the kills were confirmed, empty or not, so that
+            # none named reads as none found and not as none looked for.
+            report["unreproduced"] = unreproduced
+        return report
 
 
 def summary(report: dict) -> list[str]:
@@ -1539,6 +1586,19 @@ def summary(report: dict) -> list[str]:
         # of this kind is not a well-tested file.
         lines.append("           %d of the kills were collection or internal "
                      "errors, not a test failing" % report["broken"])
+    # `.get`: there only when the kills were confirmed.
+    unreproduced = report.get("unreproduced", [])
+    if unreproduced:
+        # Each named, since the killer is the likely culprit: a test that
+        # depends on its order or on another copy's run.
+        lines.append("           %d kill(s) did not come back with the killer "
+                     "alone, which may depend on its order or on another "
+                     "copy's run:" % len(unreproduced))
+        for item in unreproduced:
+            lines.append("             %s:%d %s  %s %s; the whole selection "
+                         "again: %s" % (report["target"], item["line"],
+                                        item["change"], item["killer"],
+                                        item["alone"], item["again"]))
     # `.get`: the key is only there when the fallback was used, over the
     # three lists a report already has.
     whole = sum(e.get("whole_file", False) for e in
@@ -1613,6 +1673,10 @@ def parser() -> argparse.ArgumentParser:
                     help='run N mutants at once, each in a copy of its own; '
                          '"auto" for one per CPU. [tool.invective] workers '
                          'sets the default, which is 1')
+    ap.add_argument("--confirm", action="store_true",
+                    help="with workers, run each kill again with nothing else "
+                         "running, and name those its killer does not make "
+                         "alone. [tool.invective] confirm turns it on")
     return ap
 
 
@@ -1638,7 +1702,8 @@ def main(argv: list[str] | None = None) -> int:
         report = mutate(root, args.target, tests, only, args.limit,
                         ref=args.ref, exclude=config.exclude,
                         workers=(config.workers if args.workers is None
-                                 else args.workers))
+                                 else args.workers),
+                        confirm=args.confirm or config.confirm)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2

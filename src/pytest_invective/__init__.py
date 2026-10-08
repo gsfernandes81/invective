@@ -97,6 +97,10 @@ def pytest_addoption(parser):
         "--mutate-workers", metavar="N",
         help="run N mutants at once, each in a copy of its own, as `invective "
              "run --workers` does")
+    group.addoption(
+        "--mutate-confirm", action="store_true",
+        help="with workers, confirm each kill with nothing else running, as "
+             "`invective run --confirm` does")
 
 
 def pytest_load_initial_conftests(early_config, parser, args):
@@ -433,7 +437,8 @@ def pytest_runtestloop(session):
                 root, target, typed, _only(config),
                 config.getoption("mutate_limit"), say=say,
                 ref=config.getoption("mutate_ref"), exclude=rules.exclude,
-                selection=selection, options=options, workers=workers)
+                selection=selection, options=options, workers=workers,
+                confirm=config.getoption("mutate_confirm") or rules.confirm)
             reports.append(report)
             failures.extend("%s: %s" % (report["target"], failure)
                             for failure in mutate.gate(report, rules))

@@ -178,16 +178,34 @@ def test_one_worker_reports_as_a_serial_campaign_does(tree, monkeypatch,
 
 
 @pytest.mark.parametrize("name", sorted(TARGETS))
-def test_three_workers_report_as_one_does_with_every_kill_confirmed(
-        tree, monkeypatch, name):
+def test_three_workers_report_as_one_does(tree, monkeypatch, name, landed):
     """The same entries in the same order, from runs that ended in another
-    order: each kill carries how it was confirmed, and nothing else
-    differs. A killer that is a test failed alone, and the rest were the
-    whole selection again."""
+    order, and every kill final as it ends: nothing is run once the last
+    mutant has, and nothing says how a kill was confirmed."""
     one = Campaign(tree, monkeypatch, TARGETS[name], by_text)(1)
-    three = Campaign(tree, monkeypatch, TARGETS[name], by_text)(3)
+    run = Campaign(tree, monkeypatch, TARGETS[name], by_text)
+    three = run(3)
 
     assert (one["workers"], three["workers"]) == (1, 3)
+    assert {**three, "workers": 1} == one
+    assert "unreproduced" not in three
+    # Three baselines alone and at once, and each mutant once.
+    assert len(run.runs) == 1 + 3 + three["mutants"]
+    assert len(landed) == 2 * three["mutants"]
+
+
+@pytest.mark.parametrize("name", sorted(TARGETS))
+def test_three_workers_confirming_report_as_one_does_but_for_how(
+        tree, monkeypatch, name):
+    """Asked to confirm: each kill carries how it was confirmed, and nothing
+    else differs. A killer that is a test failed alone, and the rest were
+    the whole selection again; none is named as not coming back alone."""
+    one = Campaign(tree, monkeypatch, TARGETS[name], by_text)(1)
+    three = Campaign(tree, monkeypatch, TARGETS[name], by_text)(3,
+                                                               confirm=True)
+
+    assert (one["workers"], three["workers"]) == (1, 3)
+    assert three.pop("unreproduced") == []
     assert not any("confirmed" in entry for key in ("kills", "survivors",
                                                     "accepted")
                    for entry in one[key])
@@ -258,7 +276,8 @@ def test_a_copy_red_or_short_on_the_unmutated_tree_is_refused(
     """Each copy runs the selection at once with the others, and each must
     be green on its own: a test red only beside another copy's run, or a
     copy missing a test, would score kills that are no mutant's."""
-    for wrong, says in [(killed_by(MINOR), "is RED on the unmutated tree at"),
+    for wrong, says in [(killed_by(MINOR), "green alone and RED in 1 of 3 "
+                         "copies running it at once"),
                         (GREEN._replace(missing=(MINOR,)),
                          "1 of the tests selected are not in the tree"),
                         (GREEN._replace(elsewhere="/elsewhere/gate.py"),
@@ -341,7 +360,7 @@ def test_a_kill_is_confirmed_on_no_less_time_than_the_loaded_budget(
             "pkg/tests/test_gate.py")
 
     run = Campaign(tree, monkeypatch, said=said)
-    report = run(2, only=["RAISE"])
+    report = run(2, only=["RAISE"], confirm=True)
 
     assert report["kills"][0]["confirmed"] == "full"
     # Three baselines, the mutant's run in the pool, then the first copy
@@ -390,7 +409,7 @@ def test_mutants_are_made_on_the_main_thread_only(tree, monkeypatch):
     monkeypatch.setattr(mutate, "_text_of", text_of)
     run = Campaign(tree, monkeypatch, said=lambda r: killed_by(MINOR)
                    if r.text else GREEN)
-    report = run(3)
+    report = run(3, confirm=True)
     # Each mutant once in the pool, and each kill once more to confirm it.
     assert len(threads) == report["mutants"] + report["killed"]
     assert set(threads) == {threading.main_thread()}
@@ -517,7 +536,7 @@ def test_each_copy_s_writes_are_stamped_at_rising_seconds(tree, monkeypatch):
     monkeypatch.setattr(mutate, "_write", write)
     run = Campaign(tree, monkeypatch, said=lambda r: killed_by(MINOR)
                    if r.text else GREEN)
-    report = run(2)
+    report = run(2, confirm=True)
     assert report["mutants"] == 6
     assert len(stamps) == 2
     first = stamps[run.places[0]]
@@ -543,7 +562,7 @@ def test_a_kill_its_killer_does_not_make_alone_is_the_whole_selection_s_again(
         return killed_by(MINOR) if run.text else GREEN
 
     run = Campaign(tree, monkeypatch, said=said)
-    report = run(2)
+    report = run(2, confirm=True)
 
     assert report["kills"] == []
     confirmed = [s for s in report["survivors"] if "confirmed" in s]
@@ -554,6 +573,11 @@ def test_a_kill_its_killer_does_not_make_alone_is_the_whole_selection_s_again(
     assert alone[0] == Run(0, None, MINOR, alone[0].timeout)
     assert len(alone) == 1 + len(confirmed)
     assert len(landed) == report["mutants"]
+    # Each named, with its killer, which is the test to look at.
+    assert [(u["line"], u["change"], u["killer"], u["alone"], u["again"])
+            for u in report["unreproduced"]] == [
+        (s["line"], s["change"], MINOR, "passes alone on the mutant",
+         "survived") for s in confirmed]
 
 
 @pytest.mark.parametrize("tests, gated", [
@@ -565,10 +589,12 @@ def test_a_killer_is_run_alone_only_where_it_leaves_out_nothing_the_tests_chose(
     selection."""
     run = Campaign(tree, monkeypatch, said=lambda r: killed_by(MINOR)
                    if r.text else GREEN)
-    report = run(2, only=["RAISE"], tests=tests)
+    report = run(2, only=["RAISE"], tests=tests, confirm=True)
     (kill,) = report["kills"]
     assert kill["confirmed"] == ("alone" if gated else "full")
     assert bool([r for r in run.runs if r.alone]) is gated
+    # A killer never run alone is not one that did not come back alone.
+    assert report["unreproduced"] == []
 
 
 def test_a_killer_red_alone_on_the_original_confirms_nothing_alone(
@@ -582,10 +608,97 @@ def test_a_killer_red_alone_on_the_original_confirms_nothing_alone(
         return GREEN
 
     run = Campaign(tree, monkeypatch, said=said)
-    report = run(2)
+    report = run(2, confirm=True)
     assert {kill["confirmed"] for kill in report["kills"]} == {"full"}
     assert [r for r in run.runs if r.alone] == [
         Run(0, None, MINOR, run.runs[-1].timeout)]
+    assert [(u["alone"], u["again"]) for u in report["unreproduced"]] == [
+        ("fails alone on the original", "killed")] * report["killed"]
+
+
+def test_two_copies_that_collide_kill_and_confirming_names_the_test(
+        tree, monkeypatch, capsys):
+    """`test_port` holds a port, so it fails whenever another copy runs it
+    at the same moment: two workers, held at a barrier so their first runs
+    meet, kill a mutant each for that, and nothing else does. Without
+    confirming, the kills stand, which is what a suite that is not safe in
+    parallel gets; confirming, each is run alone, comes back a survivor,
+    and is named with `test_port`, in the report and in the closing
+    lines."""
+    port = "pkg/tests/test_gate.py::test_port"
+    barrier = threading.Barrier(2, timeout=30)
+    running = []
+
+    def said(run):
+        if run.text is None:
+            return GREEN
+        with run_.lock:
+            running.append(run)
+        if len([r for r in run_.runs if r.text]) <= 2:
+            barrier.wait()
+        try:
+            return killed_by(port) if len(running) > 1 else GREEN
+        finally:
+            time.sleep(0.05)
+            with run_.lock:
+                running.remove(run)
+
+    run_ = Campaign(tree, monkeypatch, said=said)
+    plain = run_(2, only=["RAISE", "BOOL"])
+    assert [k["killer"] for k in plain["kills"]] == [port, port]
+    assert "unreproduced" not in plain
+
+    barrier.reset()
+    run_ = Campaign(tree, monkeypatch, said=said)
+    report = run_(2, only=["RAISE", "BOOL"], confirm=True)
+    assert report["kills"] == []
+    assert [(u["killer"], u["alone"], u["again"])
+            for u in report["unreproduced"]] == [
+        (port, "passes alone on the mutant", "survived")] * 2
+    said_ = mutate.summary(report)
+    assert said_[1] == ("           2 kill(s) did not come back with the "
+                        "killer alone, which may depend on its order or on "
+                        "another copy's run:")
+    assert said_[2:4] == [
+        "             %s:%d %s  %s passes alone on the mutant; the whole "
+        "selection again: survived" % (GATE, u["line"], u["change"], port)
+        for u in report["unreproduced"]]
+
+
+def test_confirming_with_one_worker_says_there_is_nothing_to_confirm(
+        tree, monkeypatch):
+    """Said, not refused: `confirm` in the settings is for runs with
+    workers, and one worker is the serial campaign it was always."""
+    run = Campaign(tree, monkeypatch, TARGETS["gate"], by_text)
+    report = run(1, confirm=True)
+    assert "confirm:   nothing to confirm with one worker" in run.lines
+    assert _digest(report) == PINNED["gate"]
+    assert "unreproduced" not in report
+    two = Campaign(tree, monkeypatch)
+    two(2, confirm=True)
+    assert not [ln for ln in two.lines if ln.startswith("confirm:")]
+
+
+def test_without_confirming_a_stop_lands_every_kill_that_ended(
+        tree, monkeypatch, landed):
+    """Not asked to confirm, a kill made beside other runs is final as it
+    ends, as at one worker, so a stop lands it too."""
+    interrupted = threading.Event()
+
+    def said(run):
+        if run.text is None:
+            return GREEN
+        if not interrupted.is_set():
+            interrupted.set()
+            _thread.interrupt_main()
+        assert campaign.stop.wait(30)
+        return (GREEN, killed_by(MINOR), killed_by(ADULT))[run.copy]
+
+    campaign = Campaign(tree, monkeypatch, said=said)
+    with pytest.raises(KeyboardInterrupt):
+        campaign(3)
+    assert sorted((n, o.verdict.ok) for n, o in landed) == [
+        (1, True), (2, False), (3, False)]
 
 
 def test_a_kill_read_back_is_never_confirmed(tree, monkeypatch, landed):
@@ -600,7 +713,7 @@ def test_a_kill_read_back_is_never_confirmed(tree, monkeypatch, landed):
     monkeypatch.setattr(mutate, "_measure", measure)
     run = Campaign(tree, monkeypatch, said=lambda r: killed_by(MINOR)
                    if r.text else GREEN)
-    report = run(2)
+    report = run(2, confirm=True)
     first, *others = report["kills"]
     assert first["via"] == "cache" and "confirmed" not in first
     assert {kill["confirmed"] for kill in others} == {"alone"}
@@ -621,7 +734,7 @@ def test_with_only_kills_read_back_nothing_is_confirmed(tree, monkeypatch):
         written.append(text), real_write(path, text, when)))
     run = Campaign(tree, monkeypatch, said=lambda r: killed_by(MINOR)
                    if r.text else GREEN)
-    report = run(2)
+    report = run(2, confirm=True)
     assert report["killed"] == report["mutants"] == 6
     # Three baselines and the six mutants: no copy restored, no run after.
     assert len(run.runs) == 3 + 6
@@ -713,7 +826,7 @@ def test_a_stop_at_three_workers_lands_survivors_and_kills_read_back_only(
 
     campaign = Campaign(tree, monkeypatch, said=said)
     with pytest.raises(KeyboardInterrupt):
-        campaign(3)
+        campaign(3, confirm=True)
     # The first three mutants went to the three copies in turn.
     assert sorted((n, o.verdict.ok, o.via) for n, o in landed) == [
         (1, True, ""), (2, False, "cache")]
@@ -939,7 +1052,7 @@ def test_a_confirmation_that_collects_nothing_is_refused(tree, monkeypatch,
 
     campaign = Campaign(tree, monkeypatch, said=said)
     with pytest.raises(mutate.Refusal) as caught:
-        campaign(2, only=["RAISE"])
+        campaign(2, only=["RAISE"], confirm=True)
     assert "made pytest exit 5" in str(caught.value)
     assert landed == []
 
@@ -968,8 +1081,9 @@ def test_a_first_copy_red_on_the_original_after_the_mutants_is_refused(
 
     campaign = Campaign(tree, monkeypatch, said=said)
     with pytest.raises(mutate.Refusal) as caught:
-        campaign(2)
-    assert "not green in the first copy once the original" in str(caught.value)
+        campaign(2, confirm=True)
+    assert "not green in the first copy once the original" in str(
+        caught.value)
     assert [o for _n, o in landed if not o.verdict.ok] == []
     after = campaign.runs[campaign.runs.index(next(
         r for r in campaign.runs[3:] if r.text is None)):]
@@ -995,7 +1109,7 @@ def test_a_kill_with_no_killer_to_run_alone_is_decided_by_the_selection_again(
         return killed_by("pkg/tests/test_gate.py", ExitCode.INTERRUPTED)
 
     campaign = Campaign(tree, monkeypatch, said=said)
-    report = campaign(2, only=["RAISE", "BOOL"])
+    report = campaign(2, only=["RAISE", "BOOL"], confirm=True)
     assert [s.get("confirmed") for s in report["survivors"]] == ["full"]
     assert [k["confirmed"] for k in report["kills"]] == ["full"]
     assert not [r for r in campaign.runs if r.alone]
@@ -1088,20 +1202,23 @@ def test_a_stopped_run_with_two_workers_stops_both_runs_and_removes_both_copies(
             stop_group(run)
 
 
-def test_a_real_campaign_with_two_workers_confirms_its_kill_alone(
-        tree, tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("confirm", [False, True])
+def test_a_real_campaign_with_two_workers(tree, tmp_path, monkeypatch, capsys,
+                                          confirm):
     """The fixture's one refusal, checked by a test: killed in the pool,
-    then by that test alone with nothing else running."""
+    and asked to, by that test alone with nothing else running."""
     monkeypatch.chdir(tree)
     out = tmp_path / "r.json"
     assert mutate.main(["--target", os.path.join(tree, GATE), "--tests",
                         os.path.join(tree, "pkg", "tests", "test_gate.py"),
                         "--only", "RAISE,BOOL", "--workers", "2",
-                        "--json", str(out)]) == 0
+                        "--json", str(out)]
+                       + ["--confirm"] * confirm) == 0
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["workers"] == 2
-    assert [(k["killer"], k["confirmed"]) for k in report["kills"]] == [
-        (MINOR, "alone")]
+    assert [(k["killer"], k.get("confirmed")) for k in report["kills"]] == [
+        (MINOR, "alone" if confirm else None)]
+    assert report.get("unreproduced") == ([] if confirm else None)
     assert [s["line"] for s in report["survivors"]] == [4]
     said = capsys.readouterr().out
     assert said.count("copy:") == 2 and "workers:   2" in said
@@ -1120,16 +1237,19 @@ def test_the_command_refuses_a_count_of_workers_by_name(tree, monkeypatch,
     assert "copy:" not in said.out
 
 
-def test_the_setting_is_the_default_and_the_flag_wins(tree, monkeypatch):
+@pytest.mark.parametrize("setting", ["", "confirm = true\n"])
+def test_the_setting_is_the_default_and_the_flag_wins(tree, monkeypatch,
+                                                      setting):
     write_tree(tree, {"pyproject.toml": (
-        "[tool.pytest.ini_options]\n[tool.invective]\nworkers = 2\n")})
+        "[tool.pytest.ini_options]\n[tool.invective]\nworkers = 2\n"
+        + setting)})
     given = []
     monkeypatch.setattr(mutate, "mutate", lambda *a, **k: given.append(
-        k["workers"]) or {"killed": 0, "mutants": 1, "survivors": [],
-                          "accepted": [], "stale": [], "kills": [],
-                          "broken": 0})
+        (k["workers"], k["confirm"])) or {
+            "killed": 0, "mutants": 1, "survivors": [], "accepted": [],
+            "stale": [], "kills": [], "broken": 0})
     monkeypatch.chdir(tree)
     args = ["--target", GATE, "--tests", "pkg/tests/test_gate.py"]
     mutate.main(args)
-    mutate.main(args + ["--workers", "auto"])
-    assert given == [2, "auto"]
+    mutate.main(args + ["--workers", "auto", "--confirm"])
+    assert given == [(2, bool(setting)), ("auto", True)]
