@@ -199,6 +199,7 @@ fail-on-survivors = true   # a survivor no comment accepts, or a stale
                            # acceptance, fails the run
 max-accepted = 10          # so do more accepted survivors than this
 exclude = ["var/*"]        # left out of the copy
+workers = 1                # mutants run at once; "auto" for one per CPU
 ```
 
 | command | exit code | meaning |
