@@ -23,13 +23,13 @@ uv add --dev git+https://github.com/gsfernandes81/invective
 To pin a release by tag:
 
 ```console
-uv add --dev git+https://github.com/gsfernandes81/invective@v0.2.0
+uv add --dev git+https://github.com/gsfernandes81/invective@v0.2.1
 ```
 
 Or install the release's wheel, which needs no build backend:
 
 ```console
-uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.2.0/invective-0.2.0-py3-none-any.whl
+uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.2.1/invective-0.2.1-py3-none-any.whl
 ```
 
 It needs pytest 8.2 or later in the same environment, and supports every

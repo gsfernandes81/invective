@@ -35,24 +35,23 @@ from __future__ import annotations
 
 import argparse
 import ast
-import contextlib
 import copy
 import difflib
 import importlib.util
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
 import time
 import warnings
-from typing import NamedTuple, NoReturn
+from typing import NamedTuple
 
 from pytest import ExitCode
 
 import pytest_invective
+from invective import process
 from invective.accept import read as read_accepts
 from invective.config import (Config, check_pytest_settings,
                               load as load_config, project_root,
@@ -498,129 +497,6 @@ if importlib.util.find_spec("xdist") is not None:
 else:
     _NO_WORKERS = ["-p", "no:xdist"]
 
-#: Each run is started in a process group of its own, so that stopping it
-#: stops everything it started. A test suite can start processes of its own
-#: (this one starts pytest), and killing the run alone would leave those
-#: running, and theirs, for as long as they like.
-if os.name == "nt":
-    _OWN_GROUP = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-else:
-    _OWN_GROUP = {"start_new_session": True}
-
-
-#: How long a stopped run's output is waited for once its group is killed.
-_STOP_GRACE = 10.0
-
-
-def _stop(proc: subprocess.Popen) -> None:
-    """Kill *proc* and every process it started, and collect what it said."""
-    if os.name == "nt":
-        # invective: accept[untestable: True -> False] Windows only, and the sweep runs on Linux
-        quietly = {"capture_output": True}
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], **quietly)
-    else:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    try:
-        proc.communicate(timeout=_STOP_GRACE)
-    except subprocess.TimeoutExpired:
-        # Something the run started left its group and still holds the
-        # output open: waiting for the end of it would be waiting for ever.
-        proc.kill()
-        proc.stdout.close()
-        proc.stderr.close()
-        proc.wait()
-
-
-class _Terminated(KeyboardInterrupt):
-    """A SIGTERM, raised where it landed. A `KeyboardInterrupt`, so that
-    every path that unwinds on a ^C -- the live run stopped with its group,
-    the copy removed, pytest's own session ended as interrupted -- unwinds on
-    it unchanged. *signum* is the signal, for the exit by it at the end."""
-
-    def __init__(self, signum: int) -> None:
-        super().__init__(signum)
-        self.signum = signum
-
-
-@contextlib.contextmanager
-def stopping_on_sigterm():
-    """A SIGTERM during the body raises `_Terminated` in it, once.
-
-    Without a handler the process dies where it stands and no `finally`
-    runs, so a copy of the project stays in the temporary directory. With
-    one that raises, the signal unwinds exactly as a ^C does: it interrupts
-    the `communicate` that waits on a run (the syscall is retried only when
-    the handler returns), the run's group is stopped on the way out, and
-    the copy is removed. **Once**: a second SIGTERM while the copy is being
-    removed would raise inside that removal and cut it short, so later ones
-    are ignored until the previous handler is back. SIGKILL remains the way
-    to stop a cleanup that hangs, and the copy's marker covers what that
-    leaves. A SIGTERM ignored on entry stays ignored, and no handler is
-    installed. Windows never delivers SIGTERM (`TerminateProcess` ends a
-    process outright), so there the handler is installed and never runs.
-    """
-    # The shell's `trap '' TERM` asked for that; the marker covers the copy
-    # of a run then killed outright.
-    if signal.getsignal(signal.SIGTERM) is signal.SIG_IGN:
-        yield
-        return
-    fired = False
-
-    def handler(signum, frame):
-        nonlocal fired
-        if fired:
-            return
-        fired = True
-        raise _Terminated(signum)
-
-    try:
-        previous = signal.signal(signal.SIGTERM, handler)
-    except ValueError:
-        # Not the main thread, the only one a handler can be set from: the
-        # signal keeps its default, and the marker is what covers the copy.
-        yield
-        return
-    try:
-        yield
-    finally:
-        # `None` is a handler Python did not install (an embedding host's, a
-        # C extension's), which it cannot put back: `signal.signal` refuses
-        # it, and the error would replace whatever is unwinding.
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
-
-
-def _exit_by(exc: _Terminated) -> NoReturn:
-    """End this process by the signal *exc* carries, as it would have ended
-    without a handler. A shell, `timeout(1)` or CI's cancel then sees the
-    status it expects of a process it terminated (143 in a shell), and not an
-    exit code that reads as a verdict; as a pid namespace's init, which the
-    signal cannot end, it exits with 128 + the signal's number. What was
-    printed is written out first: the signal ends the process without
-    flushing a buffer, and a run's output sent to a file or a pipe is
-    buffered."""
-    for stream in (sys.stdout, sys.stderr):
-        if stream is None:
-            # A standard stream closed when the process started: nothing
-            # was written to it.
-            continue
-        try:
-            stream.flush()
-        except (OSError, ValueError):
-            # A closed or broken stream must not replace the exit.
-            pass
-    signal.signal(exc.signum, signal.SIG_DFL)
-    os.kill(os.getpid(), exc.signum)
-    # Reached only where the kernel ignores a signal a process sends itself
-    # at its default action: a pid namespace's init, such as a container's
-    # entry point. 128 + N is the status a shell reports for a process the
-    # signal ended, and CPython's own exit on an uncaught KeyboardInterrupt
-    # falls back to it the same way.
-    raise SystemExit(128 + exc.signum)
-
 
 def run_tests(where: str, tests: list[str], timeout: float,
               selection: str | None = None, options: tuple[str, ...] = (),
@@ -666,11 +542,11 @@ def run_tests(where: str, tests: list[str], timeout: float,
              *options, "-x", "-rf", "-p", "no:randomly", *_NO_WORKERS,
              "--no-header", *tests],
             cwd=where, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=env, **_OWN_GROUP)
+            text=True, env=env, **process.OWN_GROUP)
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _stop(proc)
+            process.stop(proc)
             # A mutant that hangs is a mutant the suite noticed, in the least
             # helpful way available. Counted as killed and said out loud,
             # because a timeout that is silently a pass would flatter the
@@ -679,7 +555,7 @@ def run_tests(where: str, tests: list[str], timeout: float,
         except BaseException:
             # Interrupted: the run is in a group of its own, so the ^C that
             # stopped this process never reached it.
-            _stop(proc)
+            process.stop(proc)
             raise
         try:
             with open(verdict, encoding="utf-8") as fh:
@@ -724,7 +600,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     # The handler lives exactly as long as the copy: here and not in the
     # commands' entry points, so `pytest --mutate`, which has none, gets it
     # too, and a plain pytest with the plugin installed never does.
-    with stopping_on_sigterm(), \
+    with process.stopping_on_sigterm(), \
             tempfile.TemporaryDirectory(prefix="invective-selection-") as box, \
             (git_ref(root, ref) if ref
              else working_tree(root, exclude)) as where:
@@ -1083,10 +959,10 @@ def main(argv: list[str] | None = None) -> int:
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
-    except _Terminated as exc:
+    except process.Terminated as exc:
         # The copy is gone and the run's group with it; now die by the
         # signal, as the process would have without the handler.
-        _exit_by(exc)
+        process.exit_by(exc)
 
     print()
     for line in summary(report):

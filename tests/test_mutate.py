@@ -17,7 +17,7 @@ import warnings
 import pytest
 from pytest import ExitCode
 
-from invective import config, mutate
+from invective import config, mutate, process
 from invective import tree as trees
 from invective.tree import git_ref
 
@@ -1534,7 +1534,7 @@ def test_an_interrupted_run_is_stopped_and_the_interrupt_goes_on(monkeypatch):
             raise KeyboardInterrupt
 
     monkeypatch.setattr(mutate.subprocess, "Popen", Interrupted)
-    monkeypatch.setattr(mutate, "_stop", stopped.append)
+    monkeypatch.setattr(process, "stop", stopped.append)
 
     with pytest.raises(KeyboardInterrupt):
         mutate.run_tests("/nowhere", ["t.py"], timeout=1)
@@ -1564,8 +1564,8 @@ def test_a_second_sigterm_while_unwinding_does_not_cut_the_cleanup_short():
     before = signal.getsignal(signal.SIGTERM)
     cleaned = []
 
-    with pytest.raises(mutate._Terminated) as caught:
-        with mutate.stopping_on_sigterm():
+    with pytest.raises(process.Terminated) as caught:
+        with process.stopping_on_sigterm():
             try:
                 os.kill(os.getpid(), signal.SIGTERM)
                 time.sleep(1)
@@ -1588,7 +1588,7 @@ def test_a_sigterm_ignored_on_entry_stays_ignored():
     ignore it too, as every other program under it does."""
     old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
     try:
-        with mutate.stopping_on_sigterm():
+        with process.stopping_on_sigterm():
             assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
             os.kill(os.getpid(), signal.SIGTERM)
             time.sleep(0.05)
@@ -1600,7 +1600,7 @@ def test_a_sigterm_ignored_on_entry_stays_ignored():
 def test_a_previous_handler_python_did_not_install_is_left_alone(monkeypatch):
     """`signal.signal` returns `None` for a handler set from C, and refuses
     `None` as a handler, so putting it back would raise in place of the
-    `_Terminated` unwinding through the block."""
+    `Terminated` unwinding through the block."""
     calls = []
 
     def fake(signum, handler):
@@ -1610,10 +1610,10 @@ def test_a_previous_handler_python_did_not_install_is_left_alone(monkeypatch):
                             "signal.SIG_DFL, or a callable object")
         return None
 
-    monkeypatch.setattr(mutate.signal, "signal", fake)
-    with pytest.raises(mutate._Terminated):
-        with mutate.stopping_on_sigterm():
-            raise mutate._Terminated(signal.SIGTERM)
+    monkeypatch.setattr(process.signal, "signal", fake)
+    with pytest.raises(process.Terminated):
+        with process.stopping_on_sigterm():
+            raise process.Terminated(signal.SIGTERM)
     assert len(calls) == 1 and calls[0][1] is not None, calls
 
 
@@ -1637,11 +1637,11 @@ def test_dying_by_the_signal_first_writes_out_what_was_printed(monkeypatch):
     out.write("copy: x\n")
     assert raw.getvalue() == b""
     died = []
-    monkeypatch.setattr(mutate.signal, "signal", lambda *a: None)
-    monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: died.append(signum))
+    monkeypatch.setattr(process.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(process.os, "kill", lambda pid, signum: died.append(signum))
 
     with pytest.raises(SystemExit):
-        mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+        process.exit_by(process.Terminated(signal.SIGTERM))
 
     assert raw.getvalue() == b"copy: x\n"
     assert died == [signal.SIGTERM]
@@ -1653,11 +1653,11 @@ def test_a_closed_standard_stream_does_not_stand_in_for_the_signal(
     there is nothing to write out: the exit is still by the signal."""
     monkeypatch.setattr(sys, "stdout", None)
     died = []
-    monkeypatch.setattr(mutate.signal, "signal", lambda *a: None)
-    monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: died.append(signum))
+    monkeypatch.setattr(process.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(process.os, "kill", lambda pid, signum: died.append(signum))
 
     with pytest.raises(SystemExit):
-        mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+        process.exit_by(process.Terminated(signal.SIGTERM))
 
     assert died == [signal.SIGTERM]
 
@@ -1666,12 +1666,12 @@ def test_dying_by_the_signal_is_by_its_default_action(monkeypatch):
     """A handler still in place when the signal is sent would run instead of
     ending the process, so the default is put back first."""
     at_kill = []
-    monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: at_kill.append(
+    monkeypatch.setattr(process.os, "kill", lambda pid, signum: at_kill.append(
         signal.getsignal(signum)))
     old = signal.signal(signal.SIGTERM, lambda *a: None)
     try:
         with pytest.raises(SystemExit):
-            mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+            process.exit_by(process.Terminated(signal.SIGTERM))
     finally:
         signal.signal(signal.SIGTERM, old)
 
@@ -1686,12 +1686,12 @@ def test_a_process_its_own_signal_cannot_end_exits_with_the_signals_status(
     ended (143 for SIGTERM): not 0, which reads as a passed gate, and not
     a fall through into the report of a run that never finished."""
     killed = []
-    monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: killed.append(
+    monkeypatch.setattr(process.os, "kill", lambda pid, signum: killed.append(
         signum))
     old = signal.signal(signal.SIGTERM, lambda *a: None)
     try:
         with pytest.raises(SystemExit) as caught:
-            mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+            process.exit_by(process.Terminated(signal.SIGTERM))
     finally:
         signal.signal(signal.SIGTERM, old)
 
@@ -1806,7 +1806,7 @@ def test_a_process_that_left_the_run_s_group_does_not_hold_invective(
     It holds it only when pytest is not capturing output, which is what the
     `-s` below is for; under capture it inherits a file of pytest's instead.
     """
-    monkeypatch.setattr(mutate, "_STOP_GRACE", 0.5)
+    monkeypatch.setattr(process, "STOP_GRACE", 0.5)
     (tmp_path / "pytest.ini").write_text("[pytest]\naddopts = -s\n",
                                          encoding="utf-8")
     # The escaped process says who it is, so the test can stop what the run

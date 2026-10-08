@@ -6,7 +6,7 @@ build-backend = "uv_build"
 
 [project]
 name = "invective"
-version = "0.2.0"
+version = "0.2.1"
 description = "Mutation testing for a pytest suite: break one line at a time and report every edit the tests let through"
 readme = "README.md"
 license = "AGPL-3.0-only"

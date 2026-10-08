@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from invective import mutate, sweep
+from invective import mutate, process, sweep
 
 from conftest import (FILES, MONOREPO, SLOW_TEST, SRC, WORKSPACE, monorepo,
                       no_pytest_settings_above, stop_group, wait_for,
@@ -817,12 +817,12 @@ def test_a_terminated_sweep_terminates_the_engine_it_started(repo, monkeypatch):
     engine = _Engine()
 
     def communicate(timeout=None):
-        raise mutate._Terminated(signal.SIGTERM)
+        raise process.Terminated(signal.SIGTERM)
 
     engine.communicate = communicate
     monkeypatch.setattr(sweep.subprocess, "Popen", engine)
     died = []
-    monkeypatch.setattr(sweep, "_exit_by", lambda exc: died.append(exc.signum))
+    monkeypatch.setattr(sweep, "exit_by", lambda exc: died.append(exc.signum))
 
     sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
                 "--modules", _p("pkg/gate.py")])
@@ -854,7 +854,7 @@ def test_a_sigterm_between_engines_still_ends_the_sweep_by_the_signal(
     engine = _Engine(0, stdout="1/1 killed (100.0%), 0 survived\n")
     monkeypatch.setattr(sweep.subprocess, "Popen", engine)
     died = []
-    monkeypatch.setattr(sweep, "_exit_by", lambda exc: died.append(exc.signum))
+    monkeypatch.setattr(sweep, "exit_by", lambda exc: died.append(exc.signum))
 
     sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
                 "--modules", _p("pkg/gate.py"), _p("pkg/sub/deep.py")])
@@ -924,11 +924,11 @@ def test_an_engine_that_outlasts_its_grace_is_told_again_and_then_killed(
             raise subprocess.TimeoutExpired("engine", timeout)
 
     def communicate(timeout=None):
-        raise mutate._Terminated(signal.SIGTERM)
+        raise process.Terminated(signal.SIGTERM)
 
     engine.wait, engine.communicate = wait, communicate
     monkeypatch.setattr(sweep.subprocess, "Popen", engine)
-    monkeypatch.setattr(sweep, "_exit_by", lambda exc: None)
+    monkeypatch.setattr(sweep, "exit_by", lambda exc: None)
     monkeypatch.setattr(sweep, "_GRACE", 0.01)
 
     sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,

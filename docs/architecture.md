@@ -10,6 +10,7 @@ The engine, the plugin, and how one mutant is run; settled.
 | `invective.mutate` | The engine: parse, break, run, report |
 | `invective.sweep` | Every module in a source tree, each against its tests |
 | `invective.tree` | The copy (or git worktree) a campaign's mutants are written in |
+| `invective.process` | The processes invective starts: their groups, how they are stopped, and SIGTERM |
 | `invective.accept` | Survivors accepted in the source, beside the code they are about |
 | `invective.config` | The `[tool.invective]` table, the project's top, and the pytest settings check |
 | `invective.errors` | `Refusal`: the one way invective declines to run |
@@ -57,7 +58,7 @@ mutant's, so the bytecode cache never reuses the last mutant's `.pyc`.
 ## One mutant's run
 
 Each mutant is run as `python -m pytest` in the copy, in a process group
-of its own (`mutate._OWN_GROUP`), so that stopping the run stops everything
+of its own (`process.OWN_GROUP`), so that stopping the run stops everything
 it started. The killer comes from the plugin, which writes it to the file
 `INVECTIVE_VERDICT` names, not from the printed output.
 
