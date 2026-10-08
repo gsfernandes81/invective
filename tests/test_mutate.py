@@ -1483,7 +1483,8 @@ def test_dying_by_the_signal_first_writes_out_what_was_printed(monkeypatch):
     monkeypatch.setattr(mutate.signal, "signal", lambda *a: None)
     monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: died.append(signum))
 
-    mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+    with pytest.raises(SystemExit):
+        mutate._exit_by(mutate._Terminated(signal.SIGTERM))
 
     assert raw.getvalue() == b"copy: x\n"
     assert died == [signal.SIGTERM]
@@ -1498,7 +1499,8 @@ def test_a_closed_standard_stream_does_not_stand_in_for_the_signal(
     monkeypatch.setattr(mutate.signal, "signal", lambda *a: None)
     monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: died.append(signum))
 
-    mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+    with pytest.raises(SystemExit):
+        mutate._exit_by(mutate._Terminated(signal.SIGTERM))
 
     assert died == [signal.SIGTERM]
 
@@ -1511,11 +1513,33 @@ def test_dying_by_the_signal_is_by_its_default_action(monkeypatch):
         signal.getsignal(signum)))
     old = signal.signal(signal.SIGTERM, lambda *a: None)
     try:
-        mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+        with pytest.raises(SystemExit):
+            mutate._exit_by(mutate._Terminated(signal.SIGTERM))
     finally:
         signal.signal(signal.SIGTERM, old)
 
     assert at_kill == [signal.SIG_DFL]
+
+
+def test_a_process_its_own_signal_cannot_end_exits_with_the_signals_status(
+        monkeypatch):
+    """The kernel ignores a default-action signal a pid namespace's init
+    sends itself, so as a container's entry point the self-kill returns.
+    The exit is then the status a shell reports for a process the signal
+    ended (143 for SIGTERM): not 0, which reads as a passed gate, and not
+    a fall through into the report of a run that never finished."""
+    killed = []
+    monkeypatch.setattr(mutate.os, "kill", lambda pid, signum: killed.append(
+        signum))
+    old = signal.signal(signal.SIGTERM, lambda *a: None)
+    try:
+        with pytest.raises(SystemExit) as caught:
+            mutate._exit_by(mutate._Terminated(signal.SIGTERM))
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+    assert killed == [signal.SIGTERM]
+    assert caught.value.code == 128 + signal.SIGTERM == 143
 
 
 def test_a_baseline_that_runs_out_of_time_is_refused_for_that(repo, monkeypatch):

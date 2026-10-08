@@ -48,7 +48,7 @@ import sys
 import tempfile
 import time
 import warnings
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 
 from pytest import ExitCode
 
@@ -549,13 +549,15 @@ def stopping_on_sigterm():
             signal.signal(signal.SIGTERM, previous)
 
 
-def _exit_by(exc: _Terminated) -> None:
+def _exit_by(exc: _Terminated) -> NoReturn:
     """End this process by the signal *exc* carries, as it would have ended
     without a handler. A shell, `timeout(1)` or CI's cancel then sees the
     status it expects of a process it terminated (143 in a shell), and not an
-    exit code that reads as a verdict. What was printed is written out
-    first: the signal ends the process without flushing a buffer, and a
-    run's output sent to a file or a pipe is buffered."""
+    exit code that reads as a verdict; as a pid namespace's init, which the
+    signal cannot end, it exits with 128 + the signal's number. What was
+    printed is written out first: the signal ends the process without
+    flushing a buffer, and a run's output sent to a file or a pipe is
+    buffered."""
     for stream in (sys.stdout, sys.stderr):
         if stream is None:
             # A standard stream closed when the process started: nothing
@@ -568,6 +570,12 @@ def _exit_by(exc: _Terminated) -> None:
             pass
     signal.signal(exc.signum, signal.SIG_DFL)
     os.kill(os.getpid(), exc.signum)
+    # Reached only where the kernel ignores a signal a process sends itself
+    # at its default action: a pid namespace's init, such as a container's
+    # entry point. 128 + N is the status a shell reports for a process the
+    # signal ended, and CPython's own exit on an uncaught KeyboardInterrupt
+    # falls back to it the same way.
+    raise SystemExit(128 + exc.signum)
 
 
 def run_tests(where: str, tests: list[str], timeout: float,
