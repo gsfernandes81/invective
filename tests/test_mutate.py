@@ -580,6 +580,8 @@ def test_every_mutant_s_entry_carries_its_diff(repo):
             (kill, "        raise ValueError('under age')", "        pass"),
             (survivor, "    if member and age >= 65:",
              "    if member or age >= 65:")):
+        # The splice the docstring describes, not the whole-file fallback.
+        assert "whole_file" not in entry, entry
         head, body = (entry["diff"].split("\n")[:2],
                       entry["diff"].split("\n")[3:])
         assert head == ["--- pkg/gate.py", "+++ pkg/gate.py (mutant)"]
