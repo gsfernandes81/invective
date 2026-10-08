@@ -69,6 +69,17 @@ def import_name(root, module, sources):
     from its own top: its tests put the directory on `sys.path` and import a
     loose module by its bare name.
     """
+    top = _package_top(root, module, sources)
+    if top is None:
+        return None
+    rel = os.path.relpath(os.path.abspath(os.path.join(root, module)),
+                          os.path.dirname(top))
+    return rel[:-3].replace(os.sep, ".").replace(".__init__", "")
+
+
+def _package_top(root, module, sources):
+    """The outermost package directory *module* is imported through, or None
+    for a loose file."""
     mod = os.path.abspath(os.path.join(root, module))
     home = os.path.dirname(mod)
     for base in sources:
@@ -82,8 +93,22 @@ def import_name(root, module, sources):
     top = home
     while os.path.isfile(os.path.join(os.path.dirname(top), "__init__.py")):
         top = os.path.dirname(top)
-    rel = os.path.relpath(mod, os.path.dirname(top))
-    return rel[:-3].replace(os.sep, ".").replace(".__init__", "")
+    return top
+
+
+def _namespace(root, module, sources):
+    """A pattern for the optional dotted prefix a test may import *module*'s
+    package under: the project's own directories between *root* and the
+    package's top, outermost first, an outer one only with the ones inside
+    it (`src/acme` gives `acme.`, `src.acme.` or nothing)."""
+    rel = os.path.relpath(os.path.dirname(_package_top(root, module, sources)),
+                          os.path.abspath(root))
+    if rel == os.curdir or rel.startswith(os.pardir):
+        return ""
+    rx = ""
+    for part in rel.split(os.sep):
+        rx = r"(?:%s%s\.)?" % (rx, re.escape(part))
+    return rx
 
 
 def covering(root, module, sources, tests_dir):
@@ -118,13 +143,17 @@ def covering(root, module, sources, tests_dir):
     if dotted:
         # A package below a namespace directory (one with no `__init__.py`)
         # is imported under the namespace's name, which `import_name` cannot
-        # see: a namespace has no file to find. The prefix is optional so
-        # `gate.core` is matched inside `acme.gate.core`.
-        wanted += [r"\bimport\s+(?:\w+\.)*%s\b" % re.escape(dotted),
-                   r"from\s+(?:\w+\.)*%s\s+import" % re.escape(dotted),
-                   r"from\s+(?:\w+\.)*%s\s+import\s+.*\b%s\b"
-                   % (re.escape(dotted.rsplit(".", 1)[0]), re.escape(stem)),
-                   r"\b%s\." % re.escape(dotted)]
+        # see: a namespace has no file to find. The prefix is optional, and
+        # it is only the project's own directories above the package's top,
+        # never any identifier: `gate.core` is matched inside
+        # `acme.gate.core`, and `utils` is not matched inside `email.utils`,
+        # nor a package `path` inside `os.path.join`.
+        ns = _namespace(root, module, sources)
+        wanted += [r"\bimport\s+%s%s\b" % (ns, re.escape(dotted)),
+                   r"from\s+%s%s\s+import" % (ns, re.escape(dotted)),
+                   r"from\s+%s%s\s+import\s+.*\b%s\b"
+                   % (ns, re.escape(dotted.rsplit(".", 1)[0]), re.escape(stem)),
+                   r"(?<![\w.])%s%s\." % (ns, re.escape(dotted))]
     else:
         wanted += [r"^\s*import\s+%s\b" % re.escape(stem),
                    r"^\s*from\s+%s\s+import" % re.escape(stem),

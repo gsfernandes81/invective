@@ -159,14 +159,49 @@ def test_a_package_below_a_namespace_directory_is_covered_by_the_tests_that_impo
     write_tree(root, {
         "src/acme/gate/__init__.py": "",
         "src/acme/gate/core.py": "x = 1\n",
+        "tests/test_attr.py": "import acme\nacme.gate.core.x\n",
+        "tests/test_dotted.py": "import acme.gate.core\n",
+        "tests/test_from.py": "from acme.gate.core import x\n",
         "tests/test_rules.py": "from acme.gate import core\n",
         "tests/unit/test_rules_deep.py": "from acme.gate import core\n",
-        "tests/unit/test_other.py": "def test_nothing():\n    pass\n",
+        "tests/unit/test_other.py": "from email.gate import core\n"
+                                    "from other.gate.core import x\n"
+                                    "import other.gate.core\n"
+                                    "other.gate.core.x\n",
     })
 
     assert sorted(sweep.covering(root, _p("src/acme/gate/core.py"), sources,
                                  "tests")) == [
+        _p("tests/test_attr.py"), _p("tests/test_dotted.py"), _p("tests/test_from.py"),
         _p("tests/test_rules.py"), _p("tests/unit/test_rules_deep.py")]
+
+
+def test_a_top_level_package_is_not_covered_by_a_library_module_ending_in_its_name(
+        tmp_path):
+    """`email.utils`, `django.utils.text`, `unittest.mock` and `os.path` end
+    in the name of a package of the project's own; a test using them uses
+    nothing of the project's but `app`."""
+    root = str(tmp_path)
+    write_tree(root, {
+        "src/utils/__init__.py": "",
+        "src/utils/text.py": "x = 1\n",
+        "src/mock/__init__.py": "",
+        "src/path/__init__.py": "",
+        "src/app/__init__.py": "",
+        "src/app/core.py": "x = 1\n",
+        "tests/test_app.py": "from email.utils import parseaddr\n"
+                             "from django.utils.text import slugify\n"
+                             "import unittest.mock\n"
+                             "import os.path\n"
+                             "from app import core\n"
+                             "HERE = os.path.dirname(__file__)\n",
+    })
+
+    for module in ("src/utils/__init__.py", "src/utils/text.py",
+                   "src/mock/__init__.py", "src/path/__init__.py"):
+        assert sweep.covering(root, _p(module), ["src"], "tests") == [], module
+    assert sweep.covering(root, _p("src/app/core.py"), ["src"], "tests") == [
+        _p("tests/test_app.py")]
 
 
 def test_a_file_named_after_a_module_elsewhere_is_another_module_s(tmp_path):
