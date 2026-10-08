@@ -180,6 +180,26 @@ def no_pytest_settings_above(path):
 
 
 @pytest.fixture
+def settings_above_the_copy(tmp_path, monkeypatch):
+    """A temporary directory below a `pytest.ini` that deselects the test of
+    the gate's refusal and a `conftest.py` that leaves a mark, so a run that
+    goes by either says so: the gate's `RAISE` mutant survives, or the mark
+    is there. Gives the mark's path; the project is for the test to build
+    beside it, outside `above`."""
+    above = tmp_path / "above"
+    mark = tmp_path / "ran.txt"
+    write_tree(str(above), {
+        "pytest.ini": '[pytest]\naddopts = -k "not test_a_minor_is_refused"\n',
+        "conftest.py": ("import pathlib\n"
+                        "pathlib.Path(%r).write_text('ran')\n" % str(mark)),
+        "tmp/.keep": ""})
+    monkeypatch.setattr(tempfile, "tempdir", str(above / "tmp"))
+    for name in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.setenv(name, str(above / "tmp"))
+    return mark
+
+
+@pytest.fixture
 def tree(tmp_path):
     """The fixture files on disk, with no repository around them."""
     root = os.path.realpath(tmp_path / "tree")

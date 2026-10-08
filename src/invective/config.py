@@ -222,11 +222,11 @@ def pytest_file_left_out(root: str, inifile: str | None) -> str | None:
         here = up
 
 
-def pytest_config_above(root: str, args: tuple[str, ...] | list[str] = ()
-                        ) -> str | None:
-    """`pytest_file_left_out` for a run of pytest with *args*, as given from
-    *root*: pytest starts its search at the deepest directory every path
-    among them is under, as pytest does, or at *root* with none."""
+def pytest_reads(root: str, args: tuple[str, ...] | list[str] = ()
+                 ) -> str | None:
+    """The settings file pytest reads for a run with *args*, as given from
+    *root*: `_pytest_reads` from where pytest starts its search, the deepest
+    directory every path among them is under, or *root* with none."""
     dirs = []
     for arg in args:
         if arg.startswith("-"):
@@ -246,7 +246,33 @@ def pytest_config_above(root: str, args: tuple[str, ...] | list[str] = ()
         # A path out of the project (on Windows, on another drive) is
         # refused on its own account; pytest's search is the one from here.
         start = os.path.abspath(root)
-    return pytest_file_left_out(root, _pytest_reads(start))
+    return _pytest_reads(start)
+
+
+def pytest_config_above(root: str, args: tuple[str, ...] | list[str] = ()
+                        ) -> str | None:
+    """`pytest_file_left_out` for a run of pytest with *args*, as given from
+    *root*."""
+    return pytest_file_left_out(root, pytest_reads(root, args))
+
+
+def pytest_settings_option(root: str, args: tuple[str, ...] | list[str] = ()
+                           ) -> tuple[str, ...]:
+    """The `-c` every run in a copy of *root* is given, naming the settings
+    file a run with *args* started here reads, so that each run reads it and
+    searches no further. A run started at the top of the copy would search
+    past it, above the temporary directory, when the project's file is below
+    the top or when pytest only falls back on a `pyproject.toml`. Empty when
+    pytest reads no file inside *root*."""
+    read = pytest_reads(root, args)
+    if read is None:
+        return ()
+    try:
+        return ("-c", relative_to_root(read, root))
+    except ValueError:
+        # Above the root: `pytest_config_above` has decided the run may go
+        # without it, and the copy has no path to it.
+        return ()
 
 
 def outside_refusal(left_out: str, root: str) -> Refusal:

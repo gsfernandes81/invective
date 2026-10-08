@@ -55,7 +55,7 @@ import pytest_invective
 from invective.accept import read as read_accepts
 from invective.config import (Config, load as load_config, outside_refusal,
                               project_root, pytest_config_above,
-                              relative_to_root)
+                              pytest_settings_option, relative_to_root)
 from invective.errors import Refusal
 from invective.tree import git_ref, working_tree
 
@@ -681,6 +681,22 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "mutants are made in does not hold (excluded, ignored by "
                     "git, or not in the ref), so no run in there can go by "
                     "the settings this one did" % ini)
+        else:
+            # With no `-c`, pytest found no settings file of the project's
+            # (it would have been named), so nothing between the tests and
+            # the top of the copy stops its search: it goes on above the
+            # copy, into the temporary directory's ancestors, where a
+            # settings file, or a `conftest.py` its rootdir brings in, would
+            # decide every run, the baseline's too.
+            left_out = pytest_config_above(where)
+            if left_out:
+                raise Refusal(
+                    "pytest reads %s, above the copy the mutants are run in "
+                    "at %s, so every run in there would go by it; give the "
+                    "project pytest settings of its own (an empty "
+                    "[tool.pytest.ini_options] table in pyproject.toml is "
+                    "enough), or a temporary directory with nothing above it"
+                    % (left_out, where))
         # **Where the writes land, links followed.** The copy keeps links as
         # links, so a module reached through one -- the file itself or a
         # directory on its path -- can be a file outside the copy, the
@@ -1005,7 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
         tree = (git_ref(root, args.ref) if args.ref
                 else working_tree(root, config.exclude))
         report = mutate(root, args.target, tests, only, args.limit,
-                        tree=tree)
+                        tree=tree, options=pytest_settings_option(root, tests))
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2

@@ -308,6 +308,30 @@ def test_the_search_starts_where_pytest_s_does_among_the_tests(tmp_path):
         os.path.join(top, "pytest.ini"))
 
 
+@pytest.mark.parametrize("files, args, given", [
+    ({"tests/pytest.ini": "[pytest]\n", "pyproject.toml": "[project]\n"},
+     ["tests"], ("-c", os.path.join("tests", "pytest.ini"))),
+    ({"pyproject.toml": "[project]\n"}, [], ("-c", "pyproject.toml")),
+    ({".git": ""}, [], ()),
+], ids=["below-the-top", "pyproject-fallback", "none"])
+def test_every_run_is_given_the_settings_file_pytest_reads_here(
+        tmp_path, files, args, given):
+    """The file pytest reads for the run started here, given from the top,
+    whether it sets something or is only where pytest's search fell back."""
+    no_pytest_settings_above(tmp_path)
+    proj = os.path.join(os.path.realpath(tmp_path), "proj")
+    write_tree(proj, files)
+    assert config.pytest_settings_option(proj, args) == given
+
+
+def test_a_settings_file_above_the_top_is_given_to_no_run(tmp_path):
+    """The copy has no path to it: whether the runs may go without it is
+    `pytest_config_above`'s to say."""
+    top = os.path.realpath(tmp_path)
+    write_tree(top, {"pytest.ini": "[pytest]\n", "m/.git": ""})
+    assert config.pytest_settings_option(os.path.join(top, "m")) == ()
+
+
 def test_a_conftest_pytest_loads_above_the_project_s_top_is_named(tmp_path):
     """Settings that set nothing still put pytest's rootdir above the top,
     and pytest loads every `conftest.py` from there down, which the copy

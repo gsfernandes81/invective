@@ -258,6 +258,25 @@ def test_a_settings_file_found_above_the_project_that_sets_nothing_is_let_be(
     assert "1/1 killed (100.0%)" in done.stdout
 
 
+def test_settings_above_the_copy_of_a_project_with_none_are_refused(
+        settings_above_the_copy, tmp_path):
+    """pytest read no settings file here, so it has none to name to the
+    runs, and each would read the one above the temporary directory the
+    copy is in: the run is refused, naming it, before any test runs."""
+    proj = os.path.realpath(tmp_path / "proj")
+    write_tree(proj, {rel: text for rel, text in FILES.items()
+                      if rel != "pyproject.toml"})
+    os.mkdir(os.path.join(proj, ".git"))
+
+    done = pytest_in(proj, "--mutate=pkg/gate.py", "--mutate-only", "RAISE",
+                     "pkg/tests/test_gate.py")
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "refused: pytest reads %s, above the copy" % os.path.join(
+        str(tmp_path), "above", "pytest.ini") in done.stdout
+    assert not settings_above_the_copy.exists()
+
+
 #: A project whose pytest settings sit below its top, in `tests/`: pytest
 #: started with `tests` as its path reads them, and only they make the
 #: expected failure strict, so only they tell the `RAISE` mutant apart.

@@ -772,6 +772,64 @@ def test_a_run_needs_no_git_and_no_repository(tree, monkeypatch, capsys):
     assert "1/1 killed (100.0%)" in capsys.readouterr().out
 
 
+def _beside(tmp_path, monkeypatch, files):
+    """The fixture project, *files* written over it, outside the directory
+    the copies are made in, and the working directory."""
+    proj = os.path.realpath(tmp_path / "proj")
+    write_tree(proj, {**FILES, **files})
+    monkeypatch.chdir(proj)
+    return proj
+
+
+def test_a_project_without_a_pytest_table_has_its_runs_read_its_pyproject(
+        settings_above_the_copy, tmp_path, monkeypatch, capsys):
+    """pytest falls back on the nearest `pyproject.toml` only after looking
+    in every directory above for a settings file of its own, so a run
+    started in the copy would read one above the temporary directory, and
+    that directory's `conftest.py`. Given the `pyproject.toml` the run
+    started here reads, every run stops there."""
+    _beside(tmp_path, monkeypatch, {"pyproject.toml": "[project]\nname = 'p'\n"})
+
+    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
+                        "--only", "RAISE"]) == 0
+
+    assert "1/1 killed (100.0%)" in capsys.readouterr().out
+    assert not settings_above_the_copy.exists()
+
+
+def test_settings_above_the_copy_of_a_project_with_none_are_refused(
+        settings_above_the_copy, tmp_path, monkeypatch, capsys):
+    """A project pytest reads no settings file in has none to give its runs,
+    so what they would read above the copy refuses the run, named."""
+    proj = _beside(tmp_path, monkeypatch, {"pyproject.toml": ""})
+    os.remove(os.path.join(proj, "pyproject.toml"))
+    os.mkdir(os.path.join(proj, ".git"))
+
+    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
+                        "--only", "RAISE"]) == 2
+
+    err = capsys.readouterr().err
+    assert "refused: pytest reads %s, above the copy" % os.path.join(
+        str(tmp_path), "above", "pytest.ini") in err
+    assert not settings_above_the_copy.exists()
+
+
+def test_a_settings_file_below_the_top_stops_every_run_s_search_there(
+        settings_above_the_copy, tmp_path, monkeypatch, capsys):
+    """The tests' own `pytest.ini`, below the top, is named to every run,
+    whose search then ends there and never reaches what is above the copy;
+    the project's `pyproject.toml` holds no table that would stop it."""
+    _beside(tmp_path, monkeypatch, {
+        "pyproject.toml": "[project]\nname = 'p'\n",
+        "pkg/tests/pytest.ini": "[pytest]\n"})
+
+    assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
+                        "--only", "RAISE"]) == 0
+
+    assert "1/1 killed (100.0%)" in capsys.readouterr().out
+    assert not settings_above_the_copy.exists()
+
+
 def test_an_operator_that_does_not_exist_is_refused_by_name(repo, capsys):
     """A mistyped `--only` would otherwise select no sites and say so vaguely."""
     assert mutate.main(["--target", GATE, "--tests", *GATE_TESTS,
