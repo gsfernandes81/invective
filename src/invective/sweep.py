@@ -387,10 +387,10 @@ def _sweep(args, root):
             # module; anything else is this driver failing to get an answer
             # at all, and the two must not print the same way -- a bare "?"
             # would hide a broken driver behind what looks like an ordinary
-            # empty result. So the third arm says the exit code and the
-            # last thing the engine actually said, which turns "0
-            # module(s) measured" from a shrug into a thing somebody
-            # chases.
+            # empty result. So the third arm says the exit code and what
+            # the engine said, its refusal whole or else its last line,
+            # which turns "0 module(s) measured" from a shrug into a thing
+            # somebody chases.
             # **The engine's own sentence, not the word.** A bare `"red" in
             # body` is true of "occurred", "required" and "ignored", so a
             # traceback from a driver that could not start was labelled a red
