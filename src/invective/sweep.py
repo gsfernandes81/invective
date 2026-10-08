@@ -116,9 +116,13 @@ def covering(root, module, sources, tests_dir):
         stem = os.path.basename(os.path.dirname(module))
     wanted = []
     if dotted:
-        wanted += [r"\bimport\s+%s\b" % re.escape(dotted),
-                   r"from\s+%s\s+import" % re.escape(dotted),
-                   r"from\s+%s\s+import\s+.*\b%s\b"
+        # A package below a namespace directory (one with no `__init__.py`)
+        # is imported under the namespace's name, which `import_name` cannot
+        # see: a namespace has no file to find. The prefix is optional so
+        # `gate.core` is matched inside `acme.gate.core`.
+        wanted += [r"\bimport\s+(?:\w+\.)*%s\b" % re.escape(dotted),
+                   r"from\s+(?:\w+\.)*%s\s+import" % re.escape(dotted),
+                   r"from\s+(?:\w+\.)*%s\s+import\s+.*\b%s\b"
                    % (re.escape(dotted.rsplit(".", 1)[0]), re.escape(stem)),
                    r"\b%s\." % re.escape(dotted)]
     else:

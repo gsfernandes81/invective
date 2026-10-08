@@ -149,6 +149,26 @@ def test_the_file_named_after_a_module_covers_it_from_the_mirror_directory(tree)
         _p("pkg/tests/test_deep_things.py"), _p("pkg/tests/sub/test_deep.py")]
 
 
+@pytest.mark.parametrize("sources", [["src"], ["src/acme"]])
+def test_a_package_below_a_namespace_directory_is_covered_by_the_tests_that_import_it(
+        tmp_path, sources):
+    """`src/acme/` has no `__init__.py`, so `import_name` names the module
+    from the package's own top (`gate.core`) while the tests import it under
+    the namespace (`acme.gate`)."""
+    root = str(tmp_path)
+    write_tree(root, {
+        "src/acme/gate/__init__.py": "",
+        "src/acme/gate/core.py": "x = 1\n",
+        "tests/test_rules.py": "from acme.gate import core\n",
+        "tests/unit/test_rules_deep.py": "from acme.gate import core\n",
+        "tests/unit/test_other.py": "def test_nothing():\n    pass\n",
+    })
+
+    assert sorted(sweep.covering(root, _p("src/acme/gate/core.py"), sources,
+                                 "tests")) == [
+        _p("tests/test_rules.py"), _p("tests/unit/test_rules_deep.py")]
+
+
 def test_a_file_named_after_a_module_elsewhere_is_another_module_s(tmp_path):
     """`models.py` and `test_models.py` recur in every app of a mirrored
     layout. The file named after a module covers it at the top of the tests
