@@ -1625,8 +1625,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # chose: on the command line, an option among the tests would
             # be left out with them.
             usable = {}
-            gated = selection is not None or _plain_tests(tests, first)
-            if gated:
+            plain = selection is not None or _plain_tests(tests, first)
+            if plain:
                 killers = dict.fromkeys(
                     outcome.verdict.killer for _job, outcome in unconfirmed
                     if "::" in outcome.verdict.killer)
@@ -1634,8 +1634,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     one = os.path.join(box, "killer-%d.txt" % i)
                     with open(one, "w", encoding="utf-8") as fh:
                         fh.write(killer + "\n")
-                    gated, _took = pool.on(0, _gate, one, alone_budget)
-                    if gated.ok and not gated.missing:
+                    verdict, _took = pool.on(0, _gate, one, alone_budget)
+                    if verdict.ok and not verdict.missing:
                         usable[killer] = one
             for job, outcome in sorted(unconfirmed):
                 mutant = made(job)
@@ -1649,7 +1649,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                         confirmed = outcome._replace(confirmed="alone")
                     else:
                         alone_said = "passes alone on the mutant"
-                elif "::" in killer and gated:
+                elif "::" in killer and plain:
                     alone_said = "fails alone on the original"
                 if confirmed is None:
                     # The whole selection again decides it, a survivor
