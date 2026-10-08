@@ -337,6 +337,16 @@ def test_a_whole_file_that_is_not_the_mutant_is_refused(monkeypatch):
         mutate._text_of(source, tree, index)
 
 
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
+def test_a_whole_file_the_parser_rejects_is_refused_not_raised():
+    """`ast.unparse` writes a debug field's bare lambda as it was given,
+    which 3.14's parser then rejects: that is a refusal like any other file
+    that is not its mutant, not a `SyntaxError` out of the run."""
+    source = 'def f(a):\n    return t"{(lambda: a < 1)=}"\n'
+    with pytest.raises(mutate.Refusal, match="unparsed is not this mutant"):
+        mutate._text_of(source, ast.parse(source), 0)
+
+
 def test_the_raise_operator_really_removes_the_refusal():
     """The operator class that catches a deleted refusal, driven end to end."""
     tree = ast.parse(SAMPLE)

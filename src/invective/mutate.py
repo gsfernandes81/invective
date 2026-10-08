@@ -421,7 +421,13 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
         raise Refusal("cannot be written inside its node's span, and this "
                       "Python's ast.unparse cannot write the file: %s" % exc
                       ) from exc
-    if _dump(_reparsed(text)) != want:
+    try:
+        same = _dump(_reparsed(text)) == want
+    except (SyntaxError, ValueError):
+        # `ast.unparse` can write what the parser then rejects: 3.14's
+        # t-string debug field around a bare lambda.
+        same = False
+    if not same:
         raise Refusal("cannot be written inside its node's span, and the "
                       "file unparsed is not this mutant")
     return text, False
