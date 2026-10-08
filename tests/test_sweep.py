@@ -168,7 +168,10 @@ def test_a_package_below_a_namespace_directory_is_covered_by_the_tests_that_impo
         "tests/unit/test_other.py": "from email.gate import core\n"
                                     "from other.gate.core import x\n"
                                     "import other.gate.core\n"
-                                    "other.gate.core.x\n",
+                                    "other.gate.core.x\n"
+                                    # `src` alone is no prefix: only
+                                    # `acme.` or `src.acme.` is.
+                                    "from src.gate import core\n",
     })
 
     assert sorted(sweep.covering(root, _p("src/acme/gate/core.py"), sources,
