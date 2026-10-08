@@ -47,6 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from typing import NamedTuple
 
 from pytest import ExitCode
@@ -351,6 +352,14 @@ def _splice(source: str, node: ast.AST, head: str, tail: str = "") -> str:
             ).decode("utf-8")
 
 
+def _reparsed(text: str) -> ast.AST:
+    """*text* parsed only to be compared, silently: a warning it raises is
+    the target's own, which the parse that found its sites has said once."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return ast.parse(text)
+
+
 def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
     """The mutant's text, and whether it is *source* edited inside the
     site's span only (True) or the whole file unparsed (False).
@@ -393,7 +402,7 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
     for head, tail in forms:
         try:
             out = _splice(source, node, head, tail)
-            if (_dump(ast.parse(out)) == want
+            if (_dump(_reparsed(out)) == want
                     and len(_LINE_END.split(out)) == len(_LINE_END.split(source))):
                 return out, True
         except Exception:
@@ -404,7 +413,7 @@ def _text_of(source: str, tree: ast.AST, index: int) -> tuple[str, bool]:
         raise Refusal("cannot be written inside its node's span, and this "
                       "Python's ast.unparse cannot write the file: %s" % exc
                       ) from exc
-    if _dump(ast.parse(text)) != want:
+    if _dump(_reparsed(text)) != want:
         raise Refusal("cannot be written inside its node's span, and the "
                       "file unparsed is not this mutant")
     return text, False

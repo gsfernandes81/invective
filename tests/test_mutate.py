@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+import warnings
 
 import pytest
 from pytest import ExitCode
@@ -390,6 +391,33 @@ def test_the_report_says_which_test_killed_each_mutant(repo, monkeypatch):
         assert kill["code"] == ExitCode.TESTS_FAILED
     # A test failing is not the same kill as a module that would not import.
     assert report["broken"] == 0
+
+
+def test_a_target_s_own_warnings_are_said_once_and_not_per_mutant(
+        repo, monkeypatch):
+    """The target is parsed once to find its sites, which says its warnings;
+    each mutant's text is parsed again only to be compared, and says nothing,
+    since a warning repeated per mutant names no file (`<unknown>:2`) and
+    buries the one line a person reads stderr for."""
+    write_tree(repo, {"pkg/esc.py": (
+        "import re\n"
+        "P = re.compile(\"\\d+\")\n"
+        "def f(a, b):\n"
+        "    if a < b and a > 0:\n"
+        "        return 1\n"
+        "    return 0\n")})
+    monkeypatch.setattr(mutate, "run_tests", lambda *a, **k: mutate.Verdict(
+        True, 0, "1 passed", ""))
+
+    with warnings.catch_warnings(record=True) as said:
+        warnings.simplefilter("always")
+        report = mutate.mutate(repo, os.path.join(repo, "pkg", "esc.py"),
+                               GATE_TESTS, ["CMP", "BOOL"], None)
+
+    assert report["mutants"] == 3
+    # A `SyntaxWarning` from 3.12, a `DeprecationWarning` before.
+    assert len([w for w in said
+                if "invalid escape sequence" in str(w.message)]) == 1
 
 
 def test_the_mutant_run_asks_for_the_failure_lines_and_its_own_plugin(
