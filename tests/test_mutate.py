@@ -276,6 +276,45 @@ def test_a_site_inside_a_nested_t_string_is_spliced():
     assert text == source.replace("x+1", "x+2")
 
 
+def test_every_site_below_a_non_ascii_line_is_spliced():
+    """Positions count the UTF-8 bytes of a line, so the line starts do: a
+    site below an em dash that is placed by characters is off by two bytes
+    and cannot be held by the splice, which loses the file's formatting."""
+    source = ('"""Gate — refuses the under-aged."""\n\n'
+              'def check(age):\n'
+              '    if age < 18:\n'
+              '        raise ValueError("under age")\n'
+              '    return True\n')
+    tree = ast.parse(source)
+    sites = list(mutate._sites(tree))
+    assert sites
+    for index, site in enumerate(sites):
+        assert mutate._text_of(source, tree, index)[1] is True, site
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
+def test_a_wrapped_site_after_a_multiline_interpolation_is_spliced():
+    """The interpolation's expression spans two lines, and `ast.unparse`
+    writes its line break as `\\n`: the endings given back to the span are
+    the span's, less the ones the head already carries, or the line count
+    is wrong and the whole file is written instead."""
+    source = 'def f(a, b, c):\n    return t"""{a <\n b}""" and c\n'
+    tree = ast.parse(source)
+    assert mutate._text_of(source, tree, 0) == (
+        source.replace(" and c", " or c"), True)
+
+
+def test_a_splice_that_changes_the_line_count_is_not_held(monkeypatch):
+    """A splice that parses to the mutant but adds a line moves every line
+    after it, so it is not the mutant of the report: the whole file is."""
+    source = "x = a < b\ny = 1\n"
+    tree = ast.parse(source)
+    splice = mutate._splice
+    monkeypatch.setattr(mutate, "_splice",
+                        lambda *args: splice(*args) + "\n")
+    assert mutate._text_of(source, tree, 0)[1] is False
+
+
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings")
 def test_a_whole_file_that_is_not_the_mutant_is_refused(monkeypatch):
     """The file unparsed is checked as the splice is: a mutated tree whose
