@@ -1528,8 +1528,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 elif got.ok:
                     survivors.append({**mutant, "source": text})
                     # invective: accept[equivalent: 60 -> 61] a display width
+                    start = text[:60]
                     say("  SURVIVED  %s:%d  %-28s %s" % (src_rel, line, what,
-                                                        text[:60]))
+                                                        start))
                 else:
                     killed += 1
                     # **Which check is load-bearing, not merely that one
