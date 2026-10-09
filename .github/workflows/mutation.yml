@@ -27,7 +27,8 @@ jobs:
   module:
     name: ${{ matrix.module }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # An entry's own `timeout` (minutes) where its campaign is longer.
+    timeout-minutes: ${{ matrix.timeout || 30 }}
     strategy:
       fail-fast: false
       matrix:
@@ -36,8 +37,17 @@ jobs:
           # about a minute for each mutant.
           # The gate's checks are with the acceptances', and the link
           # refusals with the copy's.
+          # The engine is the largest campaign: about 300 mutants against
+          # four test files, a minute a survivor, and about one in eight a
+          # mutant that hangs and runs out its budget, three times the
+          # baseline. `auto` runs one mutant for each of the runner's CPUs
+          # (four on ubuntu-latest), and the suite is safe to run in
+          # parallel, as `-n auto` runs it; even so, the campaign takes
+          # about an hour.
           - module: src/invective/mutate.py
             tests: tests/test_mutate.py tests/test_workers.py tests/test_accept.py tests/test_tree.py
+            options: --mutate-workers auto
+            timeout: 120
           - module: src/invective/sweep.py
             tests: tests/test_sweep.py
           - module: src/invective/__main__.py
@@ -75,7 +85,7 @@ jobs:
         run: >-
           uv run --no-sync pytest -n 0 -p no:cacheprovider
           --mutate ${{ matrix.module }}
-          --mutate-only CMP,BOOL,NOT,CONST,RAISE
+          --mutate-only CMP,BOOL,NOT,CONST,RAISE ${{ matrix.options }}
           --mutate-json mutants.json ${{ matrix.tests }}
           | tee mutate.log
 
