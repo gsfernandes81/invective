@@ -160,6 +160,11 @@ def by_text(run):
 def _digest(report):
     kept = {key: value for key, value in report.items()
             if key not in ("target", "workers")}
+    # Pinned with `TIMED_OUT` at -1. Its value is any code pytest cannot
+    # exit with (its acceptance says so), and a kill by time is pinned as
+    # `TIMED_OUT`, whatever that is.
+    kept["kills"] = [{**kill, "code": -1} if kill["code"] == mutate.TIMED_OUT
+                     else kill for kill in kept["kills"]]
     return hashlib.sha256(json.dumps(kept, sort_keys=True).encode()).hexdigest()
 
 
@@ -385,12 +390,17 @@ def test_a_kill_is_confirmed_on_no_less_time_than_the_loaded_budget(
     (pooled,) = [r for r in run.runs[3:5] if "raise" not in r.text]
     guard, again = run.runs[5:]
     assert (guard.text, again.text) == (None, pooled.text)
+    # Each budget is some multiple of a baseline, and any well above it
+    # serves (their acceptances say so), so the multiple is not pinned:
+    # what is pinned is which baseline each is measured from, and that a
+    # confirmation never gets less than the loaded budget.
+    assert guard.timeout == again.timeout >= pooled.timeout
     if alone:
         assert pooled.timeout == 30.0
-        assert guard.timeout == again.timeout == 3 * alone
+        assert guard.timeout >= 3 * alone
     else:
         assert pooled.timeout >= 3 * together
-        assert guard.timeout == again.timeout == pooled.timeout
+        assert guard.timeout == pooled.timeout
 
 
 # --------------------------------------------------------------------------
