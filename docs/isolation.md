@@ -81,7 +81,9 @@ SIGTERM stops every worker's run and removes every copy.
 While the workers run (one or more), a ^C or SIGTERM is held where it lands and
 raised where the main thread waits for them (`mutate._Held`). Raised where it
 lands, it can cut a lock's release short, and a worker that needs the lock to
-end would wait for ever, and the removal of the copies with it.
+end would wait for ever, and the removal of the copies with it. A SIGTERM held
+with a ^C is the one raised, whichever landed first, so a supervisor's SIGTERM
+still ends the process by SIGTERM.
 
 The sweep forwards a SIGTERM to its engine, waits for the engine's copy to
 be gone, then dies by the signal itself. `pytest --mutate` ends the

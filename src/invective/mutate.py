@@ -918,11 +918,18 @@ class _Held:
     Only a handler Python runs is held, and only on the main thread, the
     one a handler can be set from: a signal ignored, or ending the process
     by default, is left as it is, and another thread is reached by none.
+
+    **A SIGTERM goes before a ^C**, and once one has been raised, a ^C
+    noted after it is not: a SIGTERM is a supervisor's, and the process
+    then ends by it (143 in a shell), which a ^C raised in its place, or
+    over it, would turn into an interrupt.
     """
 
     def __init__(self) -> None:
         self._saved: dict = {}
         self._noted: collections.deque = collections.deque()
+        #: Whether a SIGTERM has been raised.
+        self._terminated = False
         try:
             for signum in _HELD:
                 handler = signal.getsignal(signum)
@@ -945,9 +952,7 @@ class _Held:
 
     def check(self) -> None:
         """Raise what a signal noted would have raised where it landed."""
-        while self._noted:
-            signum, frame = self._noted.popleft()
-            self._saved[signum](signum, frame)
+        self._raise(self._saved)
 
     def end(self) -> None:
         """Put each handler back, then raise what a signal noted meanwhile
@@ -955,8 +960,18 @@ class _Held:
         saved, self._saved = self._saved, {}
         for signum, handler in saved.items():
             signal.signal(signum, handler)
+        self._raise(saved)
+
+    def _raise(self, saved: dict) -> None:
         while self._noted:
-            signum, frame = self._noted.popleft()
+            terms = [note for note in self._noted
+                     if note[0] == signal.SIGTERM]
+            signum, frame = terms[0] if terms else self._noted[0]
+            self._noted.remove((signum, frame))
+            if signum == signal.SIGINT and self._terminated:
+                continue
+            if signum == signal.SIGTERM:
+                self._terminated = True
             saved[signum](signum, frame)
 
 
@@ -1002,8 +1017,15 @@ class _Pool:
                                          name="invective-copy-%d" % k)
                         for k in range(len(copies))]
         self._ended = False
-        for thread in self.threads:
-            thread.start()
+        try:
+            for thread in self.threads:
+                thread.start()
+        except BaseException:
+            # A thread that cannot be started (a limit on threads, or on
+            # memory): no pool is made, so nothing would end those started
+            # or put the signals' handlers back for the rest of the process.
+            self.close()
+            raise
 
     def _run(self, k: int) -> None:
         try:
@@ -1105,7 +1127,9 @@ class _Pool:
             inbox.put(None)
         try:
             for thread in self.threads:
-                thread.join()
+                # Every one is started but in a pool that failed to start.
+                if thread.ident is not None:
+                    thread.join()
         finally:
             self.signals.end()
 

@@ -29,7 +29,7 @@ import pytest
 from pytest import ExitCode
 
 import pytest_invective
-from invective import config, mutate
+from invective import config, mutate, process
 
 from conftest import FILES, SRC, commit, git, stop_group, wait_for, write_tree
 from test_mutate import ACCEPTING, NESTED
@@ -1413,6 +1413,80 @@ def test_a_halt_says_once_that_it_is_stopping_however_long_the_runs_take(
     assert said == ["stopping 1 run(s)"]
 
 
+def test_a_pool_whose_thread_cannot_start_ends_those_started_and_holds_no_signal(
+        tmp_path, monkeypatch):
+    """A limit on threads or on memory: no pool is made, the worker started
+    ends, and SIGINT and SIGTERM have the handlers they had."""
+    handlers = [signal.getsignal(s) for s in mutate._HELD]
+    real = threading.Thread.start
+    started = []
+
+    def start(thread):
+        if started:
+            raise RuntimeError("can't start new thread")
+        started.append(thread)
+        real(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        mutate._Pool(_copies(tmp_path, 2), threading.Event(), print)
+    monkeypatch.undo()
+    started[0].join(5)
+    assert not started[0].is_alive()
+    assert [signal.getsignal(s) for s in mutate._HELD] == handlers
+
+
+def test_handlers_set_part_way_are_put_back(monkeypatch):
+    """A handler that cannot be set leaves none of invective's behind."""
+    with process.stopping_on_sigterm():
+        handlers = [signal.getsignal(s) for s in mutate._HELD]
+        real = signal.signal
+
+        def install(signum, handler):
+            if signum == signal.SIGTERM and handler != handlers[1]:
+                raise RuntimeError("no handler for SIGTERM")
+            return real(signum, handler)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(signal, "signal", install)
+            with pytest.raises(RuntimeError, match="no handler for SIGTERM"):
+                mutate._Held()
+        assert [signal.getsignal(s) for s in mutate._HELD] == handlers
+
+
+def _lands(signum):
+    # As the signal landing calls it: whatever handler is there.
+    signal.getsignal(signum)(signum, None)
+
+
+def test_a_sigterm_held_with_a_sigint_is_raised_and_not_the_sigint():
+    """A supervisor's SIGTERM is not made a ^C: whichever landed first,
+    the process ends by the SIGTERM. A ^C held alone is raised as one."""
+    for first, second in [(signal.SIGINT, signal.SIGTERM),
+                          (signal.SIGTERM, signal.SIGINT)]:
+        with process.stopping_on_sigterm():
+            held = mutate._Held()
+            _lands(first)
+            _lands(second)
+            with pytest.raises(process.Terminated):
+                held.end()
+    held = mutate._Held()
+    _lands(signal.SIGINT)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        held.end()
+    assert not isinstance(caught.value, process.Terminated)
+
+
+def test_a_sigint_held_after_a_sigterm_was_raised_is_not_raised_over_it():
+    with process.stopping_on_sigterm():
+        held = mutate._Held()
+        _lands(signal.SIGTERM)
+        with pytest.raises(process.Terminated):
+            held.check()
+        _lands(signal.SIGINT)
+        held.end()
+
+
 def test_a_stop_while_a_kill_is_confirmed_stops_the_run_going_on(
         tree, monkeypatch):
     """The campaign unwinding on a ^C halts the pool, which stops the
@@ -1477,6 +1551,7 @@ def test_one_text_is_made_ahead_for_each_run_in_flight(tree, monkeypatch):
 
     Campaign(tree, monkeypatch, TARGETS["many"], said)(1, only=["CONST"])
     assert seen == [2]
+
 
 
 def test_a_copy_writes_no_mutant_before_the_campaign_s_clock_is_set(
