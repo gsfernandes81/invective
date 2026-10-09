@@ -541,7 +541,8 @@ def test_a_worker_held_off_gives_up_once_the_campaign_is_stopping():
 #: A campaign, run in a process of its own, with a ^C landing on the main
 #: thread at the start of a lock's `__exit__`, before the release, where
 #: 3.12 and later can land one: the handler is called there, as Python calls
-#: it. Each run waits out of the hush, as a real one does, and says green.
+#: it. Each run waits out of the hush, as a real one does, each copy's for
+#: a time of its own so that they do not end together, and says green.
 #: `hush` lands it as a text's turn begins while a run goes on, and `queue`
 #: as the main thread reads a post.
 LANDING = """\
@@ -549,7 +550,7 @@ import os, signal, sys, threading, time
 from invective import mutate
 
 top, at = sys.argv[1:]
-fired, running = [], []
+fired, running, copies = [], [], []
 
 
 class Turn(threading.Condition):
@@ -585,10 +586,12 @@ else:
 
 def run_tests(where, tests, timeout, selection=None, options=(), target="",
               stop=None):
+    if where not in copies:
+        copies.append(where)
+    running.append(where)
     with mutate._Hush.aside():
-        running.append(where)
-        time.sleep(0.2)
-        running.remove(where)
+        time.sleep(0.1 + 0.15 * copies.index(where))
+    running.remove(where)
     return mutate.Verdict(True, 0, "", "")
 
 
@@ -613,6 +616,8 @@ def test_a_stop_landing_as_a_lock_is_let_go_is_raised_with_none_held(
     would wait for ever on a worker that needs it. Held while the workers
     run, it is raised where the main thread waits, with no lock held: the
     campaign stops, and its copies are removed."""
+    # Twelve mutants, for texts made while runs go on.
+    write_tree(tree, {GATE_FILE: TARGETS["many"]})
     try:
         done = subprocess.run([sys.executable, "-c", LANDING, tree, at],
                               capture_output=True, text=True, timeout=60,
