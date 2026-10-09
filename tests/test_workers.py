@@ -12,6 +12,7 @@ import _thread
 import collections
 import contextlib
 import hashlib
+import itertools
 import json
 import os
 import queue
@@ -309,6 +310,9 @@ def test_a_copy_red_or_short_on_the_unmutated_tree_is_refused(
         with pytest.raises(mutate.Refusal) as caught:
             run(3)
         assert says in str(caught.value)
+        if wrong is not GREEN and not wrong.ok:
+            # What the red copy's run said, not a green one's.
+            assert str(caught.value).endswith("\n1 failed")
         assert not written
         assert not any(os.path.exists(where) for where in run.places)
 
@@ -327,14 +331,19 @@ def test_the_first_copy_alone_is_checked_before_the_others_run(
     assert not written
 
 
+@pytest.mark.parametrize("workers", [1, 2, 3])
 def test_every_copy_of_a_ref_is_the_commit_the_first_copy_holds(
-        repo, monkeypatch):
+        repo, monkeypatch, workers):
     """The first copy is a worktree of the ref; the others are of the
     commit it holds, and not of the ref again, which can name another
-    commit by then."""
+    commit by then. With one worker, git is asked nothing more than a
+    serial campaign asks it."""
     before = git(repo, "rev-parse", "HEAD").strip()
-    made = []
+    made, asked = [], []
     real = mutate.git_ref
+    real_commit = mutate.commit_of
+    monkeypatch.setattr(mutate, "commit_of", lambda where: (
+        asked.append(where), real_commit(where))[1])
 
     @contextlib.contextmanager
     def git_ref(root, ref):
@@ -353,9 +362,10 @@ def test_every_copy_of_a_ref_is_the_commit_the_first_copy_holds(
         return GREEN
 
     run = Campaign(repo, monkeypatch, said=said)
-    report = run(3, ref="main")
-    assert report["workers"] == 3
-    assert made == ["main", before, before]
+    report = run(workers, ref="main", only=["RAISE", "BOOL", "CMP"])
+    assert report["workers"] == workers
+    assert made == ["main"] + [before] * (workers - 1)
+    assert len(asked) == (workers > 1)
     assert heads == {before}
     assert git(repo, "rev-parse", "HEAD").strip() != before
 
@@ -1293,6 +1303,180 @@ def test_a_post_made_as_the_halt_finds_the_queue_empty_is_kept(tmp_path):
     pool.give(0, 7, task)
     assert pool.halt() == [(0, 7, "a final outcome")]
     assert pool.posts.empty()
+
+
+def test_a_text_held_off_by_a_worker_asks_for_a_signal_while_it_waits():
+    """The main thread, waiting for its turn while a worker's task goes on,
+    asks for a signal held meanwhile every spell, and makes no text until
+    the worker is done."""
+    order, done, inside = [], threading.Event(), threading.Event()
+
+    def check():
+        if not order:
+            order.append("held off")
+            done.set()
+
+    hush = mutate._Hush(check=check)
+
+    def worker():
+        with hush.shared():
+            inside.set()
+            done.wait(5)
+
+    workers = threading.Thread(target=worker, daemon=True)
+    workers.start()
+    assert inside.wait(5)
+    with hush.alone():
+        order.append("made")
+    workers.join(5)
+    assert order == ["held off", "made"]
+
+
+def test_a_text_stopped_before_its_turn_does_not_end_another_s():
+    """Its turn never came, so the turn it leaves is another's."""
+    def check():
+        raise KeyboardInterrupt
+
+    hush = mutate._Hush(check=check)
+    hush._alone = True
+    with pytest.raises(KeyboardInterrupt):
+        with hush.alone():
+            pytest.fail("the text was made in another's turn")
+    assert (hush._alone, hush._asking) == (True, 0)
+
+
+def test_a_run_s_time_is_up_at_its_end_to_the_second(monkeypatch):
+    """A run whose time is up is a `TimeoutExpired` at the moment its time
+    ends, not a spell later, whatever it would have said in that spell."""
+    clock = itertools.chain([0.0, 0.8], itertools.repeat(1.0))
+    monkeypatch.setattr(mutate, "time", SimpleNamespace(
+        monotonic=lambda: next(clock)))
+    asked = []
+
+    class Proc:
+        def communicate(self, timeout):
+            asked.append(timeout)
+            if len(asked) == 1:
+                raise subprocess.TimeoutExpired("pytest", timeout)
+            return "", ""
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        mutate._wait(Proc(), 1.0, threading.Event())
+    assert asked == [pytest.approx(mutate._POLL)]
+
+
+def test_a_halt_after_a_close_does_nothing(tmp_path):
+    """The pool's end is called again as the campaign unwinds, after it
+    has closed: it stops nothing and says nothing."""
+    said, stop = [], threading.Event()
+    pool = mutate._Pool(_copies(tmp_path, 2), stop, said.append)
+    pool.close()
+    assert pool.halt() == []
+    assert not stop.is_set() and said == []
+
+
+def test_a_halt_says_once_that_it_is_stopping_however_long_the_runs_take(
+        tmp_path):
+    """The halt waits on its workers in spells, and says it is stopping
+    the runs in flight in the first only."""
+    said, stop, release = [], threading.Event(), threading.Event()
+    pool = mutate._Pool(_copies(tmp_path, 2), stop, said.append)
+    gone = pool.gone[0]
+
+    class Spells:
+        """The first worker's end, which lets its task end once the halt
+        has waited on it for three spells."""
+
+        waits = 0
+
+        def wait(self, timeout=None):
+            Spells.waits += 1
+            if Spells.waits == 3:
+                release.set()
+            return gone.wait(timeout)
+
+        def is_set(self):
+            return gone.is_set()
+
+        def set(self):
+            gone.set()
+
+    pool.gone[0] = Spells()
+
+    def task(copy):
+        assert stop.wait(10) and release.wait(10)
+        return 1
+
+    pool.give(0, 0, task)
+    assert pool.halt() == [(0, 0, 1)]
+    assert Spells.waits >= 3
+    assert said == ["stopping 1 run(s)"]
+
+
+def test_a_stop_while_a_kill_is_confirmed_stops_the_run_going_on(
+        tree, monkeypatch):
+    """The campaign unwinding on a ^C halts the pool, which stops the
+    confirmation's run, rather than closing it, which would wait for the
+    run to end."""
+    restored, stopped = [], []
+    real = mutate.Copy.restore
+    monkeypatch.setattr(mutate.Copy, "restore", lambda self: (
+        restored.append(self), real(self)))
+
+    def said(run):
+        if run.text is not None:
+            return killed_by(MINOR) if "raise" not in run.text else GREEN
+        if restored and not stopped:
+            _thread.interrupt_main()
+            stopped.append(campaign.stop.wait(10))
+        return GREEN
+
+    campaign = Campaign(tree, monkeypatch, said=said)
+    with pytest.raises(KeyboardInterrupt):
+        campaign(2, only=["RAISE", "BOOL"], confirm=True)
+    assert stopped == [True]
+
+
+def test_a_campaign_that_loses_a_mutant_is_refused(tree, monkeypatch):
+    """Two mutants that share a place, which no campaign makes: the report
+    would leave one out and read as complete."""
+    real = mutate.Job
+    monkeypatch.setattr(mutate, "Job", lambda n, *rest: real(1, *rest))
+    with pytest.raises(mutate.Refusal, match="1 of the 2 mutants came to "
+                       "no verdict"):
+        Campaign(tree, monkeypatch)(1, only=["RAISE", "BOOL"])
+
+
+def test_one_text_is_made_ahead_for_each_run_in_flight(tree, monkeypatch):
+    """With one worker, the next mutant's text is made while the first
+    one's run goes on, and no more than that one."""
+    made, waiting = [], threading.Event()
+    real_text, real_take = mutate._text_of, mutate._Pool.take
+
+    def text_of(module, index):
+        made.append(index)
+        return real_text(module, index)
+
+    def take(self):
+        # A mutant's run is in flight: the baseline's key is 0.
+        if any(self.busy.values()):
+            waiting.set()
+        return real_take(self)
+
+    monkeypatch.setattr(mutate, "_text_of", text_of)
+    monkeypatch.setattr(mutate._Pool, "take", take)
+    seen = []
+
+    def said(run):
+        if run.text is not None and not seen:
+            # Out of the hush, as a real run waits.
+            with mutate._Hush.aside():
+                assert waiting.wait(10)
+            seen.append(len(made))
+        return GREEN
+
+    Campaign(tree, monkeypatch, TARGETS["many"], said)(1, only=["CONST"])
+    assert seen == [2]
 
 
 def test_a_copy_writes_no_mutant_before_the_campaign_s_clock_is_set(
