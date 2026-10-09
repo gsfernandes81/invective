@@ -1216,11 +1216,13 @@ def _plain_tests(tests: list[str], where: str) -> bool:
 
 def _landed(mutant: Mutant, outcome: Outcome) -> None:
     """*outcome* stands for *mutant*: called on the main thread, once for
-    each mutant whose outcome is final, and never for one that is not. With
-    one worker that is every outcome as it comes; with more, a survivor as
-    it comes and a kill once it is confirmed; a campaign that is stopping
-    lands only those already final. The place for whatever keeps verdicts
-    beyond the campaign."""
+    each mutant whose outcome is final, and never for one that is not. Every
+    outcome is final as it ends, at any count of workers, but for a kill
+    made with `--confirm` and more than one worker: that lands once it is
+    confirmed, after the last mutant has run, and a kill read back lands
+    as it ends, having been confirmed when it was kept. A campaign that is
+    stopping lands only those already final. The place for whatever keeps
+    verdicts beyond the campaign."""
 
 
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
