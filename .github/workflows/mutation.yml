@@ -34,7 +34,9 @@ jobs:
       matrix:
         include:
           # tests/test_settings.py is in no job: it runs whole campaigns,
-          # about a minute for each mutant.
+          # about a minute for each mutant. Nor is tests/test_own_code.py:
+          # it reads the module mutated, so every accepted constant's mutant
+          # would fail it.
           # The gate's checks are with the acceptances', and the link
           # refusals with the copy's.
           # The engine is the largest campaign: about 300 mutants against
