@@ -63,7 +63,7 @@ from invective.config import (Config, check_pytest_settings,
                               load as load_config, project_root,
                               relative_to_root, workers as workers_of)
 from invective.errors import Refusal
-from invective.tree import git_ref, head, working_tree
+from invective.tree import git_ref, head as commit_of, working_tree
 
 
 # --------------------------------------------------------------------------
@@ -1326,7 +1326,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # **Every copy before the first run**, so that none holds what a
         # run left behind: a cache, a database, a file a test writes.
         places = [first]
-        commit = head(first) if ref and count > 1 else None
+        commit = commit_of(first) if ref and count > 1 else None
         for _k in range(1, count):
             where = held_open.enter_context(
                 git_ref(root, commit) if ref

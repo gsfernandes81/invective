@@ -29,7 +29,6 @@ from pytest import ExitCode
 
 import pytest_invective
 from invective import config, mutate
-from invective import tree as trees
 
 from conftest import FILES, SRC, commit, git, stop_group, wait_for, write_tree
 from test_mutate import ACCEPTING, NESTED
