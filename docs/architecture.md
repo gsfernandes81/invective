@@ -73,24 +73,29 @@ and one that lands inside `subprocess.Popen` there, after the process is made
 and before it is handed back, leaves a run that nothing stops. A run's process
 is touched only by the thread that started it.
 
-> **Finding:** (2026-10-08, more-itertools at `81c21a8`, Python 3.14, a 4-vCPU VM,
-> three runs each, median wall time; R40 is `recipes.py` against `test_recipes.py`,
-> 40 mutants; M60 is `more.py` against `test_more.py`, 60 mutants)
+> **Finding:** (more-itertools at `81c21a8`, Python 3.14, a 4-vCPU Firecracker VM with
+> nothing else running; wall time. R40 is `recipes.py` against `test_recipes.py`, 40
+> mutants, taken 2026-10-08 with the workers engine at `2cd03f7`, three runs each, the
+> median. M60 is `more.py` against `test_more.py`, 60 mutants, taken 2026-10-09 with
+> the workers engine at `4c4b100`: the serial engine and one worker two runs each, in
+> the order serial, one, one, serial, then four workers two runs, the mean. Every M60
+> run deselects `TestConcurrentTee::test_concurrent_consumers` (`PYTEST_ADDOPTS`), whose
+> threads took 1.4 to 96 s on this VM while its other vCPUs were idle and a steady 1.5 s
+> while they were busy: kept, it timed the VM's scheduler, not invective. The serial
+> engine is `4413b08`.)
 >
 > | case | serial engine | 1 worker | 4 workers | 4 workers, `--confirm` |
 > |---|---|---|---|---|
 > | R40 | 308.7 s | 306.0 s | 100.2 s | 256.9 s (pool 96.6 s, confirmation 160.1 s) |
-> | M60 | 322.7 s | 952.1 s | 96.7 s | 2127.0 s (pool 264.7 s, confirmation 1862.3 s) |
+> | M60 | 277.4 s | 277.9 s | 85.2 s | not taken |
 >
-> Four workers run R40 3.1x and M60 3.3x faster than the serial engine, with the
-> same kills, survivors and acceptances. The VM's speed varied through the day:
-> the M60 serial runs beside these took 2036 to 2164 s, one-worker runs 426 to
-> 1252 s, and two of those scored 5 and 1 more kills, by time, so M60's serial
-> figure is the day's first run, on a quiet hour, and its `--confirm` figure is
-> one run on a slow one. Confirming costs about one serial run of each kill's
-> killer and one full run for each kill by time, which takes back most of what
-> the workers save; it found no kill its killer did not make alone on either
-> suite.
+> The M60 runs took 277.2 and 277.6 s on the serial engine, 278.4 and 277.5 s with one
+> worker, and 85.7 and 84.7 s with four. Four workers run R40 3.1x and M60 3.3x faster
+> than the serial engine, and one worker runs as fast as it. Every run of a case had the
+> same kills, survivors and acceptances (M60: 46 killed, 5 of them by time, and 14
+> survived). Confirming R40 cost about one serial run of each kill's killer and one full
+> run for each kill by time, which took back most of what the workers saved, and found no
+> kill its killer did not make alone.
 
 ## Exit codes
 
