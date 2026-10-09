@@ -1587,6 +1587,10 @@ def test_a_stop_while_a_run_starts_leaves_no_run_behind(
     started, said = [], []
 
     def popen(*args, **kwargs):
+        if pytest_invective.VERDICT not in (kwargs.get("env") or {}):
+            # Not a run of the tests: on Windows, the `taskkill` that stops
+            # one, which has to work for the run to be stopped and reaped.
+            return real(*args, **kwargs)
         proc = real(*args, **kwargs)
         with open(os.path.join(kwargs["cwd"], GATE), encoding="utf-8") as fh:
             text = fh.read()
@@ -1608,6 +1612,10 @@ def test_a_stop_while_a_run_starts_leaves_no_run_behind(
         # The case is the run it says it is.
         assert started[which - 1][1] == starts
         for proc, _what in started:
+            # `returncode`, not `poll()`: whatever ends a run reaps it
+            # (`process.stop` waits on it after the kill, `taskkill` too),
+            # and `poll()` would reap a run left going that had since ended
+            # on its own, and pass.
             assert proc.returncode is not None, "a run was left going"
             if os.name != "nt":
                 with pytest.raises(ProcessLookupError):
