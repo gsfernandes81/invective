@@ -73,16 +73,16 @@ and one that lands inside `subprocess.Popen` there, after the process is made
 and before it is handed back, leaves a run that nothing stops. A run's process
 is touched only by the thread that started it.
 
-> **Finding:** (more-itertools at `81c21a8`, Python 3.14, a 4-vCPU Firecracker VM with
-> nothing else running; wall time. R40 is `recipes.py` against `test_recipes.py`, 40
-> mutants, taken 2026-10-08 with the workers engine at `2cd03f7`, three runs each, the
-> median. M60 is `more.py` against `test_more.py`, 60 mutants, taken 2026-10-09 with
-> the workers engine at `4c4b100`: the serial engine and one worker two runs each, in
-> the order serial, one, one, serial, then four workers two runs, the mean. Every M60
-> run deselects `TestConcurrentTee::test_concurrent_consumers` (`PYTEST_ADDOPTS`), whose
-> threads took 1.4 to 96 s on this VM while its other vCPUs were idle and a steady 1.5 s
-> while they were busy: kept, it timed the VM's scheduler, not invective. The serial
-> engine is `4413b08`.)
+> **Finding:** (2026-10-08 and 2026-10-09, more-itertools at `81c21a8`, Python 3.14, a
+> 4-vCPU Firecracker VM with nothing else running; wall time. R40 is `recipes.py` against
+> `test_recipes.py`, 40 mutants, taken 2026-10-08 with the workers engine at `2cd03f7`,
+> three runs each, the median. M60 is `more.py` against `test_more.py`, 60 mutants, taken
+> 2026-10-09 with the workers engine at `4c4b100`: the serial engine and one worker two
+> runs each, in the order serial, one, one, serial, then four workers two runs, the mean.
+> Every M60 run deselects `TestConcurrentTee::test_concurrent_consumers`
+> (`PYTEST_ADDOPTS`), whose threads took 1.4 to 96 s on this VM while its other vCPUs were
+> idle and a steady 1.5 s while they were busy: kept, it timed the VM's scheduler, not
+> invective. The serial engine is `4413b08`.)
 >
 > | case | serial engine | 1 worker | 4 workers | 4 workers, `--confirm` |
 > |---|---|---|---|---|
