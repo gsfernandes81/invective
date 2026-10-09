@@ -1295,6 +1295,15 @@ def test_a_post_made_as_the_halt_finds_the_queue_empty_is_kept(tmp_path):
     assert pool.posts.empty()
 
 
+def test_a_copy_writes_no_mutant_before_the_campaign_s_clock_is_set(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(mutate, "run_tests", lambda *a: GREEN)
+    (copy,) = _copies(tmp_path, 1)
+    with pytest.raises(TypeError):
+        copy.run(mutate.Mutant(mutate.Job(1, 0, "CONST", "1 -> 2", 1),
+                               "x = 2\n", True), 1)
+
+
 def test_a_copy_holding_a_mutant_is_never_run_as_the_original(
         tmp_path, monkeypatch):
     runs = []

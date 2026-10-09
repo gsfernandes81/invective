@@ -714,8 +714,10 @@ class Copy:
         self.path = os.path.join(where, rel)
         self.tests, self.listed, self.options = tests, listed, options
         self.stop, self.count = stop, count
-        #: The campaign's clock, set before the first mutant is written.
-        self.clock = 0
+        #: The campaign's clock, set before the first mutant is written:
+        #: a write before that raises, rather than stamp a second that can
+        #: be older than the copy's own file.
+        self.clock: int | None = None
         # The mutant the file may hold, None while it is the original's.
         self._held: Mutant | None = None
         # The next stamp once restored; None while in the pool.
