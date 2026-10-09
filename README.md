@@ -54,7 +54,8 @@ spaced through the file), and `--json report.json` writes the full report.
 stand.
 
 `--workers N` runs N mutants at once, each in a copy of its own; `auto` is
-one per available CPU, at most 8. `workers` in `[tool.invective]` sets the
+one per available CPU, at most 8. Either is at most one per mutant, and the
+`workers:` line says how many ran. `workers` in `[tool.invective]` sets the
 default, which is 1.
 
 With more than one worker, the suite has to be one whose tests are

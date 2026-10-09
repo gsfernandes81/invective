@@ -65,8 +65,10 @@ def workers(value: int | str, name: str = "workers",
             most: int | None = None) -> int:
     """How many mutants *value* runs at once: a whole number above 0, as a
     number or as its digits, the way a command line gives it; or "auto",
-    one for each CPU this process may use (`_cpus`), at most `AUTO_MOST`
-    and at most *most*. Anything else is a refusal naming *name*."""
+    one for each CPU this process may use (`_cpus`), at most `AUTO_MOST`.
+    Either is at most *most*, the number of mutants: a worker more would
+    run its copy's baseline beside the others and then nothing. Anything
+    else is a refusal naming *name*."""
     if value == "auto":
         return max(1, min(_cpus(), AUTO_MOST,
                           AUTO_MOST if most is None else most))
@@ -75,7 +77,7 @@ def workers(value: int | str, name: str = "workers",
         count = int(value)
     # `bool` is an `int` to isinstance, and `true` is no count.
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-        return count
+        return count if most is None else max(1, min(count, most))
     raise Refusal('%s must be a whole number above 0 or "auto", not %r'
                   % (name, value))
 

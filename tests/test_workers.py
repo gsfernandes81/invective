@@ -257,6 +257,16 @@ def test_auto_is_at_most_one_worker_a_mutant(tree, monkeypatch):
     assert run("auto")["workers"] == config.AUTO_MOST
 
 
+@pytest.mark.parametrize("given", [8, "8"])
+def test_a_count_of_workers_is_at_most_one_a_mutant(tree, monkeypatch, given):
+    """A copy more than there are mutants would run a baseline beside the
+    others and no mutant, a load that raises the budget for nothing."""
+    run = Campaign(tree, monkeypatch, TARGETS["many"])
+    assert run(given, limit=2)["workers"] == 2
+    assert len(run.places) == 2 and "workers:   2" in run.lines
+    assert config.workers(given, most=12) == 8
+
+
 def test_no_copy_holds_what_a_run_left_in_another(tree, monkeypatch):
     """Every copy is made before the first run: one made after would hold
     what the baseline wrote in the first, a file a test reads."""
@@ -271,7 +281,8 @@ def test_no_copy_holds_what_a_run_left_in_another(tree, monkeypatch):
         return GREEN
 
     campaign = Campaign(tree, monkeypatch, said=said)
-    report = campaign(2, only=["RAISE"])
+    report = campaign(2, only=["RAISE", "BOOL"])
+    assert report["workers"] == 2
     assert report["survivors"] and not report["kills"]
 
 
@@ -360,16 +371,19 @@ def test_a_kill_is_confirmed_on_no_less_time_than_the_loaded_budget(
             baselines.append(run.copy)
             now[0] += alone if len(baselines) == 1 else together
             return GREEN
-        return GREEN if run.text is None else killed_by(
-            "pkg/tests/test_gate.py")
+        if run.text is None or "raise" in run.text:
+            return GREEN
+        return killed_by("pkg/tests/test_gate.py")
 
     run = Campaign(tree, monkeypatch, said=said)
-    report = run(2, only=["RAISE"], confirm=True)
+    report = run(2, only=["RAISE", "BOOL"], confirm=True)
 
-    assert report["kills"][0]["confirmed"] == "full"
-    # Three baselines, the mutant's run in the pool, then the first copy
-    # restored and run, and the mutant run there again.
-    pooled, guard, again = run.runs[3:]
+    (kill,) = report["kills"]
+    assert kill["confirmed"] == "full"
+    # Three baselines, the two mutants' runs in the pool, then the first
+    # copy restored and run, and the mutant killed run there again.
+    (pooled,) = [r for r in run.runs[3:5] if "raise" not in r.text]
+    guard, again = run.runs[5:]
     assert (guard.text, again.text) == (None, pooled.text)
     if alone:
         assert pooled.timeout == 30.0
@@ -811,8 +825,8 @@ def test_a_killer_is_run_alone_only_where_it_leaves_out_nothing_the_tests_chose(
     would drop with them, so then the kill is confirmed by the whole
     selection."""
     run = Campaign(tree, monkeypatch, said=lambda r: killed_by(MINOR)
-                   if r.text else GREEN)
-    report = run(2, only=["RAISE"], tests=tests, confirm=True)
+                   if r.text and "raise" not in r.text else GREEN)
+    report = run(2, only=["RAISE", "BOOL"], tests=tests, confirm=True)
     (kill,) = report["kills"]
     assert kill["confirmed"] == ("alone" if gated else "full")
     assert bool([r for r in run.runs if r.alone]) is gated
@@ -1400,7 +1414,7 @@ def test_a_confirmation_that_collects_nothing_is_refused(tree, monkeypatch,
 
     campaign = Campaign(tree, monkeypatch, said=said)
     with pytest.raises(mutate.Refusal) as caught:
-        campaign(2, only=["RAISE"], confirm=True)
+        campaign(2, only=["RAISE", "BOOL"], confirm=True)
     assert "made pytest exit 5" in str(caught.value)
     assert landed == []
 
@@ -1557,8 +1571,8 @@ def test_a_stopped_run_with_two_workers_stops_both_runs_and_removes_both_copies(
 @pytest.mark.parametrize("workers, which, starts", [
     (1, 1, ("original", "")), (1, 2, ("mutant", "")),
     (2, 1, ("original", "")), (2, 4, ("mutant", "")),
-    (2, 5, ("original", "")), (2, 6, ("original", "killer-0.txt")),
-    (2, 7, ("mutant", "killer-0.txt"))])
+    (2, 6, ("original", "")), (2, 7, ("original", "killer-0.txt")),
+    (2, 8, ("mutant", "killer-0.txt"))])
 def test_a_stop_while_a_run_starts_leaves_no_run_behind(
         tree, monkeypatch, workers, which, starts):
     """A ^C that lands inside `Popen`, once the process is made and before
@@ -1589,8 +1603,8 @@ def test_a_stop_while_a_run_starts_leaves_no_run_behind(
     try:
         with pytest.raises(KeyboardInterrupt):
             mutate.mutate(tree, os.path.join(tree, GATE), GATE_TESTS,
-                          ["RAISE"], None, say=said.append, workers=workers,
-                          confirm=True)
+                          ["RAISE", "BOOL"], None, say=said.append,
+                          workers=workers, confirm=True)
         # The case is the run it says it is.
         assert started[which - 1][1] == starts
         for proc, _what in started:

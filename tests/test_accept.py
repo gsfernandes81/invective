@@ -156,8 +156,9 @@ def test_a_count_of_workers_is_taken_as_given_or_as_its_digits(
         monkeypatch, value, count):
     monkeypatch.setattr(config, "_cpus", lambda: 6)
     assert config.workers(value) == count
-    # A cap on the mutants there are applies to "auto" alone.
-    assert config.workers(value, most=2) == (2 if value == "auto" else count)
+    # A cap on the mutants there are applies to every count.
+    assert config.workers(value, most=2) == min(count, 2)
+    assert config.workers(value, most=0) == 1
 
 
 def test_auto_is_at_most_AUTO_MOST(monkeypatch):
