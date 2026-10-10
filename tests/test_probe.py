@@ -491,8 +491,8 @@ def test_without_unsafe_speedups_one_worker_runs_and_nothing_is_remembered(
     assert report["workers"] == 1 and len(run.places) == 1
     assert run.gated() == [] and run.probed() == [] and not any(run.asked)
     assert remembered(tree) == before
-    assert "speedups:  no unsafe ones" in run.lines
-    assert run.lines.index("speedups:  no unsafe ones") == (
+    assert "speedups:  safe ones only" in run.lines
+    assert run.lines.index("speedups:  safe ones only") == (
         run.lines.index("tests:     %s" % " ".join(GATE_TESTS)) + 1)
 
 
@@ -508,10 +508,18 @@ def test_a_selection_red_beside_its_copies_is_refused_naming_the_switch(
             "time against the whole selection.") in str(caught.value)
 
 
-def test_the_header_says_the_unsafe_speedups_are_on(tree, monkeypatch):
+@pytest.mark.parametrize("workers, history, said", [
+    (2, True, "unsafe ones on: workers, history"),
+    (2, False, "unsafe ones on: workers"),
+    (1, True, "unsafe ones on: history"),
+    (1, False, "no unsafe ones on"),
+    # A count clamped to the one mutant runs one worker.
+    (4, False, "no unsafe ones on")])
+def test_the_header_says_which_unsafe_speedups_are_on(tree, monkeypatch,
+                                                      workers, history, said):
     run = Probing(tree, monkeypatch, world({}))
-    run()
-    assert "speedups:  all" in run.lines
+    run(workers, only=["RAISE"] if workers == 4 else None, history=history)
+    assert "speedups:  %s" % said in run.lines
 
 
 # --------------------------------------------------------------------------

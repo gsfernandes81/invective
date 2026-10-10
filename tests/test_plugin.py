@@ -550,7 +550,7 @@ def test_the_switch_turns_the_unsafe_speedups_off_and_a_flag_against_it_is_refus
                      "raise", "--mutate-no-unsafe-speedups",
                      "pkg/tests/test_gate.py")
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "speedups:  no unsafe ones" in done.stdout
+    assert "speedups:  safe ones only" in done.stdout
     assert not os.path.exists(os.path.join(repo, ".invective"))
 
     done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
@@ -568,7 +568,7 @@ def test_the_settings_turn_the_history_and_the_speedups_off(repo):
     done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
                      "raise", "pkg/tests/test_gate.py")
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "speedups:  all" in done.stdout
+    assert "speedups:  no unsafe ones on" in done.stdout
     assert not os.path.exists(os.path.join(repo, ".invective"))
 
     write_tree(repo, {"pyproject.toml": "[tool.pytest.ini_options]\n"
@@ -577,7 +577,7 @@ def test_the_settings_turn_the_history_and_the_speedups_off(repo):
     done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
                      "raise", "pkg/tests/test_gate.py")
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "speedups:  no unsafe ones" in done.stdout
+    assert "speedups:  safe ones only" in done.stdout
     assert "workers:   1" in done.stdout
     assert not os.path.exists(os.path.join(repo, ".invective"))
 

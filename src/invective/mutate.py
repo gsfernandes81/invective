@@ -1306,6 +1306,20 @@ def _apart_line(names: list[str]) -> str:
             "selection" % (len(names), NOT_GREEN_APART, ", ".join(names[:3])))
 
 
+def _speedups_said(running: Config) -> str:
+    """What the header says of the speedups *running*, a campaign's settled
+    settings with the workers it runs, holds: with the unsafe ones off, that
+    only the safe ones are on; otherwise, which unsafe ones of
+    `config.SPEEDUPS` are on, by their settings' names, or that none is."""
+    if not running.unsafe_speedups:
+        return "safe ones only"
+    used = [speedup.field for speedup in SPEEDUPS if speedup.unsafe
+            and getattr(running, speedup.field) != speedup.off]
+    if used:
+        return "unsafe ones on: %s" % ", ".join(used)
+    return "no unsafe ones on"
+
+
 def _landed(mutant: Mutant, outcome: Outcome) -> None:
     """*outcome* stands for *mutant*: called on the main thread, once for
     each mutant whose outcome is final, and never for one that is not. Every
@@ -1465,7 +1479,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         say("target:    %s" % src_rel)
         say("tests:     %s" % (" ".join(tests) if selection is None else
                                "%d collected by pytest" % len(selection)))
-        say("speedups:  %s" % ("all" if unsafe_speedups else "no unsafe ones"))
+        say("speedups:  %s" % _speedups_said(speed._replace(workers=count)))
 
         stop = threading.Event()
         copies = [Copy(where, src_rel, source, tests, listed, options, stop,

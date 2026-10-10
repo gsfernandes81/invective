@@ -84,7 +84,9 @@ at a time: workers, and the remembered killer. A speedup that cannot (each
 mutant made from one parse of the module) stays on; `config.SPEEDUPS` says
 which side each one is on. A value in `[tool.invective]` that would turn an
 unsafe speedup back on gives way to it, and a flag that would (`--workers 4`) is
-refused. The `speedups:` line says whether it is on.
+refused. The `speedups:` line says which unsafe speedups a run uses
+(`unsafe ones on: workers, history`), that it uses none (`no unsafe ones on`),
+or that they are off (`safe ones only`).
 
 Each kill's killer is remembered in `.invective/history.json` at the project's
 top, and the next run tries it alone on the same mutant before the whole
@@ -107,7 +109,7 @@ workers:   1
 project:   /home/me/proj
 target:    src/pkg/gate.py
 tests:     tests/test_gate.py
-speedups:  all
+speedups:  unsafe ones on: history
 baseline:  green in 0.4s
 mutants:   6
 
