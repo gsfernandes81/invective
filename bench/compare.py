@@ -1061,6 +1061,62 @@ def signals_held():
             signal.signal(signum, handler)
 
 
+#: The file in a session's work directory that names the process it is
+#: for, so that a later session can tell a dead session's leftovers from a
+#: live one's.
+OWNER = "owner.pid"
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process *pid* is running."""
+    if os.name == "nt":
+        import ctypes
+
+        # `os.kill(pid, 0)` on Windows would end the process, not ask.
+        kernel = ctypes.windll.kernel32
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        try:
+            kernel.GetExitCodeProcess(handle, ctypes.byref(code))
+        finally:
+            kernel.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def reclaim(parent: str, repo: str) -> list[str]:
+    """Remove what killed sessions left in *parent*: each `invective-bench-*`
+    directory whose owner (`OWNER`) is no longer running; then the entries
+    of *repo*'s worktrees whose directory is gone. A directory with no owner
+    file is left, and named, since nothing says whose it is. The paths
+    removed."""
+    removed = []
+    for name in sorted(os.listdir(parent)):
+        where = os.path.join(parent, name)
+        if not name.startswith("invective-bench-") or not os.path.isdir(where):
+            continue
+        try:
+            with open(os.path.join(where, OWNER), encoding="utf-8") as fh:
+                pid = int(fh.read().strip())
+        except (OSError, ValueError):
+            print("bench: %s has no owner to check; remove it by hand when no "
+                  "session is running" % where, file=sys.stderr)
+            continue
+        if not _alive(pid):
+            _rmtree(where)
+            removed.append(where)
+    subprocess.run(["git", "-C", repo, "worktree", "prune"], capture_output=True)
+    return removed
+
+
 def _rmtree(path: str) -> None:
     def writable(func, target, _exc):
         # Windows will not remove a read-only file, which git's objects are.
@@ -1292,7 +1348,11 @@ class Session:
     def setup(self) -> None:
         os.makedirs(self.logs, exist_ok=True)
         self.machine = machine()
+        for gone in reclaim(self.args.work or tempfile.gettempdir(), self.repo):
+            print("removed %s, a killed session's" % gone, flush=True)
         self.work = tempfile.mkdtemp(prefix="invective-bench-", dir=self.args.work)
+        with open(os.path.join(self.work, OWNER), "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
         setup_log = os.path.join(self.logs, "setup.log")
         for side in self.sides.values():
             side.sha = check(["git", "-C", self.repo, "rev-parse", "--verify",

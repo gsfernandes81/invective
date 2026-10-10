@@ -724,6 +724,34 @@ def test_an_out_directory_with_something_in_it_is_refused(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------
+# What a killed session leaves
+
+
+def test_a_dead_sessions_leftovers_are_reclaimed_and_a_live_ones_kept(tmp_path):
+    """A SIGKILL leaves the work directory and the worktree entries, and
+    nothing else ever removes them; another session's must stay."""
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    for name, owner in (("invective-bench-dead", str(dead.pid)),
+                        ("invective-bench-live", str(os.getpid())),
+                        ("invective-bench-unowned", None), ("other", str(dead.pid))):
+        (tmp_path / name).mkdir()
+        if owner is not None:
+            (tmp_path / name / compare.OWNER).write_text(owner, encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(str(repo), "init", "-q")
+    commit(str(repo), {"a.txt": "a\n"})
+    git(str(repo), "worktree", "add", "-q", "--detach", str(tmp_path / "gone"))
+    shutil.rmtree(tmp_path / "gone")
+    assert compare.reclaim(str(tmp_path), str(repo)) == [
+        str(tmp_path / "invective-bench-dead")]
+    assert sorted(os.listdir(tmp_path)) == [
+        "invective-bench-live", "invective-bench-unowned", "other", "repo"]
+    assert "gone" not in git(str(repo), "worktree", "list")
+
+
+# --------------------------------------------------------------------------
 # The environment and the deselection
 
 
@@ -1531,6 +1559,10 @@ def test_a_stopped_session_records_its_run_and_removes_its_temporaries(tmp_path,
             time.sleep(0.2)
         # Inside its baseline, a test that sleeps.
         time.sleep(3)
+        # The work directory names its owner, for a later session to reclaim
+        # it by if this one is killed outright.
+        work, = tmp_path.glob("invective-bench-*")
+        assert (work / compare.OWNER).read_text() == str(proc.pid)
         sent = time.monotonic()
         if how == "a SIGTERM":
             proc.send_signal(signal.SIGTERM)
