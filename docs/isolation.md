@@ -22,7 +22,19 @@ import-time mutants, module-level caches and global state are all seen by
 the tests. A child interpreter a test starts imports the mutant when it
 starts from the copy's working directory; one started elsewhere imports
 whatever copy of the package it finds on `sys.path`. Issue #2 tracks the
-known limits of this.
+known limits of this. A verdict read from the verdict cache (below) is no
+run of this campaign's: it was measured so by the run that kept it.
+
+> **Finding:** (2026-10-01, this repo, 4 cores, Python 3.11, pytest 9.1.1)
+>
+> A fresh pytest process costs about 0.23-0.30 s (`python -c pass` 14 ms,
+> `import pytest` 173 ms, pytest on one trivial test 228 ms). A real
+> `conftest.py` can push that to 0.5-1.5 s. The engine runs the 6-mutant
+> fixture in 0.37 s per run. Copying a 224 KB tree: `shutil.copytree`
+> 6 ms, `git worktree add` 14 ms (a wash at this size; both grow with
+> the tree's bytes). invective's own suite is the opposite
+> case: each test spawns pytest, 0.2-3.5 s per test, so startup is under
+> 10% of a run and coverage-guided selection would be worth 10-20x.
 
 ## The copy
 
@@ -121,7 +133,10 @@ passes. A kill its killer does not make alone is named in the report
 depends on its order or on another copy's run. A kill with no killer to run
 alone (a kill by time, by a module, or under `--tests` holding an option) that
 the whole selection lets through is named too, as `mutate.NO_KILLER`, and its
-survivor carries `confirmed` as a kill does. A survivor is not run again.
+survivor carries `confirmed` as a kill does. A survivor is not run again. With
+`--confirm` and more than one worker, no kill is read from the verdict cache, so
+every kill is run again; a survivor is read, as the run itself takes one from the
+pool, and one that confirmation settled is not named again by a later run.
 
 ## The remembered killer
 
@@ -253,6 +268,44 @@ the other), or a map coverage cannot read.
 > processes. Not measured: attrs, whose run is refused at its first mutant (issue
 > #35), and the 300 mutants of `more.py`.
 
+## The verdict cache
+
+With `cache = true` in `[tool.invective]`, a verdict an earlier run of the same
+campaign kept is read instead of a run (`docs/memory.md` has the layout, the key and
+the entry). It must never be read where a run under this run's settings could decide
+otherwise in the silent direction: a kill the tests do not make, or a survivor lost. So
+a verdict is kept only when the whole selection gives it again (`store.sound`), and is
+read only by a run that could have decided it (`store.Cache.hit`):
+
+- with `--no-unsafe-speedups`, only a verdict decided with it;
+- a verdict decided beside other copies' runs, only at more than one worker;
+- with `--confirm` at more than one worker, no kill;
+- a kill the remembered killer or the covering tests made alone, only while that
+  speedup is in use.
+
+What closes each way a verdict could be read wrongly, and what is left:
+
+| case | closed by | left |
+|---|---|---|
+| a kill by time, a signal, a crash, the harness, or with no killer | never kept | nothing |
+| a kill decided beside other runs, read at one worker | not read at one worker | nothing |
+| a verdict of more than one worker, read by `--confirm` | no kill is read; a survivor is, as the run takes its own from the pool, since `--confirm` never runs one again | a survivor confirmation settled is not named again |
+| a verdict an unsafe speedup decided, read with the switch | only `safe` entries are read | an entry from a run without the switch that used none of them (one worker, no history, no coverage) is not read either |
+| a probe's or a narrowed kill read as the whole selection's | `origin` kept, read only while that speedup is in use, counted on its closing line, never put again | with it in use, a kill read is the kind a fresh run would make, marked as such |
+| a kill confirmed alone or by the whole selection | kept as decided with nothing else running, and not `safe` | nothing |
+| a survivor | only the whole selection makes one; read whatever the history and coverage, but not when decided beside other runs at one worker, or without the switch with it | one kept with the probe off and read with it on, which a fresh probe could kill: the conservative side |
+| a stale input | the key | the limits in `docs/memory.md` |
+| a conftest or settings file above the project in a `--ref` worktree | hashed up to the worktree's top | nothing |
+| a dependency changed at the same version (a git commit, a rebuild, a reinstall) | its `RECORD` and `direct_url.json` hashed; `sitecustomize` and `usercustomize` among the imported files | a distribution with no `RECORD`; an installed file edited in place |
+| the engine changed | its code hashed | nothing |
+| the target edited | its text hashed, and each mutant's | nothing |
+| a smaller time budget | a kept kill ended inside its budget or failed a test, and a fresh run can only time out or fail the same test; a kept survivor ended inside its budget, and a fresh run that runs out of a smaller one is a kill, so the survivor read is the conservative side | nothing |
+| a flaky test, random examples | cannot be told | the verdict sticks: delete `.invective/cache`, and `--confirm` measures every kill again |
+| an entry torn, foreign or edited by hand | written whole; both hashes compared; its shape and `store.sound` checked on every read | nothing |
+| a store that cannot be written | said once, and nothing more is put | nothing: the cache only saves time |
+| two sites whose mutants are the same text | the same program, the same verdict | nothing |
+| a run whose tests loaded the target from elsewhere | refused, with no outcome | nothing |
+
 ## The unsafe speedups
 
 A speedup is unsafe when it can give a wrong verdict on a suite whose tests
@@ -263,7 +316,10 @@ that each mutant is run against the whole selection in its order, one at a time,
 and keeps each speedup that cannot change a verdict on any suite.
 `config.SPEEDUPS` puts every speedup on its side. A value in `[tool.invective]`
 that would turn an unsafe one on gives way to the switch; a flag that would is
-refused.
+refused. The verdict cache is safe only restricted, and the engine restricts it,
+not `config.settle`: with the switch on, the cache stays on and reads only the
+verdicts a run with the switch decided (`store.Cache`), every entry saying whether
+it was (`safe`).
 
 ## The import-from-outside refusal
 

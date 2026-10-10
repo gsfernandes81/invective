@@ -201,11 +201,13 @@ it all.
   where a side has no count: a cold run of a feature with nothing remembered
   starts what the engine before it started. `--expect-rerun-processes` holds
   each timed run of the after side, in a warm unit, to the count a re-run that
-  remembers every verdict it can starts (`compare.rerun_expected`): the untimed
-  run's baselines, and one run for each mutant it killed by load (by time, or a
-  run a signal or a crash ended), since no such kill is remembered. A run another
-  feature adds (a coverage run) is not counted; a feature whose re-run starts it
-  again adds its own term to that function.
+  reads every verdict the cache keeps starts (`compare.rerun_expected`): the
+  untimed run's baselines; its coverage run, when it made one, since a re-run
+  makes it again; and every run it made for a mutant whose kill the cache does
+  not keep (by time, by a signal or a crash, with no killer, or with pytest's
+  codes 3 to 5), its narrowed run as well as its whole one. The untimed run starts
+  from an empty `.invective`, so it gated and probed nothing. A feature whose
+  re-run starts another run again adds its own term to that function.
 - **The confirm run.** `--confirm-run` adds, after the pairs, one cold run of
   each case given by the after side at the largest count of workers, with
   `--confirm`. It is recorded, never judged on time, and its report's

@@ -23,13 +23,13 @@ uv add --dev git+https://github.com/gsfernandes81/invective
 To pin a release by tag:
 
 ```console
-uv add --dev git+https://github.com/gsfernandes81/invective@v0.5.0
+uv add --dev git+https://github.com/gsfernandes81/invective@v0.6.0
 ```
 
 Or install the release's wheel, which needs no build backend:
 
 ```console
-uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.5.0/invective-0.5.0-py3-none-any.whl
+uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.6.0/invective-0.6.0-py3-none-any.whl
 ```
 
 It needs pytest 8.2 or later in the same environment, and supports every
@@ -75,16 +75,18 @@ whole selection let the mutant through. A kill its killer does not make alone
 is listed under `unreproduced` and in the closing lines, with that killer, the
 test to look at; so is a kill with no killer to run alone (a kill by time, by a
 module, or under `--tests` holding an option) that the whole selection lets
-through. With one worker there is nothing to confirm.
+through. With one worker there is nothing to confirm. With more than one, no kill
+is read from the verdict cache (below): every kill is run again.
 
 `--no-unsafe-speedups` (`unsafe-speedups = false` in `[tool.invective]`) is for
 a suite outside that bar. It turns off every speedup that can give a wrong
 verdict there, so that each mutant is run against the whole selection, in its
 order, one at a time: workers, the remembered killer, and the tests that cover a
 line. A speedup that cannot (each mutant made from one parse of the module)
-stays on; `config.SPEEDUPS` says which side each one is on. A value in
-`[tool.invective]` that would turn an unsafe speedup back on gives way to it,
-and a flag that would (`--workers 4`) is refused. Set in `[tool.invective]`, the
+stays on; `config.SPEEDUPS` says which side each one is on. So does the verdict
+cache (below), which then reads only the verdicts a run with the switch kept. A
+value in `[tool.invective]` that would turn an unsafe speedup back on gives way to
+it, and a flag that would (`--workers 4`) is refused. Set in `[tool.invective]`, the
 switch is undone there only: no flag turns it off. The `speedups:` line says
 which unsafe speedups a run uses (`unsafe ones on: workers, history`), that it
 uses none (`no unsafe ones on`), or that they are off (`safe ones only`).
@@ -136,12 +138,14 @@ workers ran and `unsafe_speedups` whether the unsafe speedups were allowed
 
 The mutants are written in a copy of the project (one per worker) made as the
 run starts, so your files never hold one. The one thing a run writes in the
-project is `.invective/`, the killers it remembers, which the copy leaves out.
-A run stopped by ^C or SIGTERM removes its copies; one killed outright leaves
-them marked with their owner, which the next invective to start removes. The
-copy is of the files as they stand: uncommitted edits and new files are
-measured. It leaves out version control, caches and virtual environments;
-`exclude` in `[tool.invective]` leaves out anything else, such as large data.
+project is `.invective/`, the killers it remembers and, with the verdict cache
+on, the verdicts it measured, which the copy leaves out. A verdict read from the
+cache was measured in a fresh process by the run that kept it. A run stopped by
+^C or SIGTERM removes its copies; one killed outright leaves them marked with
+their owner, which the next invective to start removes. The copy is of the files
+as they stand: uncommitted edits and new files are measured. It leaves out
+version control, caches and virtual environments; `exclude` in
+`[tool.invective]` leaves out anything else, such as large data.
 
 To measure a commit instead, give `--ref` (`--mutate-ref` from pytest) a
 commit, branch or tag. That is the one use invective makes of git.
@@ -187,7 +191,7 @@ only the tests that ran its lines, found by one coverage run of the selection
 before the first mutant. It needs the `coverage` extra:
 
 ```console
-uv add --dev --extra coverage git+https://github.com/gsfernandes81/invective@v0.5.0
+uv add --dev --extra coverage git+https://github.com/gsfernandes81/invective@v0.6.0
 ```
 
 A mutant is run against its narrower selection at the mutants' whole budget
@@ -221,6 +225,71 @@ The coverage run is much slower on Python 3.11, which has no `sys.monitoring`:
 there it costs several times a plain run of the selection, nearer its limit of
 ten times the baseline; from 3.12 on it costs little more than a plain run (the
 Finding in `docs/isolation.md`).
+
+## Reading back what an earlier run measured
+
+With `cache = true` in `[tool.invective]`, each verdict is kept in
+`.invective/cache/` at the project's top as it lands, and a later run of the same
+campaign reads it there instead of running the mutant again. A run stopped any way
+at all (^C, SIGTERM, killed outright) keeps what it measured, so the same command
+run again measures only the rest. The baseline is always run.
+
+What is kept: a survivor, accepted or not, and a kill by a test that failed or by a
+module that would not import (pytest's codes 1 and 2), the test or module named
+(`store.sound`). A kill by time, by a signal or a crash, by pytest's internal or
+usage error, or with nothing named is never kept, and is measured every time.
+
+A campaign is a hash of what its verdicts can depend on that invective can see
+(`store.campaign_key`): invective's version and code; the target's text; `--tests`,
+the options, and the tests the baseline kept, in their order; `exclude`; every file
+under each top-level directory that holds a selected test (`tests/`, or `src/` for a
+doctest), or a selected file at the top; every `conftest.py`; every pytest settings
+file from where pytest's search starts up to the project's top (the repository's top
+with `--ref`), and the `-c` file; every file the baseline imported outside the
+interpreter's library and site directories; every `PYTHON*` and `PYTEST_*` variable
+and `CI`; the interpreter; and each installed distribution's name, version, `RECORD`
+and `direct_url.json`. A change to any of them starts a fresh campaign, which reads
+nothing kept before it. `pyproject.toml` is read as data: an edit outside
+`[tool.invective]`, or of its `exclude`, starts a fresh cache, and a comment or
+another `[tool.invective]` setting does not. Each target keeps its current campaign
+and the three newest others.
+
+The key does not hold these, and a verdict can be read back after a change to one:
+
+- a file a test or the code under test reads that nothing imports and no rule above
+  holds (package data under `src/` read through `importlib.resources`, a schema in
+  JSON, a file outside the test directories);
+- a module only a mutant's run imports, what a child interpreter imports, or a `.pth`
+  file;
+- a distribution with no `RECORD`, or a file of an installed distribution edited in
+  place;
+- `TZ`, the locale, the date and the clock, `HYPOTHESIS_*`, and every variable but
+  `PYTHON*`, `PYTEST_*` and `CI`;
+- the environment changing while the run goes on.
+
+A flaky test, or one that draws random examples (Hypothesis and its database), can
+decide a verdict by chance, and the cache makes that verdict stick. To measure
+everything again, delete `.invective/cache`.
+
+A verdict is read only by a run that could have decided it. One measured beside other
+workers' runs is read only by a run with more than one worker. With `--confirm` and
+more than one worker, no kill is read. A kill the remembered killer or the covering
+tests made alone is read only while that speedup is on and used. With
+`--no-unsafe-speedups`, only what a run with the switch kept is read: entries from a
+run without it are not read by a run with it, even one at one worker with `history`
+and `coverage` off. A survivor `--confirm` settled at more than one worker is read by
+later `--confirm` runs, which run no survivor again.
+
+A verdict read back carries `"via": "cache"` in the report, and `"origin"` names the
+remembered killer (`probe`) or the covering tests (`coverage`) when one of them made
+the kill; their closing lines count it too. A survivor's or accepted mutant's line
+ends in `[cache]`, and a closing line counts the verdicts read from
+`.invective/cache`. The header's `cache:` line says how many verdicts the campaign has
+on record (`cache:     6 on record`), that only those decided with the unsafe speedups
+off are read, or why the cache is not used, which never stops the run. A mutant whose
+verdict is read is not tried with its remembered killer, so that killer is not run
+alone on the original either, and the `history:` line counts such mutants:
+`history:   2 remembered, 0 usable, 2 read from the cache`.
 
 ## A whole source tree
 
