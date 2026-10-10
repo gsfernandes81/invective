@@ -36,6 +36,8 @@ def _main(tree, monkeypatch, *args, setting=""):
     (["--no-unsafe-speedups"], "workers = 4\nhistory = true\n"),
     ([], "workers = 4\nunsafe-speedups = false\n"),
     (["--no-unsafe-speedups", "--workers", "1"], ""),
+    # One worker as `--workers` reads it, whatever its spelling.
+    (["--no-unsafe-speedups", "--workers", "01"], ""),
     (["--workers", "1"], "unsafe-speedups = false\n")])
 def test_the_switch_overrides_the_settings_file(tree, monkeypatch, args,
                                                setting):
@@ -68,6 +70,9 @@ def test_without_the_switch_the_settings_and_flags_stand(tree, monkeypatch):
      "--workers 2 runs mutants at once")])
 def test_a_flag_that_sets_an_unsafe_speedup_on_with_them_off_is_refused(
         tree, monkeypatch, capsys, args, setting, says):
+    # "auto" asks for as many workers as the machine has, so it is refused
+    # on a machine of one CPU too.
+    monkeypatch.setattr(config, "_cpus", lambda: 1)
     code, given = _main(tree, monkeypatch, *args, setting=setting)
     assert (code, given) == (2, [])
     assert says in capsys.readouterr().err

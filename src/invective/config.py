@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from itertools import islice
 from typing import NamedTuple
 
@@ -76,6 +76,16 @@ class Speedup(NamedTuple):
     unsafe: bool
     #: The value *field* is given with the unsafe speedups off.
     off: object = None
+    #: How a value given for *field* reads, to be compared with *off*; None
+    #: for as it is given.
+    read: Callable[[object], object] | None = None
+
+
+def _count(value: object) -> object:
+    """A count of workers given on the command line, as `workers` reads it,
+    so `01` is one; "auto" stays itself, a count of as many as the machine
+    has, whatever that is here."""
+    return value if value == "auto" else workers(value)  # type: ignore[arg-type]
 
 
 #: Every speedup, each on its side, once. With the unsafe speedups off, each
@@ -85,12 +95,16 @@ SPEEDUPS = (
     # to its site: the text is the same as from a parse of its own.
     Speedup("makes each mutant from one parse of the module", None, False),
     # A run beside other copies' runs is judged by what they hold too.
-    Speedup("runs mutants at once", "workers", True, 1),
+    Speedup("runs mutants at once", "workers", True, 1, _count),
     # A test run apart from the rest can fail where the whole selection,
     # in its order, passes.
     Speedup("runs each mutant's last killer alone first", "history", True,
             False),
 )
+
+
+def _as_given(value: object) -> object:
+    return value
 
 
 def settle(settings: Config, flags: dict[str, tuple[str, object]] | None = None,
@@ -117,7 +131,7 @@ def settle(settings: Config, flags: dict[str, tuple[str, object]] | None = None,
         if not speedup.unsafe:
             continue
         flag, value = flags.get(speedup.field, ("", speedup.off))
-        if str(value) != str(speedup.off):
+        if (speedup.read or _as_given)(value) != speedup.off:
             raise Refusal("%s %s %s, and %s turns that off"
                           % (flag, value, speedup.what, off))
         settings = settings._replace(**{speedup.field: speedup.off})
