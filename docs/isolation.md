@@ -151,10 +151,12 @@ selection. In a suite whose tests depend on their order, it can be one the
 whole selection's order hides; it is marked either way. With `--confirm` and
 more than one worker, such a kill is confirmed as any other kill is.
 
-A map can be short, and never in the silent direction. A line a test ran but
-the map does not credit to it (a child of another interpreter, one started
-without the environment, or one ended by `os._exit`) gives fewer tests:
-a narrower selection that must still fail on the mutant to kill it, or none.
+A map can be short (a child of another interpreter, one started without the
+environment, or one ended by `os._exit`), or credit a line to the wrong test (a
+child or a thread that outlives the test that started it). Either costs time,
+never a verdict: a narrowed kill still needs one of the narrower selection's
+tests, green on the original, to fail on the mutant, and a mutant it lets
+through goes to the whole selection.
 
 When the map cannot be made or read, the `coverage:` line and the closing lines
 say why, and every mutant runs the whole selection: coverage not installed or

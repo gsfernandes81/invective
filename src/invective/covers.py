@@ -9,13 +9,14 @@ own: the selection's node ids in their order, and coverage's data
 for the run and for every child interpreter its tests started, each line
 under the number of the test that ran it, or under `""` outside any test.
 
-**A map can only be short, never wrong in the direction that matters.** A
-line some test ran but the map does not credit to it (a child coverage did
-not see, a test that ran the line and was not recorded) makes a narrower
-selection than the truth: one that still has to fail on the mutant, by one
-of its own tests, to be a kill, and that hands a mutant it lets through to
-the whole selection. A line credited to no test, or to the time outside
-any test, gives no narrower selection at all.
+**A wrong map costs time, never a verdict.** A map can be short (a child
+coverage did not see) or credit a line to the wrong test (a child or a
+thread that outlives the test that started it). Neither reaches a verdict:
+a narrower selection kills a mutant only when one of its own tests, green
+on the original, fails on it, which for tests independent of their order
+the whole selection would see too; and a mutant it lets through goes to the
+whole selection. A line credited to no test, or to the time outside any
+test, gives no narrower selection at all.
 """
 
 from __future__ import annotations
