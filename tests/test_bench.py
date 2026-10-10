@@ -9,6 +9,7 @@ which every checkout `checks` runs in has.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import difflib
 import importlib.util
 import json
@@ -267,6 +268,31 @@ def test_a_touchable_part_that_is_not_above_zero_is_none():
     assert compare.ratios(100.0, 300.0, 120.0, 100.0).touchable is None
 
 
+def test_the_touchable_floor_is_the_whole_runs_2f_in_the_touchable_part():
+    """R40 at N = 1: W 305 s, U 60 s; at f = 2% a whole-run move of 2f is
+    12.2 s, a fifth of U."""
+    assert compare.touchable_floor(0.02, 305.0, 60.0) == pytest.approx(
+        1 / (1 - 2 * 0.02 * 305 / 60))
+    # 2f of the whole run is all of the touchable part: no speedup shows.
+    assert compare.touchable_floor(0.1, 300.0, 60.0) is None
+    assert compare.touchable_floor(0.1, 300.0, 59.0) is None
+    assert compare.touchable_floor(0.02, None, 60.0) is None
+    assert compare.touchable_floor(0.02, 305.0, None) is None
+
+
+def test_a_touchable_speedup_is_judged_against_its_own_floor():
+    """The whole run moving by more than 2f is the test, seen through the
+    touchable part, in either direction."""
+    needs = compare.touchable_floor(0.02, 305.0, 60.0)
+    assert compare.touchable_beyond(needs * 1.01, 0.02, 305.0, 60.0) is True
+    assert compare.touchable_beyond(needs * 0.99, 0.02, 305.0, 60.0) is False
+    slow = 1 / (1 + 2 * 0.02 * 305 / 60)
+    assert compare.touchable_beyond(slow * 0.99, 0.02, 305.0, 60.0) is True
+    assert compare.touchable_beyond(slow * 1.01, 0.02, 305.0, 60.0) is False
+    assert compare.touchable_beyond(3.0, 0.1, 300.0, 60.0) is False
+    assert compare.touchable_beyond(None, 0.02, 305.0, 60.0) is None
+
+
 def test_a_speedup_beyond_the_floor_is_more_than_2f_from_one():
     """Inside `2f`, two runs of one side differ as much: it is no change."""
     floor = compare.Floor(0.012, 4, "measured")
@@ -519,11 +545,12 @@ def test_the_finding_wraps_at_90_and_holds_no_dash_aside():
     """It is pasted into docs/, where `tests/test_docs.py` holds every line
     to 90 characters and takes ` - ` for an aside."""
     text = compare.finding(_info(), [_row(), _row(workers=1, touchable=1.4,
-                                                  ceiling=1.25)])
+                                                  ceiling=1.25, touchable_part=60.0)])
     for line in text.splitlines():
         assert len(line) <= 90, line
-        if not line.startswith("> |"):
-            assert not re.search(r" --? |–|—", re.sub(r"`[^`]*`", "``", line)), line
+        # A table row in a quote is prose to `test_docs`, which strips only a
+        # line's leading `|`.
+        assert not re.search(r" --? |–|—", re.sub(r"`[^`]*`", "``", line)), line
 
 
 def test_the_finding_states_the_numbers_and_the_verdicts():
@@ -532,6 +559,25 @@ def test_the_finding_states_the_numbers_and_the_verdicts():
     joined = _joined(text)
     assert "R40 at N = 4 runs 3.05x faster after than before" in joined
     assert "same kills, survivors and acceptances" in joined
+
+
+def test_the_finding_gives_W_U_and_what_the_touchable_floor_needs():
+    row = _row(workers=1, before=305.0, touchable=1.4, ceiling=1.25,
+               touchable_part=60.0, floor=compare.Floor(0.02, 4, "measured"))
+    text = compare.finding(_info(), [row])
+    assert "> | R40 | 1 | 305.0 s | 60.0 s | 1.40x | 1.26x |" in text
+    assert ("The touchable part's floor needs 1.26x (`1 / (1 - 2f W / U)`, W 305.0 s, "
+            "U 60.0 s), so the touchable speedup is beyond it.") in _joined(text)
+    inside = _joined(compare.finding(_info(), [dataclasses.replace(
+        row, touchable=1.2)]))
+    assert "so the touchable speedup is inside it" in inside
+    none = _joined(compare.finding(_info(), [dataclasses.replace(
+        row, floor=compare.Floor(0.2, 4, "measured"))]))
+    assert "no speedup of the touchable part shows beyond the floor" in none
+    head, line = (re.split(r"\s{2,}", got) for got in compare.table([row]))
+    said = dict(zip(head, line))
+    assert (said["U"], said["touch. needs"], said["touch. beyond"]) == (
+        "60.0 s", "1.26x", "yes")
 
 
 def test_the_finding_says_a_slowdown_is_one():
@@ -864,6 +910,17 @@ def _processes(after_rows):
     def behave(side, prime, argv):
         return _report(), _calls(after_rows if side == "after" else 2), 0
     return behave
+
+
+def test_the_before_sides_touchable_seconds_are_the_pairs_U(tmp_path, monkeypatch):
+    """U is the before run's wall less its baseline and kills by time: one
+    second, less the 0.5 s baseline (the stand-in's mutants are not the
+    report's kill by time)."""
+    session, _engine, _case = _engine_session(tmp_path, monkeypatch, _same)
+    session.run()
+    pair, = _rows(tmp_path / "out" / "pairs.tsv")
+    assert float(pair["before_touchable"]) == pytest.approx(0.5)
+    assert session.rows()[0].touchable_part == pytest.approx(0.5)
 
 
 def test_the_pairs_process_counts_are_recorded(tmp_path, monkeypatch):

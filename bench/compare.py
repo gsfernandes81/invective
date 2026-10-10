@@ -427,6 +427,31 @@ def ratios(before: float, after: float, before_fixed: float | None,
     return Ratios(whole, touchable, ceiling)
 
 
+def touchable_floor(f: float, whole: float | None, part: float | None) -> float | None:
+    """The touchable speedup the noise floor *f* allows for: a whole run of
+    *whole* seconds, of which *part* are touchable, moves by `2f` of
+    `whole` when the touchable part speeds up `1 / (1 - 2f * whole / part)`.
+    None when that is not reached by any speedup (`2f * whole` is all of
+    the touchable part or more), or without the numbers."""
+    if whole is None or not part or part <= 0:
+        return None
+    x = 2 * f * whole / part
+    return None if x >= 1 else 1 / (1 - x)
+
+
+def touchable_beyond(touchable: float | None, f: float, whole: float | None,
+                     part: float | None) -> bool | None:
+    """Whether a *touchable* speedup is beyond its own floor: above
+    `touchable_floor`, or below `1 / (1 + 2f * whole / part)`, the slowdown
+    of the touchable part that moves the whole run by `2f`. None without the
+    numbers."""
+    if touchable is None or whole is None or not part or part <= 0:
+        return None
+    x = 2 * f * whole / part
+    needs = touchable_floor(f, whole, part)
+    return (needs is not None and touchable > needs) or touchable < 1 / (1 + x)
+
+
 # --------------------------------------------------------------------------
 # The pytest processes
 
@@ -568,6 +593,23 @@ class Row:
     #: With `--expect-rerun-processes`: "ok", or "missed" when a kept pair's
     #: after run started other than the count expected of it.
     rerun: str = "-"
+    #: The median touchable seconds of the before side's runs (U, of the
+    #: whole W, which is `before`).
+    touchable_part: float | None = None
+
+    @property
+    def touchable_needs(self) -> float | None:
+        """The touchable speedup the floor allows for (`touchable_floor`)."""
+        if self.floor is None:
+            return None
+        return touchable_floor(self.floor.f, self.before, self.touchable_part)
+
+    @property
+    def touchable_beyond(self) -> bool | None:
+        if self.floor is None:
+            return None
+        return touchable_beyond(self.touchable, self.floor.f, self.before,
+                                self.touchable_part)
 
     @property
     def processes(self) -> str:
@@ -608,7 +650,8 @@ def table(rows: Sequence[Row]) -> list[str]:
     """The summary's table: speedups are before over after, so above 1 is
     faster; each a median over the kept pairs, of the ratio within each."""
     head = ["case", "N", "pairs", "before", "after", "speedup", "range",
-            "touchable", "ceiling", "f (nbrs)", "beyond 2f", "processes", "verdicts"]
+            "touchable", "ceiling", "f (nbrs)", "beyond 2f", "U", "touch. needs",
+            "touch. beyond", "processes", "verdicts"]
     body = []
     for r in rows:
         pairs = "%d/%d" % (r.kept, r.asked)
@@ -621,9 +664,15 @@ def table(rows: Sequence[Row]) -> list[str]:
         beyond = {None: "-", True: "yes", False: "no"}[r.beyond_floor]
         if not r.conclusive:
             beyond = "inconclusive"
+        needs = ("-" if r.touchable_part is None
+                 else "inside f" if r.touchable_needs is None else _x(r.touchable_needs))
+        touch = {None: "-", True: "yes", False: "no"}[r.touchable_beyond]
+        if not r.conclusive and r.touchable is not None:
+            touch = "inconclusive"
         body.append([r.case, str(r.workers), pairs, _s(r.before), _s(r.after),
                      _x(r.whole), rng, _x(r.touchable), _x(r.ceiling), floor,
-                     beyond, r.processes, r.verdicts])
+                     beyond, _s(r.touchable_part), needs, touch, r.processes,
+                     r.verdicts])
     widths = [max(len(line[i]) for line in [head] + body) for i in range(len(head))]
     return ["  ".join(cell.ljust(w) for cell, w in zip(line, widths)).rstrip()
             for line in [head] + body]
@@ -685,6 +734,19 @@ def finding(info: dict, rows: Sequence[Row]) -> str:
         lines.append("> | %s | %d | %d of %d | %s | %s | %s | %s | %s | %s |" % (
             r.case, r.workers, r.kept, r.asked, _s(r.before), _s(r.after),
             _x(r.whole), _x(r.touchable), floor, processes))
+    touched = [r for r in rows if r.touchable is not None]
+    if touched:
+        # W and U, and what the floor needs of the touchable speedup, so
+        # that nobody works the threshold out by hand.
+        lines.append(">")
+        lines.append("> | case | N | W (before) | U (touchable) | touchable | "
+                     "`1 / (1 - 2f W / U)` |")
+        lines.append("> |---|---|---|---|---|---|")
+        for r in touched:
+            needs = r.touchable_needs
+            lines.append("> | %s | %d | %s | %s | %s | %s |" % (
+                r.case, r.workers, _s(r.before), _s(r.touchable_part),
+                _x(r.touchable), "inside f" if needs is None else _x(needs)))
     lines.append(">")
     said = []
     for r in rows:
@@ -705,6 +767,16 @@ def finding(info: dict, rows: Sequence[Row]) -> str:
             sentence += ", %.2fx on the touchable part, ceiling %s" % (
                 r.touchable, _x(r.ceiling))
         sentence += "."
+        if r.touchable is not None:
+            needs = r.touchable_needs
+            if needs is None:
+                sentence += (" With 2f W / U at 1 or more, no speedup of the "
+                             "touchable part shows beyond the floor.")
+            else:
+                sentence += (" The touchable part's floor needs %.2fx (`1 / (1 - 2f W "
+                             "/ U)`, W %.1f s, U %.1f s), so the touchable speedup is "
+                             "%s it." % (needs, r.before, r.touchable_part,
+                                         "beyond" if r.touchable_beyond else "inside"))
         if r.beyond_floor is False:
             sentence += " That is inside 2f, so it is no change."
         if not r.conclusive:
@@ -1112,7 +1184,7 @@ RUN_COLUMNS = ["seq", "case", "project", "workers", "pair", "position", "side",
                "prime_timeouts", "prime_runs", "expected_runs", "unreproduced"]
 PAIR_COLUMNS = ["case", "workers", "pair", "order", "before_seq", "after_seq",
                 "calibrations", "spread", "threshold", "status", "speedup",
-                "touchable", "ceiling", "before_fixed", "after_fixed",
+                "touchable", "ceiling", "before_fixed", "after_fixed", "before_touchable",
                 "before_processes", "after_processes", "same_processes",
                 "expected_processes"]
 CAL_COLUMNS = ["seq", "case", "project", "command", "runs", "median", "log"]
@@ -1652,7 +1724,9 @@ class Session:
                            fixed.get("after"))
                 row.update(speedup=r.whole, touchable=r.touchable, ceiling=r.ceiling,
                            before_fixed=fixed.get("before"),
-                           after_fixed=fixed.get("after"))
+                           after_fixed=fixed.get("after"),
+                           before_touchable=(b.timed.wall - fixed["before"]
+                                             if "before" in fixed else None))
                 print("  pair %d: %.3fx before over after%s" % (
                     k + 1, r.whole, "" if r.touchable is None
                     else ", %.3fx touchable" % r.touchable), flush=True)
@@ -1774,7 +1848,8 @@ class Session:
                     self.differ.get(case.name, "-"),
                     median(p.get("before_processes") for p in kept),
                     median(p.get("after_processes") for p in kept),
-                    any(p.get("same_processes") is False for p in kept), rerun))
+                    any(p.get("same_processes") is False for p in kept), rerun,
+                    median(p.get("before_touchable") for p in kept)))
         return rows
 
     def info(self) -> dict:
