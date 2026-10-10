@@ -191,7 +191,7 @@ class _Verdict:
     and with *inventory* the tests the run kept.
     """
 
-    def __init__(self, config, path, target=None, inventory=False):
+    def __init__(self, config, path, target, inventory):
         self.config, self.path, self.killer = config, path, ""
         self.target, self.inventory = target, inventory
         self.selected = None

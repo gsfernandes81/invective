@@ -95,13 +95,15 @@ def write_json(path: str, data: object,
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
             # invective: accept[equivalent: 1 -> 2] how wide the JSON is indented
             json.dump(data, fh, indent=1)
-        for left in range(RETRIES, -1, -1):
+        left = RETRIES
+        while True:
             try:
                 os.replace(temp, path)
                 break
             except PermissionError:
                 if not left:
                     raise
+                left -= 1
                 time.sleep(RETRY_WAIT)
     except OSError as exc:
         say("warning:   %s could not be written, and is left as it was: %s"

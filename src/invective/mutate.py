@@ -2026,9 +2026,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-unsafe-speedups", action="store_true",
                     help="use no speedup that can give a wrong verdict on a "
                          "suite whose tests depend on their order or are not "
-                         "safe to run in parallel: one worker, and no "
-                         "remembered killer run alone. [tool.invective] "
-                         "unsafe-speedups = false turns it on")
+                         "safe to run in parallel, so that each mutant is run "
+                         "against the whole selection, one at a time. "
+                         "[tool.invective] unsafe-speedups = false turns it "
+                         "on")
     return ap
 
 

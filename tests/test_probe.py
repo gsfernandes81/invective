@@ -25,9 +25,9 @@ from invective import mutate, store
 
 from conftest import FILES, SRC
 from test_workers import (ADULT, GATE, GATE_FILE, GATE_TESTS, GREEN, MINOR,
-                          Campaign, Run, killed_by, landed)
-
-__all__ = ["landed"]
+                          Campaign, Run, killed_by)
+# A fixture: every outcome the engine says stands.
+from test_workers import landed  # noqa: F401
 
 SOURCE = FILES["pkg/gate.py"]
 
@@ -380,6 +380,20 @@ def test_only_the_first_baseline_asks_for_the_inventory(tree, monkeypatch):
     run = Probing(tree, monkeypatch, world({RAISE: [MINOR]}))
     run(2)
     assert run.asked[0] and not any(run.asked[1:])
+
+
+def test_a_run_lists_the_tests_it_kept_only_when_asked(tmp_path):
+    """The inventory is the plugin's to write, and a run asks for it only
+    when told to: no other run's verdict carries it."""
+    (tmp_path / "test_two.py").write_text(
+        "def test_a():\n    pass\n\ndef test_b():\n    pass\n",
+        encoding="utf-8")
+    plain = mutate.run_tests(str(tmp_path), ["test_two.py"], 60)
+    asked = mutate.run_tests(str(tmp_path), ["test_two.py"], 60,
+                             inventory=True)
+    assert (plain.ok, plain.selected) == (True, ())
+    assert (asked.ok, asked.selected) == (
+        True, ("test_two.py::test_a", "test_two.py::test_b"))
 
 
 def test_a_refused_run_creates_no_store(tree, monkeypatch):
