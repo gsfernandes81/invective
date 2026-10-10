@@ -570,9 +570,55 @@ def test_the_verdict_lists_the_tests_kept_when_asked(tmp_path):
              "INVECTIVE_VERDICT": str(verdict), "INVECTIVE_INVENTORY": "1"})
 
     assert done.returncode == 0, done.stdout + done.stderr
-    assert json.loads(verdict.read_text(encoding="utf-8")) == {
+    said = json.loads(verdict.read_text(encoding="utf-8"))
+    assert "test_two.py" in said.pop("imported")
+    assert said == {
         "killer": "", "missing": [], "elsewhere": "",
         "selected": ["test_two.py::test_first", "test_two.py::test_third"]}
+
+
+def test_the_inventory_lists_files_imported_outside_the_library(tmp_path):
+    """What the verdict cache's key holds of what a run imported: the
+    project's own modules, from the copy's top, and a `sitecustomize`
+    wherever it is; not the interpreter's library, not what an installed
+    distribution holds (its RECORD is in the key), and not the target, which
+    the key holds apart. Nothing unless asked."""
+    write_tree(str(tmp_path / "copy"), {
+        "pkg/__init__.py": "",
+        "pkg/helper.py": "X = 1\n",
+        "pkg/target.py": "Y = 2\n",
+        "test_x.py": ("import json\n"
+                      "import iniconfig\n"
+                      "from pkg import helper, target\n"
+                      "\n"
+                      "def test_x():\n"
+                      "    assert helper.X + target.Y == 3\n")})
+    custom = tmp_path / "custom"
+    write_tree(str(custom), {"sitecustomize.py": "import json\n"})
+    verdict = tmp_path / "verdict.json"
+
+    def run(**asked):
+        done = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n",
+             "0", "-p", "pytest_invective", "test_x.py"],
+            cwd=tmp_path / "copy", capture_output=True, text=True,
+            timeout=120, env={
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join([SRC, str(custom)]),
+                "INVECTIVE_VERDICT": str(verdict),
+                "INVECTIVE_TARGET": "pkg/target.py", **asked})
+        assert done.returncode == 0, done.stdout + done.stderr
+        return json.loads(verdict.read_text(encoding="utf-8"))
+
+    imported = run(INVECTIVE_INVENTORY="1")["imported"]
+    assert imported == sorted(imported)
+    mine = [path for path in imported if not os.path.isabs(path)]
+    assert mine == ["pkg/__init__.py", "pkg/helper.py", "test_x.py"]
+    assert os.path.realpath(custom / "sitecustomize.py") in imported
+    import iniconfig
+    for module in (json, iniconfig, pytest):
+        assert os.path.realpath(module.__file__) not in imported
+    assert "imported" not in run()
 
 
 def test_the_plugin_remembers_each_killer_and_runs_it_alone_next_time(

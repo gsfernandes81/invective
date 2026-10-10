@@ -14,9 +14,10 @@ test not found, are written there as the session ends. That is how the
 engine learns which test killed a mutant. When `INVECTIVE_TARGET` names the
 mutated module, the verdict also says whether the tests loaded that module
 from somewhere other than the copy they ran in. When `INVECTIVE_INVENTORY`
-is set, it also lists the tests the run kept. When `INVECTIVE_COVERAGE`
-names a directory, the run is the coverage run, and records there which test
-ran each line of the mutated module (`_Coverage`).
+is set, it also lists the tests the run kept and the files it imported
+outside the interpreter's library and site directories. When
+`INVECTIVE_COVERAGE` names a directory, the run is the coverage run, and
+records there which test ran each line of the mutated module (`_Coverage`).
 
 **Nothing from `invective` is imported unless `--mutate` is given.** pytest
 before 8.4 loads plugins before a repository's own `pythonpath` setting takes
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import site
 import sys
 import sysconfig
 
@@ -47,7 +49,7 @@ TARGET = "INVECTIVE_TARGET"
 #: not tests to collect.
 TYPED = "INVECTIVE_TYPED"
 #: The environment variable that, set, asks the verdict to list the node ids
-#: the run kept, in their order.
+#: the run kept, in their order, and the files it imported (`_imported`).
 INVENTORY = "INVECTIVE_INVENTORY"
 #: The environment variable that names the directory a coverage run records
 #: its map in: which test ran each line of the target (`_Coverage`).
@@ -211,7 +213,8 @@ def _only(config):
 class _Verdict:
     """The first test to fail in this run, written where the engine asked,
     with the file the tests loaded the target from when it is not the copy's,
-    and with *inventory* the tests the run kept.
+    and with *inventory* the tests the run kept and the files it imported
+    (`_imported`).
     """
 
     def __init__(self, config, path, target, inventory):
@@ -256,8 +259,58 @@ class _Verdict:
                 "elsewhere": elsewhere}
         if self.selected is not None:
             said["selected"] = self.selected
+        if self.inventory:
+            said["imported"] = _imported(str(self.config.invocation_params.dir),
+                                         self.target or "")
         with open(self.path, "w", encoding="utf-8") as fh:
             json.dump(said, fh)
+
+
+#: The modules `_imported` lists wherever their file is: the interpreter
+#: imports each from a site directory as it starts, and what it does there
+#: can change any run.
+_CUSTOMIZE = frozenset({"sitecustomize", "usercustomize"})
+
+
+def _site_directories():
+    """The directories distributions are installed in, each resolved and
+    ending in a separator: what is in them is named by their RECORD."""
+    found = list(getattr(site, "getsitepackages", list)())
+    found.append(site.getusersitepackages())
+    paths = sysconfig.get_paths()
+    found += [paths["purelib"], paths["platlib"]]
+    return tuple(sorted({os.path.join(os.path.normcase(os.path.realpath(path)),
+                                      "") for path in found if path}))
+
+
+def _imported(copy, target):
+    """The file of every module this process has loaded, resolved, but the
+    interpreter's library's (`_LIBRARY`), those in a site directory, and the
+    target's (*target*, from the top of *copy* with `/`), which the engine
+    keys apart; `sitecustomize` and `usercustomize` wherever they are. A
+    file in *copy* is given from its top with `/` separators, any other
+    whole, in sorted order. An extension module is a file like any other."""
+    copy = os.path.realpath(copy)
+    inside = os.path.join(os.path.normcase(copy), "")
+    mine = os.path.normcase(os.path.realpath(os.path.join(copy,
+                                                          *target.split("/"))))
+    left = _LIBRARY + _site_directories()
+    found = set()
+    for name, module in list(sys.modules.items()):
+        try:
+            file = getattr(module, "__file__", None)
+        except Exception:
+            # A lazily loaded module can fail on any attribute.
+            continue
+        if not isinstance(file, str):
+            continue
+        path = os.path.realpath(os.path.join(copy, file))
+        key = os.path.normcase(path)
+        if name not in _CUSTOMIZE and (key == mine or key.startswith(left)):
+            continue
+        found.add(os.path.relpath(path, copy).replace(os.sep, "/")
+                  if key.startswith(inside) else path)
+    return sorted(found)
 
 
 #: Whether this Python has `sys.monitoring` (3.12 and later).
@@ -580,7 +633,7 @@ def pytest_runtestloop(session):
                 selection=selection, options=options, workers=rules.workers,
                 confirm=config.getoption("mutate_confirm") or rules.confirm,
                 history=rules.history, coverage=rules.coverage,
-                unsafe_speedups=rules.unsafe_speedups)
+                cache=rules.cache, unsafe_speedups=rules.unsafe_speedups)
             reports.append(report)
             failures.extend("%s: %s" % (report["target"], failure)
                             for failure in mutate.gate(report, rules))
