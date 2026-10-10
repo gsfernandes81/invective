@@ -70,6 +70,8 @@ on invective's own tree. A cold run starts with no `.invective`; a warm one foll
 an untimed run that left it. The touchable part is the wall time less the runs the
 history cannot change: the baseline and the kills by time, and for a warm run the
 survivors too. `f` is the noise floor, and a speedup within `2f` of 1 is no change.
+Each was measured with `bench/compare.py`, `--unit cold` and `--unit warm`, as
+`docs/benchmarking.md` describes.
 
 > **Finding:** (2026-10-10, a 4-vCPU Firecracker VM, Intel Xeon at 2.80 GHz, Linux
 > 6.18, Python 3.14.6; before `main` at `dcd47a5`, the engine this branch was made
