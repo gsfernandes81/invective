@@ -11,7 +11,7 @@ The engine, the plugin, and how one mutant is run; settled.
 | `invective.sweep` | Every module in a source tree, each against its tests |
 | `invective.tree` | The copy (or git worktree) a campaign's mutants are written in |
 | `invective.process` | The processes invective starts: their groups, how they are stopped, and SIGTERM |
-| `invective.store` | What a run keeps in the project between runs: `.invective/` and its killer history |
+| `invective.store` | What a run keeps in the project between runs: `.invective/`, its killer history and its verdict cache |
 | `invective.covers` | Which tests run which lines of the target: the coverage run's map |
 | `invective.accept` | Survivors accepted in the source, beside the code they are about |
 | `invective.config` | The `[tool.invective]` table, the project's top, and the pytest settings check |
@@ -39,17 +39,20 @@ bullet says otherwise:
 - `INVECTIVE_VERDICT`: a file the plugin writes at the session's end with
   the first failing test's node id, the selected tests that were not found,
   whether the target was loaded from outside the copy, and when
-  `INVECTIVE_INVENTORY` asks for it, the node ids the run kept (`selected`).
-  A conftest that will not import stops pytest before any session; the plugin
-  then writes the verdict as it stops, naming that conftest (`conftest`).
+  `INVECTIVE_INVENTORY` asks for it, the node ids the run kept (`selected`)
+  and the files it imported outside the interpreter's library and site
+  directories (`imported`). A conftest that will not import stops pytest
+  before any session; the plugin then writes the verdict as it stops, naming
+  that conftest (`conftest`).
 - `INVECTIVE_TARGET`: the mutated module's path from the copy's top, `/`
   separators. The plugin checks the tests loaded it from inside the copy.
 - `INVECTIVE_TYPED`: how many trailing arguments are paths for pytest's
   settings search, not tests to collect.
 - `INVECTIVE_INVENTORY`: set, the verdict lists the tests the run kept, in
-  their order, after every deselection. The first baseline asks for it when
-  the history is on, so that a remembered killer is tried only when the
-  selection holds it.
+  their order, after every deselection, and the files the run imported. The
+  first baseline asks for it when the history or the verdict cache is on: a
+  remembered killer is tried only when the selection holds it, and the
+  cache's key holds both.
 - `INVECTIVE_COVERAGE`: a directory the plugin records the coverage run in:
   which test ran each line of the target, and the selected tests in order.
 - `INVECTIVE_COVERAGE_TEST`: set by the plugin, not the engine, during the
@@ -84,11 +87,16 @@ it started. The killer comes from the plugin, which writes it to the file
 
 `mutate._measure` tries each attempt in its order: the first to come to an
 outcome decides, and when none does, the whole selection decides. An attempt
-can kill a mutant, never let one survive (`mutate._SURVIVOR_VIA`). The one
-attempt is the remembered killer run alone (`mutate.probe_attempt`),
-there when the history is on and has a killer for the mutant that passed alone
-on the original. Every run of a mutant, an attempt's and the whole selection's,
-is made through `mutate.Copy.run`, which writes the mutant once.
+that runs fewer tests can kill a mutant, never let one survive
+(`mutate._SURVIVOR_VIA`). The attempts, in their order: the verdict an earlier
+run kept (`mutate.cache_attempt`), there when the cache is on, which starts no
+run and is the one attempt that can give a survivor, since only the whole
+selection's is ever kept; the remembered killer run alone
+(`mutate.probe_attempt`), there when the history is on and has a killer for the
+mutant that passed alone on the original; and the tests that ran the mutant's
+lines (`mutate.coverage_attempt`), there when coverage is on and used. Every run
+of a mutant, an attempt's and the whole selection's, is made through
+`mutate.Copy.run`, which writes the mutant once.
 
 ## Workers
 

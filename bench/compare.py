@@ -481,21 +481,38 @@ def process_count(calls: Sequence[dict] | None) -> int | None:
     return None if calls is None else len(calls)
 
 
-def rerun_expected(calls: Sequence[dict] | None, reports: Sequence[dict]) -> int | None:
-    """How many pytest processes a re-run that remembers every verdict it
-    can starts, from the run before it (*calls*, *reports*): its baselines
-    again (`is_baseline`), and one run for each mutant it killed by load (by
-    time, or a run a signal or a crash ended), since no such kill is ever
-    remembered. None without the instrument.
+#: What the cache keeps of a kill (`store.sound`): a test named, and pytest's
+#: code for a test that failed, or for a module that would not import.
+_KEPT_CODES = (1, 2)
 
-    A run another feature adds is counted by adding its own term here: a
-    coverage run, which `is_baseline` leaves out, is not in it."""
+
+def _not_kept(kill: dict) -> bool:
+    """Whether the verdict cache does not keep *kill*, a report's entry."""
+    return not kill.get("killer") or kill.get("code") not in _KEPT_CODES
+
+
+def rerun_expected(calls: Sequence[dict] | None, reports: Sequence[dict]) -> int | None:
+    """How many pytest processes a re-run that reads every verdict the cache
+    keeps starts, from the run before it (*calls*, *reports*): its baselines
+    again (`is_baseline`); its coverage run, when it made one, since a re-run
+    makes it again; and every run it made for a mutant whose kill the cache
+    does not keep (a kill by time, by a signal or a crash, with no killer, or
+    with pytest's codes 3 to 5), its narrowed run as well as its full one.
+    None without the instrument.
+
+    The run before is the untimed run of a warm slot, which starts from an
+    empty `.invective`: it gated and probed nothing, so every run it made for
+    a mutant is the mutant's own."""
     if calls is None:
         return None
-    baselines = sum(1 for row in calls if is_baseline(row))
-    by_load = sum(1 for report in reports for k in report["kills"]
-                  if _by_load(("killed", k.get("code"), k.get("killer", ""))))
-    return baselines + by_load
+    not_kept = {mutant_key(report["target"], k)
+                for report in reports for k in report["kills"] if _not_kept(k)}
+    return (sum(1 for row in calls if is_baseline(row))
+            + sum(1 for row in calls if row.get("coverage"))
+            + sum(1 for row in calls
+                  if row.get("n") is not None
+                  and (row.get("target"), row["kind"], row["line"], row["change"],
+                       row.get("mark")) in not_kept))
 
 
 def unreproduced_of(reports: Sequence[dict]) -> list | None:

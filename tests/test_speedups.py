@@ -87,7 +87,8 @@ def test_every_setting_is_a_speedup_on_its_side_or_none(tmp_path):
                                 "exclude", "confirm", "unsafe_speedups"}
     assert speedups <= named
     assert {s.field: s.unsafe for s in config.SPEEDUPS} == {
-        None: False, "workers": True, "history": True, "coverage": True}
+        None: False, "workers": True, "history": True, "coverage": True,
+        "cache": False}
 
 
 def test_settle_turns_off_each_unsafe_speedup_and_keeps_the_rest():
@@ -117,9 +118,34 @@ def test_a_direct_call_holds_every_speedup_to_the_switch(tree, monkeypatch):
     monkeypatch.setattr(mutate, "settle", lambda settings, *rest: (
         given.append(settings), real(settings, *rest))[1])
     on = {s.field: (not s.off) if isinstance(s.off, bool) else s.off + 1
-          for s in speedups if s.field is not None}
+          for s in speedups if s.unsafe}
     report = run(**on, unsafe_speedups=False)
     (settings,) = given
     assert {field: getattr(settings, field) for field in on} == on
     assert report["workers"] == 1 and len(run.places) == 1
     assert not os.path.exists(os.path.join(tree, ".invective"))
+
+
+@pytest.mark.parametrize("args, setting", [
+    (["--no-unsafe-speedups"], "cache = true\n"),
+    ([], "cache = true\nunsafe-speedups = false\n")])
+def test_cache_with_the_switch_is_neither_refused_nor_overridden(
+        tree, monkeypatch, args, setting):
+    """The cache is safe only restricted, and the engine restricts it: the
+    switch leaves it on, whichever way the switch is given."""
+    code, given = _main(tree, monkeypatch, *args, setting=setting)
+    assert code == 0
+    (kwargs,) = given
+    assert (kwargs["cache"], kwargs["unsafe_speedups"]) == (True, False)
+    rules = config.Config(cache=True, unsafe_speedups=False)
+    assert config.settle(rules) == rules._replace(history=False)
+
+
+def test_the_speedups_line_does_not_name_the_cache():
+    """It names the unsafe speedups a run uses; the cache's restriction is
+    said on its own line."""
+    said = mutate._speedups_said
+    assert said(config.Config(cache=True, history=False)) == "no unsafe ones on"
+    assert said(config.Config(cache=True)) == "unsafe ones on: history"
+    assert said(config.Config(cache=True, history=False,
+                              unsafe_speedups=False)) == "safe ones only"

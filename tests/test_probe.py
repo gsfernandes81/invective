@@ -373,9 +373,11 @@ def test_history_false_writes_nothing_and_asks_for_no_inventory(
     assert not any(run.asked)
 
 
-def test_with_history_off_no_run_asks_for_the_inventory(tree, monkeypatch):
+def test_with_history_and_cache_off_no_run_asks_for_the_inventory(
+        tree, monkeypatch):
     """A stand-in that takes no `inventory` keyword, as the engine's other
-    tests have: with the history off, no run passes it."""
+    tests have: with the history and the verdict cache off, no run passes
+    it."""
     run = Campaign(tree, monkeypatch, SOURCE, world({RAISE: [MINOR]}))
     report = run(2)
     assert report["killed"] == 1

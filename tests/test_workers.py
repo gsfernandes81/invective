@@ -1035,46 +1035,6 @@ def test_without_confirming_a_stop_lands_every_kill_that_ended(
         (1, True), (2, False), (3, False)]
 
 
-def test_a_kill_read_back_is_never_confirmed(tree, monkeypatch, landed):
-    """A kill an attempt says was read back was confirmed when it was kept:
-    it lands as it ends, and no run confirms it. The others are."""
-    real = mutate._measure
-
-    def measure(mutant, copy, attempts, budget):
-        got = real(mutant, copy, attempts, budget)
-        return got._replace(via="cache") if mutant.job.n == 1 else got
-
-    monkeypatch.setattr(mutate, "_measure", measure)
-    run = Campaign(tree, monkeypatch, said=lambda r: killed_by(MINOR)
-                   if r.text else GREEN)
-    report = run(2, confirm=True)
-    first, *others = report["kills"]
-    assert first["via"] == "cache" and "confirmed" not in first
-    assert {kill["confirmed"] for kill in others} == {"alone"}
-    # The kill read back was run once, in the pool; each other kill once
-    # more, its killer alone.
-    texts = collections.Counter(r.text for r in run.runs if r.text)
-    assert sorted(texts.values()) == [1] + [2] * 5
-    assert [n for n, _o in landed][0] == 1
-
-
-def test_with_only_kills_read_back_nothing_is_confirmed(tree, monkeypatch):
-    real = mutate._measure
-    monkeypatch.setattr(mutate, "_measure", lambda *a: real(*a)._replace(
-        via="cache"))
-    written = []
-    real_write = mutate._write
-    monkeypatch.setattr(mutate, "_write", lambda path, text, when: (
-        written.append(text), real_write(path, text, when)))
-    run = Campaign(tree, monkeypatch, said=lambda r: killed_by(MINOR)
-                   if r.text else GREEN)
-    report = run(2, confirm=True)
-    assert report["killed"] == report["mutants"] == 6
-    # Three baselines and the six mutants: no copy restored, no run after.
-    assert len(run.runs) == 3 + 6
-    assert run.source not in written
-
-
 def test_a_run_cut_short_is_never_a_verdict(tmp_path):
     """Once the campaign is stopping, a run is stopped with everything it
     started, and says `Stopped` rather than a verdict of a run that never
@@ -1135,18 +1095,10 @@ def test_a_stop_at_one_worker_lands_what_ended_and_not_what_was_cut_short(
     assert not any(os.path.exists(where) for where in campaign.places)
 
 
-def test_a_stop_at_three_workers_lands_survivors_and_kills_read_back_only(
+def test_a_stop_at_three_workers_confirming_lands_survivors_only(
         tree, monkeypatch, landed):
     """Three runs end as the workers are being stopped, after a ^C: the
-    survivor stands, and so does the kill read back, but the kill not yet
-    confirmed does not."""
-    real = mutate._measure
-
-    def measure(mutant, copy, attempts, budget):
-        got = real(mutant, copy, attempts, budget)
-        return got._replace(via="cache") if mutant.job.n == 2 else got
-
-    monkeypatch.setattr(mutate, "_measure", measure)
+    survivor stands, but the kills not yet confirmed do not."""
     interrupted = threading.Event()
 
     def said(run):
@@ -1163,7 +1115,7 @@ def test_a_stop_at_three_workers_lands_survivors_and_kills_read_back_only(
         campaign(3, confirm=True)
     # The first three mutants went to the three copies in turn.
     assert sorted((n, o.verdict.ok, o.via) for n, o in landed) == [
-        (1, True, ""), (2, False, "cache")]
+        (1, True, "")]
     assert [ln for ln in campaign.lines if ln.startswith("stopping")] == [
         "stopping 3 run(s)"]
     assert not any(os.path.exists(where) for where in campaign.places)

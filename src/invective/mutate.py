@@ -17,7 +17,8 @@ and leaves one behind if it is killed. The copy is of the files as they stand
 when the run starts, uncommitted edits included, and is removed at the end,
 including after a refusal. `--ref` runs on a commit instead. The one thing a
 run writes in the project is `.invective/`, the killer each mutant was last
-killed by (`invective.store`), which the copy leaves out.
+killed by and, with the cache on, each verdict (`invective.store`), which the
+copy leaves out.
 
 **A red baseline is a refusal, not a starting point.** If the selection does not
 pass on the unmutated tree, every mutant is "killed" for a reason that has
@@ -65,7 +66,7 @@ from invective import covers, process, store
 from invective.accept import read as read_accepts
 from invective.config import (SPEEDUPS, Config, check_pytest_settings,
                               load as load_config, project_root,
-                              relative_to_root, settle,
+                              relative_to_root, settle, tree_top,
                               workers as workers_of)
 from invective.errors import Refusal
 from invective.tree import git_ref, head as commit_of, working_tree
@@ -126,6 +127,11 @@ class Verdict(NamedTuple):
     #: The conftest pytest stopped at because it would not import, from the
     #: top of the copy with `/` separators; `""` when it stopped at none.
     conftest: str = ""
+    #: The files the run imported outside the interpreter's library and site
+    #: directories, when it was asked for them (`run_tests`'s *inventory*),
+    #: each from the top of the copy with `/` or whole; None when the run
+    #: did not say, which no list, an empty one included, stands for.
+    imported: tuple[str, ...] | None = None
 
 
 #: pytest can colour its output even when stdout is a pipe, and the tail is
@@ -656,15 +662,19 @@ def run_tests(where: str, tests: list[str], timeout: float,
             elsewhere = said.get("elsewhere", "")
             selected = tuple(said.get("selected", ()))
             conftest = said.get("conftest", "")
+            imported = said.get("imported")
+            if imported is not None:
+                imported = tuple(imported)
         except (OSError, ValueError, KeyError):
             # A run that ended before its session did -- pytest could not
             # start, or a mutant broke the plugin itself -- names no test.
             killer, missing, elsewhere, selected, conftest = "", (), "", (), ""
+            imported = None
     # Both streams: pytest says why it could not start on stderr.
     out = _ANSI.sub("", stdout + stderr)
     # invective: accept[equivalent: 400 -> 401] any length that holds pytest's last words serves
     return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer,
-                   missing, elsewhere, selected, conftest)
+                   missing, elsewhere, selected, conftest, imported)
 
 
 def _no_cov(options: tuple[str, ...]) -> list[str]:
@@ -1551,15 +1561,53 @@ def _coverage_line(narrowing: Narrowing, mutants: int) -> str:
             % (len(narrowing.plan), mutants, narrowing.selections))
 
 
+# --------------------------------------------------------------------------
+# **The verdict cache.** Each verdict that lands is kept (`store.Cache`), and
+# a later run of the same campaign reads it instead of running the mutant,
+# when it is one that run could have decided: so a run stopped any way at
+# all resumes where it stopped, and a run of an unchanged campaign runs only
+# what no verdict was kept for.
+
+
+def cache_attempt(kept: store.Cache) -> Attempt:
+    """The attempt that reads a mutant's verdict from *kept*: the verdict an
+    earlier run of the campaign landed, marked `"cache"`, with the attempt
+    that decided it as its origin; or nothing, when none is kept that this
+    run may read (`store.Cache.hit`). The one attempt that can give a
+    survivor (`_SURVIVOR_VIA`): only the whole selection's is ever kept.
+
+    It starts no run, so it writes no mutant and is never `Stopped`, and it
+    says nothing, as no worker does."""
+    def attempt(mutant: Mutant, copy: Copy) -> Outcome | None:
+        entry = kept.get(mutant.text)
+        if entry is None:
+            return None
+        return Outcome(Verdict(entry.ok, entry.code, "", entry.killer),
+                       via="cache", origin=entry.origin)
+    return attempt
+
+
+def _cache_line(kept: store.Cache | None, unused: str) -> str:
+    """The `cache:` line: how many verdicts the campaign has kept, and with
+    the unsafe speedups off which of them are read; or why the cache is not
+    used (*unused*)."""
+    if kept is None:
+        return "cache:     not used: %s" % unused
+    line = "cache:     %d on record" % kept.on_record()
+    if kept.safe_only:
+        line += ("; only those decided with the unsafe speedups off are "
+                 "read")
+    return line
+
+
 def _landed(mutant: Mutant, outcome: Outcome) -> None:
     """*outcome* stands for *mutant*: called on the main thread, once for
     each mutant whose outcome is final, and never for one that is not. Every
     outcome is final as it ends, at any count of workers, but for a kill
     made with `--confirm` and more than one worker: that lands once it is
-    confirmed, after the last mutant has run, and a kill read back lands
-    as it ends, having been confirmed when it was kept. A campaign that is
-    stopping lands only those already final. The place for whatever keeps
-    verdicts beyond the campaign."""
+    confirmed, after the last mutant has run. A campaign that is stopping
+    lands only those already final. What lands is what the history and
+    the verdict cache keep beyond the campaign."""
 
 
 def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
@@ -1567,7 +1615,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
            exclude: tuple[str, ...] = (), selection: list[str] | None = None,
            options: tuple[str, ...] = (), workers: int | str = 1,
            confirm: bool = False, history: bool = False,
-           coverage: bool = False, unsafe_speedups: bool = True) -> dict:
+           coverage: bool = False, cache: bool = False,
+           unsafe_speedups: bool = True) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
     The mutants are written in a copy of *root* as it stands, *exclude* left
@@ -1596,6 +1645,13 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     many mutants were narrowed, or why none was (`coverage`). Without
     *unsafe_speedups*, none of these runs, nor more than one worker
     (`config.settle`).
+
+    With *cache*, each verdict that lands is kept in *root*'s `.invective/`
+    (`store.Cache`), under a key of what the campaign's verdicts can depend
+    on (`store.campaign_key`), and a mutant with a verdict kept that this
+    run could have decided is not run (`cache_attempt`): a run stopped any
+    way at all resumes where it stopped. Without *unsafe_speedups*, the
+    cache stays on and reads only what a run without them kept.
     """
     # **The engine is held to the switch too, whoever called it.** Every
     # speedup of `config.SPEEDUPS` is a keyword here, and is read below only
@@ -1706,6 +1762,17 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             reached(where)
             say("copy:      %s" % where)
             places.append(where)
+        # **The first copy hashed whole before any run**, for the verdict
+        # cache's key: what a run writes in it must not count, and a file
+        # the baseline imports is looked up here. Before the pool, so a ^C
+        # during the walk unwinds as one before any worker.
+        hashed, uncached = None, ""
+        if speed.cache:
+            try:
+                hashed = store.hash_tree(first, tree_top(root, first,
+                                                         bool(ref)))
+            except OSError as exc:
+                uncached = "the copy could not be read: %s" % exc
         say("workers:   %d" % count)
         if confirm and count == 1:
             # Said, not refused: `confirm` in the settings is for the runs
@@ -1765,9 +1832,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # run is the load every mutant's runs will be under, which the
         # budget is measured from.
         # The tests the first run kept, for the history's killers to be
-        # found among: asked for only when there is a history to read.
+        # found among, and the files it imported, for the cache's key: asked
+        # for only when there is a history to read or a cache to key.
         alone, got = pool.on(0, functools.partial(baseline, inventory=True)
-                             if speed.history else baseline)
+                             if speed.history or speed.cache else baseline)
         if not got.ok:
             raise Refusal(
                 "the selection is RED on the unmutated tree, so every mutant "
@@ -1803,6 +1871,54 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # invective: accept[equivalent: 3 -> 4] any budget well above the baseline serves, and a kill by time is counted apart
         alone_budget = max(budget, alone * 3)
 
+        # The coverage run first: whether coverage is in use is which of
+        # its kills the cache may read.
+        narrowing = Narrowing({}, "")
+        if speed.coverage:
+            narrowing = _narrowing(pool, box, sites, base, plain)
+
+        # **The verdict cache's campaign**, keyed once the baseline has said
+        # which tests it kept and which files it imported. A verdict is read
+        # only when this run could have decided it (`store.Cache.hit`): a
+        # kill an attempt made, only while the attempt is in use here.
+        kept: store.Cache | None = None
+        if speed.cache and not uncached:
+            if got.imported is None:
+                uncached = "the baseline did not say which files it imported"
+            else:
+                try:
+                    key = store.campaign_key(hashed, first, shown, tests,
+                                             options, got.selected, exclude,
+                                             got.imported)
+                except OSError as exc:
+                    uncached = ("the campaign's files could not be read: %s"
+                                % exc)
+                else:
+                    in_use = {"history": speed.history and plain,
+                              "coverage": (speed.coverage
+                                           and not narrowing.unused)}
+                    kept = store.Cache(
+                        root, key, count, confirm, target=shown, say=say,
+                        safe_only=not speed.unsafe_speedups,
+                        origins=[origin for origin, flag
+                                 in store.ORIGIN_FLAG.items() if in_use[flag]])
+                    # Whatever ends the campaign: a refusal or a ^C keeps
+                    # what landed, and the oldest campaigns go.
+                    held_open.callback(kept.finish)
+
+        def made(job: Job) -> Mutant:
+            try:
+                # No worker warns while the warning filters are aside.
+                with pool.hush.alone():
+                    text, spliced = _text_of(module, job.idx)
+            except Refusal as exc:
+                raise Refusal("%s:%d %s %s"
+                              % (src_rel, job.line, job.what, exc)) from exc
+            return Mutant(job, text, spliced)
+
+        order = [Job(n, idx, kind, what, node.lineno)  # type: ignore[attr-defined]
+                 for n, (idx, kind, node, what) in enumerate(sites, 1)]
+
         # **Each mutant's last killer, run alone on the original first.**
         # Only a killer that passes alone there can say anything alone on
         # a mutant, and only one among the tests the selection holds, so
@@ -1820,9 +1936,19 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                      for idx, _kind, _node, _what in sites
                      if keys[idx] in remembered.killers}
             if plain and known:
-                kept = set(got.selected if selection is None else selection)
+                # A site the cache answers is never probed, so its killer
+                # needs no gate. Its text is made again when it is run.
+                answered = set()
+                if kept is not None:
+                    answered = {job.idx for job in order if job.idx in known
+                                and kept.get(made(job).text) is not None}
+                unanswered = {idx: killer for idx, killer in known.items()
+                              if idx not in answered}
+                collected = set(got.selected if selection is None
+                                else selection)
                 killers = list(dict.fromkeys(
-                    killer for killer in known.values() if killer in kept))
+                    killer for killer in unanswered.values()
+                    if killer in collected))
                 files = []
                 for i, killer in enumerate(killers):
                     one = os.path.join(box, "probe-%d.txt" % i)
@@ -1837,18 +1963,25 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                         passed[killer] = Probe(killer, one, took)
                     elif not verdict.ok:
                         apart.append(killer)
-                probes = {idx: passed[killer] for idx, killer in known.items()
+                probes = {idx: passed[killer]
+                          for idx, killer in unanswered.items()
                           if killer in passed}
-                say("history:   %d remembered, %d usable"
-                    % (len(known), len(probes)))
+                # Every site remembered, answered or not, so that a re-run
+                # the cache answers whole does not read as every killer
+                # failing its gate.
+                said = ("history:   %d remembered, %d usable"
+                        % (len(known), len(probes)))
+                if answered:
+                    said += ", %d read from the cache" % len(answered)
+                say(said)
             elif not plain:
                 say("history:   not used: --tests has options")
         if apart:
             say(_apart_line(apart))
-        narrowing = Narrowing({}, "")
         if speed.coverage:
-            narrowing = _narrowing(pool, box, sites, base, plain)
             say(_coverage_line(narrowing, len(sites)))
+        if speed.cache:
+            say(_cache_line(kept, uncached))
         say("mutants:   %d\n" % len(sites))
 
         survivors, accepted, kills, killed, broken = [], [], [], 0, 0
@@ -1871,24 +2004,14 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         clock = int(time.time())
         for copy in copies:
             copy.clock = clock
-        jobs = collections.deque(
-            Job(n, idx, kind, what, node.lineno)            # type: ignore[attr-defined]
-            for n, (idx, kind, node, what) in enumerate(sites, 1))
+        jobs = collections.deque(order)
         attempts: list[Attempt] = []
+        if kept is not None:
+            attempts.append(cache_attempt(kept))
         if probes:
             attempts.append(probe_attempt(probes, budget))
         if narrowing.plan:
             attempts.append(coverage_attempt(narrowing.plan, budget))
-
-        def made(job: Job) -> Mutant:
-            try:
-                # No worker warns while the warning filters are aside.
-                with pool.hush.alone():
-                    text, spliced = _text_of(module, job.idx)
-            except Refusal as exc:
-                raise Refusal("%s:%d %s %s"
-                              % (src_rel, job.line, job.what, exc)) from exc
-            return Mutant(job, text, spliced)
 
         def measured(copy: Copy, mutant: Mutant) -> Outcome:
             return _measure(mutant, copy, attempts, budget)
@@ -1897,8 +2020,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # Asked to confirm, a kill made while other copies ran is final
             # only once it is: a test that is not safe in parallel can fail
             # because another copy's run holds a port, a path or a database.
-            return (count == 1 or not confirm or outcome.verdict.ok
-                    or outcome.via == "cache")
+            # A kill read back is never one: none is read then.
+            return count == 1 or not confirm or outcome.verdict.ok
 
         # The edit as a reader sees it, for every entry the mutant makes:
         # kind, line and change find a site but do not show what a `NOT`
@@ -1940,18 +2063,21 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                 line, what = mutant["line"], mutant["change"]
                 text = lines[line - 1].strip()
                 covering = [a for a in accepts if a.covers(line, what)]
+                # A survivor read back, said so where it is read: it was not
+                # run this time.
+                read = " [cache]" if outcome.via == "cache" else ""
                 if got.ok and covering:
                     accepted.append({**mutant, "source": text,
                                      "reason": covering[0].reason,
                                      "why": covering[0].why})
-                    say("  accepted  %s:%d  %-28s %s" % (src_rel, line, what,
-                                                        covering[0].reason))
+                    say("  accepted  %s:%d  %-28s %s%s" % (
+                        src_rel, line, what, covering[0].reason, read))
                 elif got.ok:
                     survivors.append({**mutant, "source": text})
                     # invective: accept[equivalent: 60 -> 61] a display width
                     start = text[:60]
-                    say("  SURVIVED  %s:%d  %-28s %s" % (src_rel, line, what,
-                                                        start))
+                    say("  SURVIVED  %s:%d  %-28s %s%s" % (
+                        src_rel, line, what, start, read))
                 else:
                     killed += 1
                     # **Which check is load-bearing, not merely that one
@@ -1981,6 +2107,13 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             if remembered is not None:
                 remembered.note(keys[mutant.job.idx], outcome.verdict.ok,
                                 outcome.verdict.killer)
+            # As it lands, so a run stopped any way at all keeps it. Never a
+            # verdict read back: put again, it would lose its origin, and a
+            # kill the probe made would be read with the probe off.
+            if kept is not None and outcome.via != "cache":
+                verdict = outcome.verdict
+                kept.put(mutant.text, verdict.ok, verdict.code, verdict.killer,
+                         outcome.via, outcome.confirmed)
 
         def lands(mutant: Mutant, outcome: Outcome) -> None:
             land(mutant, outcome)
@@ -2115,6 +2248,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                                   else "killed")})
                 lands(mutant, confirmed)
         pool.close()
+        if kept is not None and kept.bad:
+            # Once, here: a worker that read one says nothing.
+            say("warning:   %d verdict(s) kept in %s could not be read, and "
+                "were measured again" % (len(kept.bad), kept.where))
 
         if reported != len(sites):
             # Unreachable while every mutant ends in an outcome or a
@@ -2192,7 +2329,10 @@ def summary(report: dict) -> list[str]:
         # of this kind is not a well-tested file.
         lines.append("           %d of the kills were collection or internal "
                      "errors, not a test failing" % report["broken"])
-    probed = sum(k.get("via") == "probe" for k in report["kills"])
+    # A kill read back is counted as what decided it, as each of the lines
+    # below counts its own.
+    probed = sum("probe" in (k.get("via"), k.get("origin"))
+                 for k in report["kills"])
     if probed:
         # Said apart: a test run alone that fails is a kill of the whole
         # selection only for tests independent of their order.
@@ -2211,6 +2351,12 @@ def summary(report: dict) -> list[str]:
         # Again at the end, where it is read: asked for, coverage made no
         # run any faster.
         lines.append(_coverage_line(Narrowing({}, unused), report["mutants"]))
+    read = sum(e.get("via") == "cache" for e in
+               report["kills"] + report["survivors"] + report["accepted"])
+    if read:
+        # Said apart: each was measured by an earlier run, not this one.
+        lines.append("           %d of the verdicts were read from "
+                     ".invective/cache, not run" % read)
     # `.get`: there only when the kills were confirmed.
     unreproduced = report.get("unreproduced", [])
     if unreproduced:
@@ -2344,7 +2490,7 @@ def main(argv: list[str] | None = None) -> int:
                         workers=config.workers,
                         confirm=args.confirm or config.confirm,
                         history=config.history,
-                        coverage=config.coverage,
+                        coverage=config.coverage, cache=config.cache,
                         unsafe_speedups=config.unsafe_speedups)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
