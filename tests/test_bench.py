@@ -1081,6 +1081,24 @@ def test_a_rerun_starts_its_baselines_and_one_run_a_kill_by_time():
     assert compare.rerun_expected(None, [_report()]) is None
 
 
+def test_a_rerun_runs_again_every_kill_load_made():
+    """A kill a signal ended (the OOM killer at N = 4) is never remembered
+    either, so a correct re-run starts one more process for it."""
+    report = _report(timeouts=1)
+    report["kills"].append({"kind": "CMP", "line": 8, "change": "x", "code": -9,
+                            "killer": ""})
+    assert compare.rerun_expected(_calls(), [report]) == 1 + 2
+
+
+def test_a_coverage_run_is_no_baseline():
+    """A run of the original with the coverage handshake is a feature's
+    run, not the engine's baseline: neither expected again of a re-run nor
+    left out of the touchable part."""
+    calls = _calls() + [{"n": None, "prefix": "", "coverage": True, "seconds": 9.0}]
+    assert compare.rerun_expected(calls, [_report(timeouts=0)]) == 1
+    assert compare.fixed_seconds(calls, set(), ["baseline"]) == 0.5
+
+
 def _rerun(rows):
     def behave(side, prime, argv):
         if side == "after" and not prime:

@@ -386,6 +386,14 @@ def fixed_keys(reports: Sequence[dict], classes: Iterable[str]) -> set[tuple]:
     return keys
 
 
+def is_baseline(row: dict) -> bool:
+    """Whether the instrument's *row* is a baseline: a run of the original on
+    the campaign's own selection. A gate or a probe runs a file of its own,
+    and a coverage run carries the coverage handshake; neither is one, since
+    each is a run a feature adds."""
+    return row.get("n") is None and not row.get("prefix") and not row.get("coverage")
+
+
 def fixed_seconds(calls: Sequence[dict], keys: set[tuple],
                   classes: Iterable[str]) -> float:
     """The seconds of the instrument's *calls* that a change cannot touch:
@@ -396,7 +404,7 @@ def fixed_seconds(calls: Sequence[dict], keys: set[tuple],
     total = 0.0
     for row in calls:
         if row.get("n") is None:
-            if baseline and not row.get("prefix"):
+            if baseline and is_baseline(row):
                 total += row["seconds"]
         elif (row.get("target"), row["kind"], row["line"], row["change"],
               row.get("mark")) in keys:
@@ -464,16 +472,19 @@ def process_count(calls: Sequence[dict] | None) -> int | None:
 
 def rerun_expected(calls: Sequence[dict] | None, reports: Sequence[dict]) -> int | None:
     """How many pytest processes a re-run that remembers every verdict it
-    can starts, from the run before it (*calls*, *reports*): its baseline
-    runs again (each run of the original on the campaign's own selection),
-    and one run for each mutant it killed by time, since a kill by time is
-    never remembered. None without the instrument."""
+    can starts, from the run before it (*calls*, *reports*): its baselines
+    again (`is_baseline`), and one run for each mutant it killed by load (by
+    time, or a run a signal or a crash ended), since no such kill is ever
+    remembered. None without the instrument.
+
+    A run another feature adds is counted by adding its own term here: a
+    coverage run, which `is_baseline` leaves out, is not in it."""
     if calls is None:
         return None
-    baselines = sum(1 for row in calls if row.get("n") is None and not row.get("prefix"))
-    timeouts = sum(1 for report in reports for k in report["kills"]
-                   if k.get("code") == TIMED_OUT)
-    return baselines + timeouts
+    baselines = sum(1 for row in calls if is_baseline(row))
+    by_load = sum(1 for report in reports for k in report["kills"]
+                  if _by_load(("killed", k.get("code"), k.get("killer", ""))))
+    return baselines + by_load
 
 
 def unreproduced_of(reports: Sequence[dict]) -> list | None:
