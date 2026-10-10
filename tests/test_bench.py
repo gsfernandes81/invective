@@ -9,6 +9,7 @@ which every checkout `checks` runs in has.
 from __future__ import annotations
 
 import argparse
+import difflib
 import importlib.util
 import json
 import os
@@ -215,10 +216,10 @@ CALLS = [_call(10.0),  # the baseline
 
 def test_the_fixed_keys_are_the_before_sides_timeouts_and_survivors():
     assert compare.fixed_keys([REPORT], ["timeout"]) == {
-        ("pkg/mod.py", "CMP", 5, "Gt -> GtE")}
+        ("pkg/mod.py", "CMP", 5, "Gt -> GtE", None)}
     assert compare.fixed_keys([REPORT], ["survivor"]) == {
-        ("pkg/mod.py", "RAISE", 7, "raise -> pass"),
-        ("pkg/mod.py", "CONST", 9, "1 -> 2")}
+        ("pkg/mod.py", "RAISE", 7, "raise -> pass", None),
+        ("pkg/mod.py", "CONST", 9, "1 -> 2", None)}
     assert compare.fixed_keys([REPORT], ["baseline"]) == set()
 
 
@@ -297,7 +298,7 @@ def test_a_kill_that_survives_on_the_other_side_is_a_real_difference():
     diff = compare.compare_verdicts(compare.verdicts([REPORT]),
                                     compare.verdicts([other]))
     assert diff and [key for key, _a, _b in diff.real] == [
-        ("pkg/mod.py", "CMP", 3, "Lt -> LtE")]
+        ("pkg/mod.py", "CMP", 3, "Lt -> LtE", None)]
     assert diff.load == []
 
 
@@ -315,14 +316,14 @@ def test_a_kill_a_signal_ended_is_put_down_to_load():
                            "code": -9, "killer": ""}], survivors=[])
     diff = compare.compare_verdicts(compare.verdicts([REPORT]),
                                     compare.verdicts([killed]))
-    assert ("pkg/mod.py", "RAISE", 7, "raise -> pass") in [k for k, _a, _b in diff.load]
+    assert ("pkg/mod.py", "RAISE", 7, "raise -> pass", None) in [k for k, _a, _b in diff.load]
 
 
 def test_a_mutant_only_one_side_has_is_a_real_difference():
     other = _with(accepted=[])
     diff = compare.compare_verdicts(compare.verdicts([REPORT]),
                                     compare.verdicts([other]))
-    assert [key for key, _a, _b in diff.real] == [("pkg/mod.py", "CONST", 9, "1 -> 2")]
+    assert [key for key, _a, _b in diff.real] == [("pkg/mod.py", "CONST", 9, "1 -> 2", None)]
 
 
 def test_accepted_and_survived_are_different_verdicts():
@@ -336,6 +337,114 @@ def test_the_plugins_targets_are_kept_apart():
     change in two modules are two mutants."""
     two = [REPORT, dict(REPORT, target="pkg/other.py")]
     assert len(compare.verdicts(two)) == 2 * len(compare.verdicts([REPORT]))
+
+
+#: One line with the same edit twice: `recipes.py` has such lines (two
+#: `and`s at line 899), so kind, line and change name two mutants.
+TWIN_SOURCE = "def both(a, b, c, d):\n    return (a and b, c and d)\n"
+TWINS = [TWIN_SOURCE.replace("a and b", "a or b"),
+         TWIN_SOURCE.replace("c and d", "c or d")]
+
+
+def _twin(text):
+    """A report entry for one of the twins, its diff made as the engine
+    makes it."""
+    diff = "\n".join(difflib.unified_diff(
+        TWIN_SOURCE.splitlines(), text.splitlines(), fromfile="dup.py",
+        tofile="dup.py (mutant)", lineterm=""))
+    return {"kind": "BOOL", "line": 2, "change": "And -> Or", "diff": diff}
+
+
+def _twins(killed, survived):
+    return [{"target": "dup.py", "accepted": [],
+             "kills": [dict(_twin(TWINS[i]), code=1, killer="t.py::test")
+                       for i in killed],
+             "survivors": [_twin(TWINS[i]) for i in survived]}]
+
+
+def test_twins_on_one_line_are_two_mutants():
+    assert len(compare.verdicts(_twins([0], [1]))) == 2
+    assert not compare.compare_verdicts(compare.verdicts(_twins([0], [1])),
+                                        compare.verdicts(_twins([0], [1])))
+
+
+def test_a_twins_lost_kill_is_a_real_difference():
+    """Keyed on kind, line and change, the survivor overwrote the kill on
+    both sides, and a kill lost after read as no difference at all."""
+    diff = compare.compare_verdicts(compare.verdicts(_twins([0], [1])),
+                                    compare.verdicts(_twins([], [0, 1])))
+    assert [(a[0], b[0]) for _key, a, b in diff.real] == [("killed", "survived")]
+
+
+def test_twins_that_swap_their_verdicts_are_two_differences():
+    diff = compare.compare_verdicts(compare.verdicts(_twins([0], [1])),
+                                    compare.verdicts(_twins([1], [0])))
+    assert len(diff.real) == 2
+
+
+def test_twins_without_a_diff_are_still_counted_apart():
+    """An engine that writes no diff leaves no mark, and the count is
+    what keeps one twin from hiding the other."""
+    bare = _twins([0], [1])
+    for entry in bare[0]["kills"] + bare[0]["survivors"]:
+        del entry["diff"]
+    assert sorted(v[0] for v in compare.verdicts(bare).values()) == [
+        "killed", "survived"]
+
+
+def test_a_twins_runs_are_its_own_in_the_touchable_part():
+    """The twin killed by time is fixed; its sibling, killed by a test,
+    stays touchable."""
+    report = _twins([0], [])
+    report[0]["kills"].append(dict(_twin(TWINS[1]), code=-1, killer="TIMEOUT"))
+    keys = compare.fixed_keys(report, ["timeout"])
+    rows = [{"target": "dup.py", "n": i + 1, "kind": "BOOL", "line": 2,
+             "change": "And -> Or", "prefix": "", "seconds": seconds,
+             "mark": compare.mutant_mark(_twin(TWINS[i])["diff"])}
+            for i, seconds in enumerate([2.0, 30.0])]
+    assert compare.fixed_seconds(rows, keys, ["timeout"]) == 30.0
+
+
+def test_the_instruments_mark_is_the_reports():
+    instrument = importlib.util.spec_from_file_location(
+        "bench_instrument", os.path.join(BENCH, "instrument.py"))
+    module = importlib.util.module_from_spec(instrument)
+    instrument.loader.exec_module(module)
+    marks = [module.mark(TWIN_SOURCE, text) for text in TWINS]
+    assert marks == [compare.mutant_mark(_twin(text)["diff"]) for text in TWINS]
+    assert marks[0] != marks[1]
+
+
+def test_a_real_campaigns_twins_and_its_instrument_rows_agree(tmp_path):
+    """invective itself, through the instrument, on a line holding the same
+    edit twice: the report has both twins with their own verdicts, and each
+    instrument row's mark is one of the report's."""
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n",
+                                             encoding="utf-8")
+    # CRLF, so that the instrument has to split its lines as the report
+    # does for its marks to be the report's.
+    (tmp_path / "dup.py").write_bytes(TWIN_SOURCE.replace("\n", "\r\n").encode())
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_dup.py").write_text(
+        "from dup import both\n\n"
+        "def test_first():\n"
+        "    assert both(True, False, 0, 0)[0] is False\n", encoding="utf-8")
+    calls, marks, report = (str(tmp_path / name) for name in
+                            ("calls.jsonl", "marks.json", "report.json"))
+    done = subprocess.run(
+        [sys.executable, os.path.join(BENCH, "instrument.py"), "--calls", calls,
+         "--marks", marks, "run", "--target", "dup.py", "--tests",
+         "tests/test_dup.py", "--only", "BOOL", "--json", report],
+        cwd=tmp_path, capture_output=True, text=True, timeout=300,
+        env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+    assert done.returncode == 0, done.stdout + done.stderr
+    with open(report, encoding="utf-8") as fh:
+        said = compare.verdicts([json.load(fh)])
+    assert sorted(v[0] for v in said.values()) == ["killed", "survived"]
+    with open(calls, encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh]
+    assert sorted(row["mark"] for row in rows if row["n"] is not None) == sorted(
+        key[-1] for key in said)
 
 
 # --------------------------------------------------------------------------

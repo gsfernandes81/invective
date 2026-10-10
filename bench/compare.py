@@ -38,6 +38,7 @@ import argparse
 import contextlib
 import dataclasses
 import datetime
+import hashlib
 import json
 import os
 import platform
@@ -336,6 +337,27 @@ def floors(ratios: dict[tuple[str, int], list[float]]) -> dict[tuple[str, int], 
 # The ratios
 
 
+def mutant_mark(diff: str | None) -> str | None:
+    """What tells apart two mutants of one kind and change on one line (two
+    `and`s, two `1`s): a hash of the lines its entry's diff takes out and
+    puts in, which differ by the column edited. The two header lines are
+    left out, and so are the hunk headers and the context. None without a
+    diff. `bench/instrument.py` makes the same mark from the text a run
+    wrote, so its rows and the report's entries match one to one."""
+    if diff is None:
+        return None
+    changed = [line for line in diff.split("\n")[2:] if line[:1] in ("+", "-")]
+    return hashlib.sha1("\n".join(changed).encode("utf-8")).hexdigest()[:16]
+
+
+def mutant_key(target: str, entry: dict) -> tuple:
+    """A mutant's identity in a report: its target, kind, line, change and
+    mark (`mutant_mark`). Kind, line and change alone name two mutants at
+    once wherever a line holds the same edit twice."""
+    return (target, entry["kind"], entry["line"], entry["change"],
+            mutant_mark(entry.get("diff")))
+
+
 def fixed_keys(reports: Sequence[dict], classes: Iterable[str]) -> set[tuple]:
     """The mutants of the before side's *reports* whose runs a change cannot
     touch, by *classes*: "timeout", the kills by time; "survivor", the
@@ -345,10 +367,10 @@ def fixed_keys(reports: Sequence[dict], classes: Iterable[str]) -> set[tuple]:
     for report in reports:
         target = report["target"]
         if "timeout" in classes:
-            keys |= {(target, k["kind"], k["line"], k["change"])
+            keys |= {mutant_key(target, k)
                      for k in report["kills"] if k.get("code") == TIMED_OUT}
         if "survivor" in classes:
-            keys |= {(target, e["kind"], e["line"], e["change"])
+            keys |= {mutant_key(target, e)
                      for e in report["survivors"] + report["accepted"]}
     return keys
 
@@ -365,7 +387,8 @@ def fixed_seconds(calls: Sequence[dict], keys: set[tuple],
         if row.get("n") is None:
             if baseline and not row.get("prefix"):
                 total += row["seconds"]
-        elif (row.get("target"), row["kind"], row["line"], row["change"]) in keys:
+        elif (row.get("target"), row["kind"], row["line"], row["change"],
+              row.get("mark")) in keys:
             total += row["seconds"]
     return total
 
@@ -431,18 +454,26 @@ def unreproduced_of(reports: Sequence[dict]) -> list | None:
 
 
 def verdicts(reports: Sequence[dict]) -> dict[tuple, tuple]:
-    """Each mutant of *reports*, by (target, kind, line, change), and what it
-    came to: ("killed", code, killer), ("survived",) or ("accepted",)."""
+    """Each mutant of *reports*, by `mutant_key`, and what it came to:
+    ("killed", code, killer), ("survived",) or ("accepted",). Two entries
+    with one key (a report without diffs, from an engine that wrote none)
+    are kept apart by a count, in the order the report lists them, so that
+    neither hides the other's verdict."""
     out = {}
+
+    def put(key, said):
+        while key in out:
+            key = key + ("again",)
+        out[key] = said
+
     for report in reports:
         target = report["target"]
         for k in report["kills"]:
-            out[(target, k["kind"], k["line"], k["change"])] = (
-                "killed", k.get("code"), k.get("killer", ""))
+            put(mutant_key(target, k), ("killed", k.get("code"), k.get("killer", "")))
         for e in report["survivors"]:
-            out[(target, e["kind"], e["line"], e["change"])] = ("survived",)
+            put(mutant_key(target, e), ("survived",))
         for e in report["accepted"]:
-            out[(target, e["kind"], e["line"], e["change"])] = ("accepted",)
+            put(mutant_key(target, e), ("accepted",))
     return out
 
 
@@ -488,7 +519,7 @@ def _said(verdict: tuple | None) -> str:
 def describe(diff: Difference, first: str, other: str) -> list[str]:
     lines = []
     for kind, found in (("", diff.real), ("load only: ", diff.load)):
-        for (target, op, line, change), a, b in found:
+        for (target, op, line, change, *_mark), a, b in found:
             lines.append("  %s%s:%s %s %s: %s in %s, %s in %s" % (
                 kind, target, line, op, change, _said(a), first, _said(b), other))
     return lines
