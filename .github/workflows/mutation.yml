@@ -68,9 +68,10 @@ jobs:
           - module: src/invective/process.py
             tests: tests/test_mutate.py tests/test_tree.py tests/test_sweep.py
           # Its tests start pytest rather than import it, so no sweep of
-          # imports would pair them.
+          # imports would pair them. The coverage run's recorder is the
+          # plugin's, and its map's tests are the coverage tests.
           - module: src/pytest_invective/__init__.py
-            tests: tests/test_plugin.py
+            tests: tests/test_plugin.py tests/test_covers.py
     steps:
       - uses: actions/checkout@v4
 
