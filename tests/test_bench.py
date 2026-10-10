@@ -1,0 +1,823 @@
+"""`bench/compare.py`, the benchmark tool: its rules read one at a time, and
+whole sessions on a tiny project.
+
+The tool is not part of invective, so it is loaded from its file. The
+sessions build two venvs each and run in seconds; they need git and uv,
+which every checkout `checks` runs in has.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+import pytest
+
+from conftest import commit, git
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BENCH = os.path.join(ROOT, "bench")
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location(
+        "bench_compare", os.path.join(BENCH, "compare.py"))
+    module = importlib.util.module_from_spec(spec)
+    # Registered before it runs: its dataclasses look their module up there.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+compare = _load()
+
+
+# --------------------------------------------------------------------------
+# The schedule
+
+
+def test_pairs_alternate_their_order_ABBA():
+    """A drift in one direction favours the side that always runs later,
+    unless the order alternates from one pair to the next."""
+    assert [compare.order(k) for k in range(4)] == [
+        ("before", "after"), ("after", "before"),
+        ("before", "after"), ("after", "before")]
+
+
+def _block(outcomes, pairs=3, repeats=2):
+    """`run_block` against outcomes given in advance: the statuses and the
+    orders each pair was asked to run in."""
+    asked = []
+    left = list(outcomes)
+
+    def run_pair(k, sides):
+        asked.append((k, sides))
+        return left.pop(0)
+
+    return compare.run_block(pairs, repeats, run_pair), asked
+
+
+def test_a_block_runs_its_pairs_in_ABBA_order():
+    statuses, asked = _block(["kept"] * 3)
+    assert statuses == ["kept"] * 3
+    assert [sides for _k, sides in asked] == [compare.order(k) for k in range(3)]
+
+
+def test_a_discarded_pair_is_repeated_and_the_order_goes_on_alternating():
+    """A repeat that restarted at B A would put two B A pairs side by side."""
+    statuses, asked = _block(["kept", "discarded", "kept", "kept"])
+    assert statuses == ["kept", "discarded", "kept", "kept"]
+    assert [k for k, _sides in asked] == [0, 1, 2, 3]
+    assert asked[3][1] == ("after", "before")
+
+
+def test_repeats_stop_at_the_cap():
+    """Without a cap, a machine that drifts all night repeats all night."""
+    statuses, _asked = _block(["discarded"] * 10)
+    assert statuses == ["discarded"] * 3
+
+
+def test_the_cap_counts_the_block_not_the_run_of_discards():
+    statuses, _asked = _block(["discarded", "kept", "discarded", "kept",
+                               "discarded", "kept"])
+    assert statuses == ["discarded", "kept", "discarded", "kept", "discarded"]
+
+
+def test_a_pair_whose_run_died_is_repeated_like_a_discard():
+    statuses, _asked = _block(["died", "kept", "kept", "kept"])
+    assert statuses == ["died", "kept", "kept", "kept"]
+
+
+def test_a_refusal_ends_the_block():
+    """A refusal comes back every time, so a repeat only spends the cap."""
+    statuses, _asked = _block(["refused", "kept", "kept", "kept"])
+    assert statuses == ["refused"]
+
+
+def test_no_repeats_with_a_cap_of_none():
+    statuses, _asked = _block(["discarded", "kept"], pairs=1, repeats=0)
+    assert statuses == ["discarded"]
+
+
+# --------------------------------------------------------------------------
+# The discard
+
+
+def test_a_pair_is_discarded_only_past_the_threshold():
+    assert compare.discarded([8.5, 8.6, 9.9], compare.THRESHOLD)
+    assert not compare.discarded([8.5, 8.6, 9.7], compare.THRESHOLD)
+    # "More than" the threshold: equal to it is kept.
+    assert not compare.discarded([10.0, 11.5], 1.15)
+    assert compare.THRESHOLD == 1.15
+
+
+def test_the_threshold_stays_unless_the_first_pair_is_noisy_on_its_own():
+    threshold, _how = compare.session_threshold([[8.51, 8.63, 8.55], [8.5, 8.6]])
+    assert threshold == compare.THRESHOLD
+    threshold, _how = compare.session_threshold([[10.0, 10.4]])
+    assert threshold == compare.THRESHOLD
+
+
+def test_a_noisy_first_pair_sets_the_threshold_at_three_times_its_spread():
+    """At 1.15x, a machine whose calibration alone spreads 10% would discard
+    every pair until the cap."""
+    threshold, how = compare.session_threshold([[8.5, 8.6], [10.0, 11.0, 10.2]])
+    assert threshold == pytest.approx(1.3)
+    assert "10.0%" in how
+
+
+def test_a_single_run_calibration_says_nothing_of_its_own_spread():
+    threshold, _how = compare.session_threshold([[10.0], [20.0]])
+    assert threshold == compare.THRESHOLD
+
+
+# --------------------------------------------------------------------------
+# The noise floor
+
+
+def test_neighbours_are_adjacent_runs_of_one_side():
+    """ABBA puts the same side side by side at every boundary between pairs,
+    and those runs are the measure of the noise."""
+    runs = [("before", 10.0, True), ("after", 10.0, True),
+            ("after", 11.0, True), ("before", 10.0, True),
+            ("before", 9.0, True), ("after", 10.0, True)]
+    assert compare.neighbours(runs) == pytest.approx([1.1, 0.9])
+
+
+def test_a_run_that_is_not_usable_makes_no_neighbour():
+    runs = [("before", 10.0, True), ("after", 10.0, True),
+            ("after", 30.0, False), ("before", 10.0, True)]
+    assert compare.neighbours(runs) == []
+
+
+def test_the_floor_is_the_mean_distance_from_one():
+    found = compare.floors({("p", 1): [1.1, 0.9, 1.05]})
+    assert found[("p", 1)].f == pytest.approx(0.25 / 3)
+    assert found[("p", 1)].count == 3
+
+
+def test_few_neighbours_make_a_floor_of_at_least_two_percent():
+    found = compare.floors({("p", 1): [1.01, 0.995]})
+    assert found[("p", 1)].f == compare.FLOOR_LEAST == 0.02
+
+
+def test_three_neighbours_keep_a_floor_under_two_percent():
+    found = compare.floors({("p", 1): [1.01, 0.99, 1.01]})
+    assert found[("p", 1)].f == pytest.approx(0.01)
+
+
+def test_with_no_neighbours_the_floor_is_the_sessions_largest():
+    found = compare.floors({("p", 1): [1.1, 0.9], ("q", 1): []})
+    assert found[("q", 1)].f == pytest.approx(0.1)
+    assert found[("q", 1)].count == 0
+
+
+def test_with_no_neighbours_anywhere_the_floor_is_two_percent():
+    found = compare.floors({("q", 4): []})
+    assert found[("q", 4)].f == compare.FLOOR_LEAST
+
+
+# --------------------------------------------------------------------------
+# The ratios
+
+
+REPORT = {
+    "target": "pkg/mod.py",
+    "kills": [{"kind": "CMP", "line": 3, "change": "Lt -> LtE", "code": 1,
+               "killer": "tests/test_mod.py::test_a"},
+              {"kind": "CMP", "line": 5, "change": "Gt -> GtE", "code": -1,
+               "killer": "TIMEOUT"}],
+    "survivors": [{"kind": "RAISE", "line": 7, "change": "raise -> pass"}],
+    "accepted": [{"kind": "CONST", "line": 9, "change": "1 -> 2"}],
+}
+
+
+def _call(seconds, line=None, kind=None, change=None, prefix=""):
+    return {"target": "pkg/mod.py", "n": None if line is None else 1, "kind": kind,
+            "line": line, "change": change, "prefix": prefix, "seconds": seconds}
+
+
+CALLS = [_call(10.0),  # the baseline
+         _call(2.0, 3, "CMP", "Lt -> LtE"),
+         _call(30.0, 5, "CMP", "Gt -> GtE"),
+         _call(9.0, 7, "RAISE", "raise -> pass"),
+         _call(8.0, 9, "CONST", "1 -> 2"),
+         _call(0.5, prefix="probe-")]  # a gate: a run of the original on a file
+
+
+def test_the_fixed_keys_are_the_before_sides_timeouts_and_survivors():
+    assert compare.fixed_keys([REPORT], ["timeout"]) == {
+        ("pkg/mod.py", "CMP", 5, "Gt -> GtE")}
+    assert compare.fixed_keys([REPORT], ["survivor"]) == {
+        ("pkg/mod.py", "RAISE", 7, "raise -> pass"),
+        ("pkg/mod.py", "CONST", 9, "1 -> 2")}
+    assert compare.fixed_keys([REPORT], ["baseline"]) == set()
+
+
+def test_the_fixed_seconds_are_the_baseline_and_the_named_mutants_runs():
+    """A gate runs the original too, but on a file of its own, and it is
+    what a feature like a probe adds: it stays in the touchable part."""
+    keys = compare.fixed_keys([REPORT], ["timeout"])
+    assert compare.fixed_seconds(CALLS, keys, ["baseline", "timeout"]) == 40.0
+    assert compare.fixed_seconds(CALLS, keys, ["timeout"]) == 30.0
+    every = compare.fixed_keys([REPORT], ["timeout", "survivor"])
+    assert compare.fixed_seconds(CALLS, every, compare.FIXED_CLASSES) == 57.0
+
+
+def test_the_ratios_are_before_over_after():
+    """Each side less its own fixed seconds: a feature that adds a fixed
+    cost (a coverage run) adds it on its side alone."""
+    got = compare.ratios(300.0, 250.0, 130.0, 100.0)
+    assert got.whole == pytest.approx(1.2)
+    assert got.touchable == pytest.approx(170 / 150)
+    assert got.ceiling == pytest.approx(300 / 130)
+
+
+def test_without_the_instrument_there_is_no_touchable_part():
+    got = compare.ratios(300.0, 250.0, None, 130.0)
+    assert got == compare.Ratios(pytest.approx(1.2), None, None)
+
+
+def test_a_touchable_part_that_is_not_above_zero_is_none():
+    """A ratio with nothing, or less than nothing, on one side is no
+    speedup: it is the instrument's seconds outrunning the wall clock."""
+    got = compare.ratios(300.0, 100.0, 120.0, 100.0)
+    assert got.touchable is None
+    assert got.ceiling == pytest.approx(2.5)
+    assert compare.ratios(100.0, 300.0, 120.0, 100.0).touchable is None
+
+
+def test_a_speedup_beyond_the_floor_is_more_than_2f_from_one():
+    """Inside `2f`, two runs of one side differ as much: it is no change."""
+    floor = compare.Floor(0.012, 4, "measured")
+    assert _row(whole=1.02, floor=floor).beyond_floor is False
+    assert _row(whole=0.98, floor=floor).beyond_floor is False
+    assert _row(whole=1.03, floor=floor).beyond_floor is True
+    assert _row(whole=0.97, floor=floor).beyond_floor is True
+    assert _row(whole=None).beyond_floor is None
+
+
+# --------------------------------------------------------------------------
+# Verdicts
+
+
+def _with(**changes):
+    report = {key: [dict(e) for e in value] if isinstance(value, list) else value
+              for key, value in REPORT.items()}
+    report.update(changes)
+    return report
+
+
+def test_equal_verdicts_are_no_difference():
+    first = compare.verdicts([REPORT])
+    assert not compare.compare_verdicts(first, compare.verdicts([REPORT]))
+
+
+def test_a_different_killer_is_the_same_kill():
+    """Which test fails first can change with the order of the run, and a
+    kill is a kill."""
+    other = _with(kills=[dict(REPORT["kills"][0], killer="tests/test_mod.py::test_b"),
+                         REPORT["kills"][1]])
+    assert not compare.compare_verdicts(compare.verdicts([REPORT]),
+                                        compare.verdicts([other]))
+
+
+def test_a_kill_that_survives_on_the_other_side_is_a_real_difference():
+    other = _with(kills=REPORT["kills"][1:],
+                  survivors=REPORT["survivors"] + [
+                      {"kind": "CMP", "line": 3, "change": "Lt -> LtE"}])
+    diff = compare.compare_verdicts(compare.verdicts([REPORT]),
+                                    compare.verdicts([other]))
+    assert diff and [key for key, _a, _b in diff.real] == [
+        ("pkg/mod.py", "CMP", 3, "Lt -> LtE")]
+    assert diff.load == []
+
+
+def test_a_kill_by_time_that_survives_elsewhere_is_put_down_to_load():
+    other = _with(kills=REPORT["kills"][:1],
+                  survivors=REPORT["survivors"] + [
+                      {"kind": "CMP", "line": 5, "change": "Gt -> GtE"}])
+    diff = compare.compare_verdicts(compare.verdicts([REPORT]),
+                                    compare.verdicts([other]))
+    assert diff and diff.real == [] and len(diff.load) == 1
+
+
+def test_a_kill_a_signal_ended_is_put_down_to_load():
+    killed = _with(kills=[{"kind": "RAISE", "line": 7, "change": "raise -> pass",
+                           "code": -9, "killer": ""}], survivors=[])
+    diff = compare.compare_verdicts(compare.verdicts([REPORT]),
+                                    compare.verdicts([killed]))
+    assert ("pkg/mod.py", "RAISE", 7, "raise -> pass") in [k for k, _a, _b in diff.load]
+
+
+def test_a_mutant_only_one_side_has_is_a_real_difference():
+    other = _with(accepted=[])
+    diff = compare.compare_verdicts(compare.verdicts([REPORT]),
+                                    compare.verdicts([other]))
+    assert [key for key, _a, _b in diff.real] == [("pkg/mod.py", "CONST", 9, "1 -> 2")]
+
+
+def test_accepted_and_survived_are_different_verdicts():
+    other = _with(accepted=[], survivors=REPORT["survivors"] + REPORT["accepted"])
+    assert compare.compare_verdicts(compare.verdicts([REPORT]),
+                                    compare.verdicts([other])).real
+
+
+def test_the_plugins_targets_are_kept_apart():
+    """The plugin reports a list, one per target, and the same line and
+    change in two modules are two mutants."""
+    two = [REPORT, dict(REPORT, target="pkg/other.py")]
+    assert len(compare.verdicts(two)) == 2 * len(compare.verdicts([REPORT]))
+
+
+# --------------------------------------------------------------------------
+# The Finding
+
+
+def _info(**changes):
+    info = {
+        "date": "2026-10-10", "cpu": "AMD Ryzen 7 7840U",
+        "cores": "8 cores, 16 logical CPUs", "os": "Linux-6.11", "python": "Python 3.14.0",
+        "before": {"ref": "main", "sha": "f989e8f" + "0" * 33, "settings": [], "env": []},
+        "after": {"ref": "topic", "sha": "abcdef1" + "0" * 33,
+                  "settings": [("coverage", "true")], "env": []},
+        "cases": {"R40": ("invective run --target more_itertools/recipes.py --tests "
+                          "tests/test_recipes.py --only CMP,BOOL,NOT,CONST,RAISE "
+                          "--limit 40", "more-itertools", "more-itertools at `81c21a8`")},
+        "deselected": {"more-itertools": (
+            "tests/test_more.py::TestConcurrentTee::test_concurrent_consumers",)},
+        "pairs": 3, "workers": [1, 4],
+        "calibration": {"more-itertools": "`pytest -q tests/test_recipes.py`, the "
+                                          "median of 3"},
+        "threshold": "1.15x", "fixed": "baseline, timeout"}
+    info.update(changes)
+    return info
+
+
+def _row(**changes):
+    row = dict(case="R40", project="more-itertools", workers=4, asked=3, kept=3,
+               discarded=0, died=0, before=305.0, after=100.0, whole=3.05,
+               whole_low=3.0, whole_high=3.1, touchable=None, ceiling=None,
+               floor=compare.Floor(0.012, 4, "measured"), verdicts="equal")
+    row.update(changes)
+    return compare.Row(**row)
+
+
+def _joined(text):
+    """The Finding's prose as one line, as markdown reads a wrapped one."""
+    return " ".join(line.removeprefix("> ") for line in text.splitlines())
+
+
+def test_the_finding_opens_in_the_form_CLAUDE_md_gives():
+    text = compare.finding(_info(), [_row()])
+    assert re.match(r"> \*\*Finding:\*\* \(2026-10-10, ", text)
+    assert text.splitlines()[-1].startswith("> ")
+
+
+def test_the_finding_names_its_conditions():
+    """A Finding without its machine, its commits or its cases cannot be
+    taken again, or set beside another."""
+    joined = _joined(compare.finding(_info(), [_row()]))
+    for said in ("AMD Ryzen 7 7840U", "8 cores, 16 logical CPUs", "Linux-6.11",
+                 "Python 3.14.0", "`main` at `f989e8f`", "`topic` at `abcdef1`",
+                 "`coverage = true`", "--limit 40", "more-itertools at `81c21a8`",
+                 "`tests/test_more.py::TestConcurrentTee::test_concurrent_consumers`",
+                 "`PYTEST_ADDOPTS`", "workers 1, 4", "3 ABBA pair(s)",
+                 "`pytest -q tests/test_recipes.py`"):
+        assert said in joined, said
+
+
+def test_the_finding_wraps_at_90_and_holds_no_dash_aside():
+    """It is pasted into docs/, where `tests/test_docs.py` holds every line
+    to 90 characters and takes ` - ` for an aside."""
+    text = compare.finding(_info(), [_row(), _row(workers=1, touchable=1.4,
+                                                  ceiling=1.25)])
+    for line in text.splitlines():
+        assert len(line) <= 90, line
+        if not line.startswith("> |"):
+            assert not re.search(r" --? |–|—", re.sub(r"`[^`]*`", "``", line)), line
+
+
+def test_the_finding_states_the_numbers_and_the_verdicts():
+    text = compare.finding(_info(), [_row()])
+    assert "| R40 | 4 | 3 of 3 | 305.0 s | 100.0 s | 3.05x | - | 1.2% |" in text
+    joined = _joined(text)
+    assert "R40 at N = 4 runs 3.05x faster after than before" in joined
+    assert "same kills, survivors and acceptances" in joined
+
+
+def test_the_finding_says_a_slowdown_is_one():
+    joined = _joined(compare.finding(_info(), [_row(whole=0.8, whole_low=0.79,
+                                                    whole_high=0.81)]))
+    assert "1.25x slower after than before" in joined
+
+
+def test_the_finding_says_a_ratio_that_rounds_to_one_is_as_fast():
+    """A ratio of 0.999 said as 1.00x slower reads as a slowdown the numbers
+    do not show."""
+    joined = _joined(compare.finding(_info(), [_row(whole=0.999, whole_low=0.999,
+                                                    whole_high=0.999)]))
+    assert "R40 at N = 4 runs as fast after as before" in joined
+
+
+def test_the_finding_says_a_ratio_inside_the_floor_is_no_change():
+    joined = _joined(compare.finding(_info(), [_row(whole=1.01)]))
+    assert "inside 2f" in joined
+
+
+def test_the_finding_says_the_verdicts_differ():
+    joined = _joined(compare.finding(_info(), [_row(verdicts="DIFFER")]))
+    assert "verdicts differ between runs of R40" in joined
+    assert "same kills" not in joined
+
+
+def test_the_finding_says_a_difference_put_down_to_load_is_one():
+    joined = _joined(compare.finding(_info(), [_row(verdicts="load only")]))
+    assert "differ only by kills by time or by a signal" in joined
+    assert "same kills" not in joined
+
+
+def test_the_finding_says_a_case_short_of_its_pairs_is_inconclusive():
+    joined = _joined(compare.finding(_info(), [_row(kept=2, discarded=3)]))
+    assert "inconclusive" in joined
+
+
+# --------------------------------------------------------------------------
+# The cases and the settings
+
+
+def test_the_cases_are_the_measurement_harnesss():
+    """The cases are what every speedup's Finding names, and one that
+    drifted would no longer be the case other Findings measured."""
+    projects, cases = compare.load_cases(compare.CASES)
+    assert cases["R40"].command() == (
+        "invective run --target more_itertools/recipes.py --tests "
+        "tests/test_recipes.py --only CMP,BOOL,NOT,CONST,RAISE --limit 40")
+    assert cases["M60"].command() == (
+        "invective run --target more_itertools/more.py --tests tests/test_more.py "
+        "--only CMP,RAISE,BOOL --limit 60")
+    assert cases["RALL"].limit is None
+    assert cases["RALL"].command() == cases["R40"].command().removesuffix(" --limit 40")
+    assert cases["I20"].command() == (
+        "pytest -n 0 -p no:cacheprovider --mutate src/invective/accept.py "
+        "--mutate-only CMP,BOOL,NOT,CONST,RAISE tests/test_accept.py")
+    assert (cases["T120"].target, cases["T120"].limit) == ("src/attr/_make.py", 120)
+    mit = projects["more-itertools"]
+    assert mit.commit == "81c21a8db1c922260cd673841257fb9b112c1318"
+    assert mit.deselect == (
+        "tests/test_more.py::TestConcurrentTee::test_concurrent_consumers",)
+    assert projects["attrs"].commit == "644b4e165bfbeee7e127de6fcbda08b64014316f"
+
+
+def test_a_misspelt_key_in_the_cases_is_refused(tmp_path):
+    path = tmp_path / "cases.toml"
+    path.write_text('[projects.p]\npath = "p"\n[cases.C]\nproject = "p"\n'
+                    'target = "m.py"\ntests = ["t.py"]\nlimt = 3\n', encoding="utf-8")
+    with pytest.raises(compare.BenchError, match="limt"):
+        compare.load_cases(str(path))
+
+
+def test_a_short_commit_is_refused(tmp_path):
+    """`git fetch` takes only a full sha from a server that has not
+    advertised it."""
+    path = tmp_path / "cases.toml"
+    path.write_text('[projects.p]\nrepo = "https://example.invalid/p"\n'
+                    'commit = "81c21a8"\n', encoding="utf-8")
+    with pytest.raises(compare.BenchError, match="full sha"):
+        compare.load_cases(str(path))
+
+
+def test_a_setting_goes_into_its_table():
+    text = compare.insert_into_table(
+        "[project]\nname = 'x'\n", "tool.invective",
+        ["coverage = %s" % compare.toml_value("true"),
+         "workers = %s" % compare.toml_value("auto")])
+    assert text.endswith('[tool.invective]\ncoverage = true\nworkers = "auto"\n')
+
+
+def test_a_setting_goes_into_the_table_that_is_there():
+    text = compare.insert_into_table(
+        "[tool.pytest]\nstrict = true\n\n[tool.other]\nx = 1\n", "tool.pytest",
+        ['pythonpath = ["src"]'])
+    assert text.startswith('[tool.pytest]\npythonpath = ["src"]\nstrict = true\n')
+
+
+def test_a_setting_the_project_already_has_is_refused():
+    """The last of two would win silently in a reader that allowed it."""
+    with pytest.raises(compare.BenchError):
+        compare.insert_into_table("[tool.invective]\nconfirm = true\n",
+                                  "tool.invective", ["confirm = false"])
+
+
+# --------------------------------------------------------------------------
+# A run's status, and the command line's refusals
+
+
+def _timed(code, timed_out=False):
+    return compare.Timed(code, 1.0, None, None, timed_out)
+
+
+def test_a_run_is_ok_only_when_it_ran_and_reported():
+    """A run that crashed after writing its report is not a measurement of
+    the campaign, and a run with no report has no verdicts to compare."""
+    assert compare.status_of(_timed(0), True) == "ok"
+    assert compare.status_of(_timed(1), True) == "ok"
+    assert compare.status_of(_timed(0), False) == "died"
+    assert compare.status_of(_timed(3), True) == "died"
+    assert compare.status_of(_timed(-9), True) == "died"
+    assert compare.status_of(_timed(2), False) == "refused"
+    assert compare.status_of(_timed(-15, timed_out=True), True) == "timeout"
+
+
+def test_an_out_directory_with_something_in_it_is_refused(tmp_path, capsys):
+    """Rows appended to another session's files would be read as its own."""
+    (tmp_path / "runs.tsv").write_text("seq\n", encoding="utf-8")
+    assert compare.main(["HEAD", "HEAD", "--repo", ROOT, "--out", str(tmp_path)]) == 2
+    assert "not empty" in capsys.readouterr().err
+    assert os.listdir(tmp_path) == ["runs.tsv"]
+
+
+# --------------------------------------------------------------------------
+# The environment and the deselection
+
+
+def _session(tmp_path, project, **sides):
+    """A session whose before side is this interpreter, on *project* in
+    *tmp_path*, with nothing set up: for one step of a session alone."""
+    args = argparse.Namespace(fixed="baseline,timeout", out=str(tmp_path / "out"),
+                              repo=ROOT, threshold=None)
+    side = compare.Side("before", "HEAD", python=sys.executable,
+                        dirs={project.name: str(tmp_path)}, **sides)
+    return compare.Session(args, {project.name: project}, [], [1], 1, 0,
+                           {"before": side, "after": side})
+
+
+def test_a_runs_environment_carries_the_deselections_then_the_sides_options(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-ra")
+    monkeypatch.setenv("PYTHONPATH", "/elsewhere")
+    project = compare.Project("p", path=str(tmp_path), deselect=("t.py::a", "t.py::b"))
+    session = _session(tmp_path, project, env=[("PYTEST_ADDOPTS", "-x"), ("K", "v")])
+    env = session.env_for(session.sides["before"], project)
+    assert env["PYTEST_ADDOPTS"] == "-ra --deselect t.py::a --deselect t.py::b -x"
+    assert env["K"] == "v"
+    # An outside PYTHONPATH would put another copy of a package ahead of
+    # the venv's, on one side and not the other.
+    assert "PYTHONPATH" not in env
+    assert env["PATH"].startswith(os.path.dirname(sys.executable) + os.pathsep)
+
+
+def _deselecting(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n",
+                                             encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "def test_kept():\n    pass\n\ndef test_dropped():\n    pass\n",
+        encoding="utf-8")
+    return compare.Project("p", path=str(tmp_path),
+                           deselect=("tests/test_x.py::test_dropped",))
+
+
+def test_a_deselection_is_checked_against_a_collection(tmp_path):
+    project = _deselecting(tmp_path)
+    session = _session(tmp_path, project)
+    session._check_deselected(project, str(tmp_path / "log"))
+
+
+def test_a_deselection_that_does_not_take_stops_the_session(tmp_path, monkeypatch):
+    """A deselection that does not reach pytest leaves the test that times
+    the machine in every run, and nothing in the numbers says so."""
+    project = _deselecting(tmp_path)
+    session = _session(tmp_path, project)
+    monkeypatch.setattr(session, "env_for", lambda side, p: dict(os.environ))
+    with pytest.raises(compare.BenchError, match="still collects"):
+        session._check_deselected(project, str(tmp_path / "log"))
+
+
+# --------------------------------------------------------------------------
+# The documentation's command lines
+
+
+def _bench_lines():
+    found = []
+    for name in sorted(os.listdir(os.path.join(ROOT, "docs"))):
+        if not name.endswith(".md"):
+            continue
+        with open(os.path.join(ROOT, "docs", name), encoding="utf-8") as fh:
+            text = fh.read().replace("\\\n", " ")
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("uv run bench/compare.py "):
+                found.append(line.split()[3:])
+    return found
+
+
+def test_the_docs_bench_commands_parse_and_name_cases_that_exist():
+    """An example the owner copies must run as written: a flag renamed, or
+    a case dropped from the file, leaves one that fails."""
+    lines = _bench_lines()
+    assert lines, "the docs show the command"
+    _projects, cases = compare.load_cases(compare.CASES)
+    for argv in lines:
+        args = compare.parser().parse_args(argv)
+        names = [n for item in args.case for n in item.split(",")]
+        assert set(names) <= set(cases), argv
+
+
+# --------------------------------------------------------------------------
+# Whole sessions
+
+
+def _git_checkout():
+    return (shutil.which("git") and shutil.which("uv")
+            and subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"],
+                               capture_output=True).returncode == 0)
+
+
+sessions = pytest.mark.skipif(not _git_checkout(),
+                              reason="a session needs git, uv and a git checkout")
+
+
+def _project(tmp_path, slow=False, fetched=False):
+    """A project of one module and its tests, and a cases file naming it.
+    Both its mutants are killed, unless `FIXTURE_LAX` is set in the runs'
+    environment, when the comparison's survives. One test always fails, and
+    the project deselects it: a run it reached would be refused. *fetched*
+    makes it a git repository the session fetches by its commit, as it does
+    a project on a server."""
+    where = tmp_path / "fixture"
+    (where / "tests").mkdir(parents=True)
+    (where / "pyproject.toml").write_text("[tool.pytest.ini_options]\n",
+                                          encoding="utf-8")
+    (where / "gate.py").write_text(
+        "def admit(age):\n"
+        "    if age < 18:\n"
+        "        raise ValueError('under age')\n"
+        "    return age\n", encoding="utf-8")
+    (where / "tests" / "test_gate.py").write_text(
+        "import os\n"
+        "import time\n"
+        "\n"
+        "import pytest\n"
+        "\n"
+        "from gate import admit\n"
+        "\n"
+        "def test_admit():\n"
+        "    time.sleep(%d)\n"
+        "    if not os.environ.get('FIXTURE_LAX'):\n"
+        "        assert admit(18) == 18\n"
+        "    with pytest.raises(ValueError):\n"
+        "        admit(10)\n"
+        "\n"
+        "def test_never():\n"
+        "    assert False\n" % (120 if slow else 0), encoding="utf-8")
+    source = 'path = "fixture"\n'
+    if fetched:
+        git(str(where), "init", "-q")
+        commit(str(where))
+        source = 'repo = "%s"\ncommit = "%s"\n' % (
+            where.as_uri(), git(str(where), "rev-parse", "HEAD").strip())
+    cases = tmp_path / "cases.toml"
+    cases.write_text(
+        "[projects.fixture]\n"
+        + source +
+        'deselect = ["tests/test_gate.py::test_never"]\n'
+        "%s"
+        "\n[cases.F]\n"
+        'project = "fixture"\n'
+        'target = "gate.py"\n'
+        'tests = ["tests/test_gate.py"]\n'
+        'only = "CMP,RAISE"\n' % ("calibrate = []\n" if slow else
+                                  'calibrate = ["tests/test_gate.py"]\n'
+                                  "calibrate_runs = 1\n"), encoding="utf-8")
+    return cases
+
+
+def _argv(tmp_path, cases, *more):
+    return [sys.executable, os.path.join(BENCH, "compare.py"), "HEAD", "HEAD",
+            "--cases-file", str(cases), "--case", "F", "--quick",
+            "--python", sys.executable, "--repo", ROOT,
+            "--out", str(tmp_path / "out"), "--cache", str(tmp_path / "cache"), *more]
+
+
+def _worktrees():
+    said = subprocess.run(["git", "-C", ROOT, "worktree", "list", "--porcelain"],
+                          capture_output=True, text=True, check=True).stdout
+    return {line.split(" ", 1)[1] for line in said.splitlines()
+            if line.startswith("worktree ")}
+
+
+def _left_behind(tmp_path):
+    """The session's temporaries still there: its work directory, made in
+    the test's own temporary directory, and its worktrees."""
+    found = [name for name in os.listdir(tmp_path) if name.startswith("invective-bench-")]
+    found += [w for w in _worktrees() if "invective-bench-" in w
+              and os.path.normcase(str(tmp_path)) in os.path.normcase(w)]
+    return found
+
+
+def _rows(path):
+    with open(path, encoding="utf-8") as fh:
+        head, *body = [line.rstrip("\n").split("\t") for line in fh]
+    return [dict(zip(head, row)) for row in body]
+
+
+@sessions
+def test_a_quick_session_measures_one_pair_and_leaves_nothing_behind(tmp_path):
+    """The whole tool end to end on a project that takes seconds: the
+    worktrees, the venvs, the calibrations, one pair, the verdicts, the
+    files it writes, and the cleanup."""
+    cases = _project(tmp_path, fetched=True)
+    # A calibration a fraction of a second long, beside the suite's other
+    # workers, drifts past any threshold a real one is held to. A survivor
+    # on both sides fails the after side's run, by its setting alone.
+    done = subprocess.run(_argv(tmp_path, cases, "--env", "FIXTURE_LAX=1",
+                                "--set-after", "fail-on-survivors=true",
+                                "--threshold", "1000"),
+                          capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert compare.ADVICE in done.stdout.splitlines()[0]
+    out = tmp_path / "out"
+    runs = _rows(out / "runs.tsv")
+    assert [r["side"] for r in runs] == ["before", "after"]
+    assert {r["status"] for r in runs} == {"ok"}
+    assert [(r["killed"], r["survived"], r["exit"]) for r in runs] == [
+        ("1", "1", "0"), ("1", "1", "1")]
+    assert all(float(r["wall"]) > 0 and r["cal_before"] and r["cal_after"] for r in runs)
+    pairs = _rows(out / "pairs.tsv")
+    assert [p["status"] for p in pairs] == ["kept"]
+    assert pairs[0]["touchable"] != ""
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert re.search(r"^F +1 +1/1 .* equal$", summary, re.M), summary
+    finding = (out / "finding.md").read_text(encoding="utf-8")
+    assert finding.startswith("> **Finding:** (")
+    assert "`fail-on-survivors = true`" in _joined(finding)
+    assert "`FIXTURE_LAX=1`" in _joined(finding)
+    assert "`tests/test_gate.py::test_never`" in _joined(finding)
+    assert (tmp_path / "cache" / "fixture.git").is_dir()
+    assert not _left_behind(tmp_path)
+
+
+@sessions
+def test_verdicts_that_differ_fail_the_session_loudly(tmp_path):
+    """A speedup that changes a verdict is a broken speedup, whatever its
+    time: the difference is named as it is found, and the session fails."""
+    cases = _project(tmp_path)
+    done = subprocess.run(_argv(tmp_path, cases, "--env-after", "FIXTURE_LAX=1",
+                                "--threshold", "1000"),
+                          capture_output=True, text=True, timeout=600)
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "VERDICTS DIFFER" in done.stderr
+    assert re.search(r"gate\.py:2 CMP Lt -> LtE: killed .* in run 1 .*survived in run 2",
+                     done.stderr), done.stderr
+    out = tmp_path / "out"
+    assert "Lt -> LtE" in (out / "verdicts.txt").read_text(encoding="utf-8")
+    assert re.search(r"^F .* DIFFER$", (out / "summary.txt").read_text(encoding="utf-8"),
+                     re.M)
+    assert "verdicts differ" in _joined((out / "finding.md").read_text(encoding="utf-8"))
+    assert not _left_behind(tmp_path)
+
+
+@sessions
+@pytest.mark.skipif(os.name == "nt", reason="sends POSIX signals")
+@pytest.mark.parametrize("how", ["a ^C at the terminal", "a SIGTERM"])
+def test_a_stopped_session_records_its_run_and_removes_its_temporaries(tmp_path, how):
+    """A ^C reaches the whole foreground group, the run included; a SIGTERM
+    reaches the tool alone, which passes it on. Either way the run ends,
+    is recorded as stopped, and nothing is left behind."""
+    cases = _project(tmp_path, slow=True)
+    proc = subprocess.Popen(_argv(tmp_path, cases), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        log = tmp_path / "out" / "logs" / "001-F-n1-before.log"
+        deadline = time.monotonic() + 300
+        while not (log.exists() and log.stat().st_size > 0):
+            assert proc.poll() is None, proc.stdout.read().decode()
+            assert time.monotonic() < deadline, "the first run never started"
+            time.sleep(0.2)
+        # Inside its baseline, a test that sleeps.
+        time.sleep(3)
+        sent = time.monotonic()
+        if how == "a SIGTERM":
+            proc.send_signal(signal.SIGTERM)
+        else:
+            os.killpg(proc.pid, signal.SIGINT)
+        said = proc.communicate(timeout=120)[0].decode()
+        # The run ended by the signal, not by the grace given a run that
+        # did not hear it.
+        assert time.monotonic() - sent < compare.GRACE, said
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+    assert proc.returncode == 130, said
+    runs = _rows(tmp_path / "out" / "runs.tsv")
+    assert [r["status"] for r in runs] == ["stopped"]
+    assert not _left_behind(tmp_path)
