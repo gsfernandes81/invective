@@ -357,6 +357,17 @@ def test_a_kill_a_signal_ended_is_put_down_to_load():
     assert ("pkg/mod.py", "RAISE", 7, "raise -> pass", None) in [k for k, _a, _b in diff.load]
 
 
+def test_a_mutant_one_side_lacks_is_real_though_the_other_timed_it_out():
+    """A site one side never made is not load, whatever the other side's
+    run of it came to."""
+    fewer = _with(kills=REPORT["kills"][:1])
+    diff = compare.compare_verdicts(compare.verdicts([REPORT]),
+                                    compare.verdicts([fewer]))
+    assert [key for key, _a, _b in diff.real] == [("pkg/mod.py", "CMP", 5, "Gt -> GtE",
+                                                    None)]
+    assert diff.load == []
+
+
 def test_a_mutant_only_one_side_has_is_a_real_difference():
     other = _with(accepted=[])
     diff = compare.compare_verdicts(compare.verdicts([REPORT]),

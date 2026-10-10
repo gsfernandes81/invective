@@ -551,7 +551,10 @@ def compare_verdicts(first: dict[tuple, tuple], other: dict[tuple, tuple]) -> Di
         a, b = first.get(key), other.get(key)
         if (a and a[0]) == (b and b[0]):
             continue
-        (load if _by_load(a) or _by_load(b) else real).append((key, a, b))
+        # Put down to load only where both sides have the mutant: one that a
+        # side does not have at all is a different set of mutants.
+        explained = a is not None and b is not None and (_by_load(a) or _by_load(b))
+        (load if explained else real).append((key, a, b))
     return Difference(real, load)
 
 
