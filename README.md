@@ -84,7 +84,8 @@ at a time: workers, and the remembered killer. A speedup that cannot (each
 mutant made from one parse of the module) stays on; `config.SPEEDUPS` says
 which side each one is on. A value in `[tool.invective]` that would turn an
 unsafe speedup back on gives way to it, and a flag that would (`--workers 4`) is
-refused. The `speedups:` line says which unsafe speedups a run uses
+refused. Set in `[tool.invective]`, the switch is undone there only: no flag
+turns it off. The `speedups:` line says which unsafe speedups a run uses
 (`unsafe ones on: workers, history`), that it uses none (`no unsafe ones on`),
 or that they are off (`safe ones only`).
 
