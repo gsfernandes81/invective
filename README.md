@@ -88,11 +88,12 @@ refused. The `speedups:` line says which unsafe speedups a run uses
 (`unsafe ones on: workers, history`), that it uses none (`no unsafe ones on`),
 or that they are off (`safe ones only`).
 
-Each kill's killer is remembered in `.invective/history.json` at the project's
-top, and the next run tries it alone on the same mutant before the whole
-selection. When it fails there, as itself, the mutant is killed for the price of
-one test's run: the entry carries `"via": "probe"` in the report, and the
-closing lines count such kills. Anything else (it passes, another test fails, it
+The test that killed each mutant is remembered in `.invective/history.json` at
+the project's top (a kill by time, by a module that would not import, or with no
+test named is not), and the next run tries it alone on the same mutant before
+the whole selection. When it fails there, as itself, the mutant is killed for
+the price of one test's run: the entry carries `"via": "probe"` in the report,
+and the closing lines count such kills. Anything else (it passes, another test fails, it
 runs out of time) leaves the mutant to the whole selection, so a survivor is
 always the whole selection's verdict. A killer is tried only when the selection
 holds it and it is green run alone on the original; the `apart:` line counts
