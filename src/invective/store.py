@@ -22,8 +22,8 @@ import ast
 import contextlib
 import json
 import os
-import tempfile
 import time
+import uuid
 from collections.abc import Callable, Iterable
 
 #: The directory at the project's top that holds what invective keeps.
@@ -88,11 +88,12 @@ def write_json(path: str, data: object,
     is said through *say* and is not raised."""
     folder = os.path.dirname(path)
     sweep_temporaries(folder)
-    temp = None
+    # Made as `open` makes a file, with the mode the umask leaves, and not
+    # `mkstemp`'s owner-only one: the file is the project's, and another
+    # user of a shared checkout reads it.
+    temp = os.path.join(folder, "tmp%s.json" % uuid.uuid4().hex)
     try:
-        handle, temp = tempfile.mkstemp(prefix="tmp", suffix=".json",
-                                        dir=folder)
-        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+        with open(temp, "x", encoding="utf-8", newline="\n") as fh:
             # invective: accept[equivalent: 1 -> 2] how wide the JSON is indented
             json.dump(data, fh, indent=1)
         left = RETRIES
@@ -109,9 +110,8 @@ def write_json(path: str, data: object,
         say("warning:   %s could not be written, and is left as it was: %s"
             % (path, exc))
     finally:
-        if temp is not None:
-            with contextlib.suppress(OSError):
-                os.remove(temp)
+        with contextlib.suppress(OSError):
+            os.remove(temp)
 
 
 def read_json(path: str) -> object:

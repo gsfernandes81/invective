@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import stat
 
 import pytest
 
@@ -66,6 +67,20 @@ def test_a_file_is_written_whole_and_its_temporary_is_gone(tmp_path):
     assert store.read_json(path) == {"a": 1}
     assert os.listdir(tmp_path) == ["f.json"]
     assert lines == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no mode bits")
+@pytest.mark.parametrize("umask, mode", [(0o022, 0o644), (0o027, 0o640)])
+def test_a_file_written_has_the_mode_the_umask_leaves(tmp_path, umask, mode):
+    """Not owner-only: another user of a shared checkout reads the history,
+    and a file it cannot read is a history it runs without."""
+    path = str(tmp_path / "f.json")
+    old = os.umask(umask)
+    try:
+        store.write_json(path, {}, print)
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(os.stat(path).st_mode) == mode
 
 
 def test_a_failed_replace_leaves_the_old_file_and_no_temporary(tmp_path,
