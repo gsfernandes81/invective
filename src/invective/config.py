@@ -423,7 +423,7 @@ def _read_above(top: str, fallback: bool) -> str | None:
     return loaded
 
 
-def tree_top(root: str, where: str, ref: bool = False) -> str:
+def tree_top(root: str, where: str, ref: bool) -> str:
     """The directory of *where*, the tree the mutants of the project at
     *root* are run in, that stands for the top pytest's search for settings
     may reach: *where* itself, or with *ref* the top of the ref's worktree,
