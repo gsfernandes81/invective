@@ -499,6 +499,89 @@ def test_the_verdict_is_the_first_test_to_fail(tmp_path):
         "killer": "test_two.py::test_first", "missing": [], "elsewhere": ""}
 
 
+def test_the_verdict_lists_the_tests_kept_when_asked(tmp_path):
+    """Asked for the inventory, the verdict lists the tests the run kept,
+    after every deselection, in their order: what a remembered killer has to
+    be among to be run alone."""
+    (tmp_path / "test_two.py").write_text(
+        "def test_first():\n    pass\n\n"
+        "def test_second():\n    pass\n\n"
+        "def test_third():\n    pass\n", encoding="utf-8")
+    verdict = tmp_path / "verdict.json"
+
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n", "0",
+         "-p", "pytest_invective", "-k", "not second", "test_two.py"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": SRC,
+             "INVECTIVE_VERDICT": str(verdict), "INVECTIVE_INVENTORY": "1"})
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert json.loads(verdict.read_text(encoding="utf-8")) == {
+        "killer": "", "missing": [], "elsewhere": "",
+        "selected": ["test_two.py::test_first", "test_two.py::test_third"]}
+
+
+def test_the_plugin_remembers_each_killer_and_runs_it_alone_next_time(
+        repo, tmp_path):
+    """The history is on unless the project says otherwise: the first run
+    keeps the killer, and the second runs it alone first."""
+    out = tmp_path / "reports.json"
+    args = ("--mutate", "pkg/gate.py", "--mutate-only", "raise,bool",
+            "--mutate-json", str(out), "pkg/tests/test_gate.py")
+
+    done = pytest_in(repo, *args)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert os.path.isfile(os.path.join(repo, ".invective", "history.json"))
+    (gate,) = json.loads(out.read_text(encoding="utf-8"))
+    assert [k.get("via") for k in gate["kills"]] == [None]
+
+    done = pytest_in(repo, *args)
+    assert done.returncode == 0, done.stdout + done.stderr
+    (gate,) = json.loads(out.read_text(encoding="utf-8"))
+    assert [(k["killer"], k.get("via")) for k in gate["kills"]] == [
+        (MINOR, "probe")]
+    assert "history:   1 remembered, 1 usable" in done.stdout
+
+
+def test_the_switch_turns_the_unsafe_speedups_off_and_a_flag_against_it_is_refused(
+        repo, tmp_path):
+    done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
+                     "raise", "--mutate-no-unsafe-speedups",
+                     "pkg/tests/test_gate.py")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "speedups:  no unsafe ones" in done.stdout
+    assert not os.path.exists(os.path.join(repo, ".invective"))
+
+    done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
+                     "raise", "--mutate-no-unsafe-speedups",
+                     "--mutate-workers", "2", "pkg/tests/test_gate.py")
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert ("refused: --mutate-workers 2 runs mutants at once, and "
+            "--mutate-no-unsafe-speedups turns that off") in done.stdout
+    assert "copy:" not in done.stdout
+
+
+def test_the_settings_turn_the_history_and_the_speedups_off(repo):
+    write_tree(repo, {"pyproject.toml": "[tool.pytest.ini_options]\n"
+                      "[tool.invective]\nhistory = false\n"})
+    done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
+                     "raise", "pkg/tests/test_gate.py")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "speedups:  all" in done.stdout
+    assert not os.path.exists(os.path.join(repo, ".invective"))
+
+    write_tree(repo, {"pyproject.toml": "[tool.pytest.ini_options]\n"
+                      "[tool.invective]\nunsafe-speedups = false\n"
+                      "workers = 2\n"})
+    done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
+                     "raise", "pkg/tests/test_gate.py")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "speedups:  no unsafe ones" in done.stdout
+    assert "workers:   1" in done.stdout
+    assert not os.path.exists(os.path.join(repo, ".invective"))
+
+
 #: A package the tests import, as a project lays one out under `src/`.
 PKG = {"src/pkg/__init__.py": "",
        "src/pkg/gate.py": FILES["pkg/gate.py"]}

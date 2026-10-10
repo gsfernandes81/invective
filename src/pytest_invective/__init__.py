@@ -13,7 +13,8 @@ command line then only start pytest's search for settings. When
 test not found, are written there as the session ends. That is how the
 engine learns which test killed a mutant. When `INVECTIVE_TARGET` names the
 mutated module, the verdict also says whether the tests loaded that module
-from somewhere other than the copy they ran in.
+from somewhere other than the copy they ran in. When `INVECTIVE_INVENTORY`
+is set, it also lists the tests the run kept.
 
 **Nothing from `invective` is imported unless `--mutate` is given.** pytest
 before 8.4 loads plugins before a repository's own `pythonpath` setting takes
@@ -43,6 +44,9 @@ TARGET = "INVECTIVE_TARGET"
 #: selection's run are paths pytest's search for settings starts from, and
 #: not tests to collect.
 TYPED = "INVECTIVE_TYPED"
+#: The environment variable that, set, asks the verdict to list the node ids
+#: the run kept, in their order.
+INVENTORY = "INVECTIVE_INVENTORY"
 
 #: The modules the interpreter and pytest had loaded as this plugin was
 #: imported. The engine asks for the plugin with `-p`, which pytest imports
@@ -101,6 +105,10 @@ def pytest_addoption(parser):
         "--mutate-confirm", action="store_true",
         help="with workers, confirm each kill with nothing else running, as "
              "`invective run --confirm` does")
+    group.addoption(
+        "--mutate-no-unsafe-speedups", action="store_true",
+        help="use no speedup that can give a wrong verdict on a suite outside "
+             "the contract, as `invective run --no-unsafe-speedups` does")
 
 
 def pytest_load_initial_conftests(early_config, parser, args):
@@ -145,8 +153,10 @@ def pytest_configure(config):
     # run must not write over this one's verdict.
     path = os.environ.pop(VERDICT, None)
     target = os.environ.pop(TARGET, None)
+    inventory = os.environ.pop(INVENTORY, None) is not None
     if path:
-        config.pluginmanager.register(_Verdict(config, path, target),
+        config.pluginmanager.register(_Verdict(config, path, target,
+                                               inventory),
                                       "invective-verdict")
 
     if not config.getoption("mutate"):
@@ -177,12 +187,21 @@ def _only(config):
 
 class _Verdict:
     """The first test to fail in this run, written where the engine asked,
-    with the file the tests loaded the target from when it is not the copy's.
+    with the file the tests loaded the target from when it is not the copy's,
+    and with *inventory* the tests the run kept.
     """
 
-    def __init__(self, config, path, target=None):
+    def __init__(self, config, path, target=None, inventory=False):
         self.config, self.path, self.killer = config, path, ""
-        self.target = target
+        self.target, self.inventory = target, inventory
+        self.selected = None
+
+    def pytest_collection_finish(self, session):
+        if self.inventory:
+            # Once every deselection is done, and spelt as the run's own
+            # node ids are, from where it started, the top of the copy.
+            root = str(self.config.invocation_params.dir)
+            self.selected = [_key(item, root) for item in session.items]
 
     def pytest_collectreport(self, report):
         self._note(report)
@@ -209,10 +228,13 @@ class _Verdict:
         if self.target:
             elsewhere = _loaded_elsewhere(str(self.config.invocation_params.dir),
                                           self.target)
+        said = {"killer": self.killer,
+                "missing": self.config.stash.get(_MISSING, []),
+                "elsewhere": elsewhere}
+        if self.selected is not None:
+            said["selected"] = self.selected
         with open(self.path, "w", encoding="utf-8") as fh:
-            json.dump({"killer": self.killer,
-                       "missing": self.config.stash.get(_MISSING, []),
-                       "elsewhere": elsewhere}, fh)
+            json.dump(said, fh)
 
 
 def _loaded_elsewhere(copy, target):
@@ -414,12 +436,14 @@ def pytest_runtestloop(session):
             # would run every test it could find instead.
             raise mutate.Refusal("pytest collected no tests, so there is "
                                  "nothing to notice a mutant")
-        rules = settings.load(root)
+        flags = {}
         workers = config.getoption("mutate_workers")
-        if workers is None:
-            workers = rules.workers
-        else:
+        if workers is not None:
             settings.workers(workers, "--mutate-workers")
+            flags["workers"] = ("--mutate-workers", workers)
+        rules = settings.settle(
+            settings.load(root), flags, "--mutate-no-unsafe-speedups"
+            if config.getoption("mutate_no_unsafe_speedups") else "")
         selection = [_node(item, root) for item in session.items]
         # Every run starts at the top of the copy and collects the
         # selection's files. Its pytest's search for settings starts where
@@ -437,8 +461,9 @@ def pytest_runtestloop(session):
                 root, target, typed, _only(config),
                 config.getoption("mutate_limit"), say=say,
                 ref=config.getoption("mutate_ref"), exclude=rules.exclude,
-                selection=selection, options=options, workers=workers,
-                confirm=config.getoption("mutate_confirm") or rules.confirm)
+                selection=selection, options=options, workers=rules.workers,
+                confirm=config.getoption("mutate_confirm") or rules.confirm,
+                history=rules.history, unsafe_speedups=rules.unsafe_speedups)
             reports.append(report)
             failures.extend("%s: %s" % (report["target"], failure)
                             for failure in mutate.gate(report, rules))

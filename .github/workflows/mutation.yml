@@ -40,14 +40,14 @@ jobs:
           # The gate's checks are with the acceptances', and the link
           # refusals with the copy's.
           # The engine is the largest campaign: about 300 mutants against
-          # four test files, a minute a survivor, and about one in eight a
+          # six test files, a minute a survivor, and about one in eight a
           # mutant that hangs and runs out its budget, three times the
           # baseline. `auto` runs one mutant for each of the runner's CPUs
           # (four on ubuntu-latest), and the suite is safe to run in
           # parallel, as `-n auto` runs it; even so, the campaign takes
           # about an hour.
           - module: src/invective/mutate.py
-            tests: tests/test_mutate.py tests/test_workers.py tests/test_accept.py tests/test_tree.py
+            tests: tests/test_mutate.py tests/test_workers.py tests/test_probe.py tests/test_speedups.py tests/test_accept.py tests/test_tree.py
             options: --mutate-workers auto
             timeout: 120
           - module: src/invective/sweep.py
@@ -57,7 +57,10 @@ jobs:
           - module: src/invective/accept.py
             tests: tests/test_accept.py
           - module: src/invective/config.py
-            tests: tests/test_accept.py
+            tests: tests/test_accept.py tests/test_speedups.py
+          # The history's engine tests are the probe's.
+          - module: src/invective/store.py
+            tests: tests/test_store.py tests/test_probe.py
           # The git tests are the engine's: a run on a ref.
           - module: src/invective/tree.py
             tests: tests/test_tree.py tests/test_mutate.py tests/test_workers.py

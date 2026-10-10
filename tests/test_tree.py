@@ -40,6 +40,7 @@ def test_the_copy_leaves_out_version_control_caches_and_environments(tmp_path):
         ".git/HEAD": "ref\n",
         "pkg/__pycache__/a.cpython.pyc": "",
         ".pytest_cache/v": "",
+        ".invective/history.json": "{}",
         "env-of-any-name/pyvenv.cfg": "home = /usr\n",
         "env-of-any-name/lib/site.py": "",
         "var/data.bin": "",
