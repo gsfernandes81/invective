@@ -62,7 +62,7 @@ from pytest import ExitCode
 import pytest_invective
 from invective import process, store
 from invective.accept import read as read_accepts
-from invective.config import (Config, check_pytest_settings,
+from invective.config import (SPEEDUPS, Config, check_pytest_settings,
                               load as load_config, project_root,
                               relative_to_root, settle,
                               workers as workers_of)
@@ -1347,10 +1347,14 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     run. Without *unsafe_speedups*, neither of these runs, nor more than one
     worker (`config.settle`).
     """
-    # The engine is held to the switch too, whoever called it.
-    held = settle(Config(workers=workers, history=history,
-                         unsafe_speedups=unsafe_speedups))
-    workers, history = held.workers, held.history
+    # **The engine is held to the switch too, whoever called it.** Every
+    # speedup of `config.SPEEDUPS` is a keyword here, and is read below only
+    # from *speed*, as the switch leaves it: one registered there is held to
+    # the switch with no list here to keep.
+    given = locals()
+    speed = settle(Config(unsafe_speedups=unsafe_speedups, **{
+        speedup.field: given[speedup.field] for speedup in SPEEDUPS
+        if speedup.field is not None}))
     try:
         src_rel = relative_to_root(target, root)
     except ValueError:
@@ -1427,7 +1431,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             raise Refusal("no mutation sites in %s for %s"
                           % (src_rel, ",".join(only or sorted(OPERATORS))))
 
-        count = workers_of(workers, most=len(sites))
+        count = workers_of(speed.workers, most=len(sites))
         # Whether a run of other tests than the selection, given *tests* to
         # start pytest's search for its settings, leaves out nothing they
         # would have chosen: on the command line, an option among the tests
@@ -1438,7 +1442,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # reads (a diff's headers, the history's keys), unlike `target`,
         # which is a path on this machine and keeps its native separators.
         shown = src_rel.replace(os.sep, "/")
-        remembered = store.History.load(root, shown, say) if history else None
+        remembered = (store.History.load(root, shown, say) if speed.history
+                      else None)
         # **Every copy before the first run**, so that none holds what a
         # run left behind: a cache, a database, a file a test writes.
         places = [first]
@@ -1512,7 +1517,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # The tests the first run kept, for the history's killers to be
         # found among: asked for only when there is a history to read.
         alone, got = pool.on(0, functools.partial(baseline, inventory=True)
-                             if history else baseline)
+                             if speed.history else baseline)
         if not got.ok:
             raise Refusal(
                 "the selection is RED on the unmutated tree, so every mutant "

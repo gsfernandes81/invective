@@ -10,12 +10,14 @@ setting has.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from invective import config, mutate
 
 from conftest import write_tree
-from test_workers import GATE, GATE_TESTS
+from test_workers import GATE, GATE_TESTS, GREEN, Campaign
 
 
 def _main(tree, monkeypatch, *args, setting=""):
@@ -93,3 +95,26 @@ def test_settle_turns_off_each_unsafe_speedup_and_keeps_the_rest():
         config.Config(workers=1, history=False, unsafe_speedups=False))
     assert config.settle(config.Config(), {"workers": ("--w", "3")}) == (
         config.Config(workers="3"))
+
+
+def test_a_direct_call_holds_every_speedup_to_the_switch(tree, monkeypatch):
+    """Every speedup of `config.SPEEDUPS` reaches `settle` as a direct
+    caller gave it, one registered after the engine was written as well
+    (here a stand-in on `confirm`), and the run goes by what `settle` leaves
+    of each: one worker, and no history."""
+    extra = config.Speedup("confirms each kill alone", "confirm", True, False)
+    speedups = config.SPEEDUPS + (extra,)
+    monkeypatch.setattr(config, "SPEEDUPS", speedups)
+    monkeypatch.setattr(mutate, "SPEEDUPS", speedups)
+    run = Campaign(tree, monkeypatch, said=lambda r: GREEN)
+    given = []
+    real = mutate.settle
+    monkeypatch.setattr(mutate, "settle", lambda settings, *rest: (
+        given.append(settings), real(settings, *rest))[1])
+    on = {s.field: (not s.off) if isinstance(s.off, bool) else s.off + 1
+          for s in speedups if s.field is not None}
+    report = run(**on, unsafe_speedups=False)
+    (settings,) = given
+    assert {field: getattr(settings, field) for field in on} == on
+    assert report["workers"] == 1 and len(run.places) == 1
+    assert not os.path.exists(os.path.join(tree, ".invective"))
