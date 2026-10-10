@@ -810,6 +810,34 @@ def test_a_ref_given_to_the_sweep_reaches_the_engine(repo, monkeypatch):
     assert cmd[cmd.index("--ref") + 1] == "main"
 
 
+def test_workers_given_to_the_sweep_reach_each_engine(repo, monkeypatch):
+    engine = _Engine(0, stdout="1/1 killed (100.0%), 0 survived\n")
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
+
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR, "--workers", "auto",
+                "--modules", _p("pkg/gate.py")])
+    sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                "--modules", _p("pkg/gate.py")])
+
+    (given, _kwargs), (default, _kwargs) = engine.commands
+    assert given[given.index("--workers") + 1] == "auto"
+    # Without the flag, each engine reads `workers` from the settings.
+    assert "--workers" not in default
+
+
+def test_a_count_of_workers_that_cannot_be_right_stops_the_sweep_once(
+        repo, monkeypatch, capsys):
+    engine = _Engine()
+    monkeypatch.setattr(sweep.subprocess, "Popen", engine)
+
+    assert sweep.main(["--src", "pkg", "--tests-dir", TESTS_DIR,
+                       "--workers", "0"]) == 2
+
+    assert engine.commands == []
+    assert ('refused: --workers must be a whole number above 0 or "auto", '
+            "not '0'") in capsys.readouterr().err
+
+
 def test_a_terminated_sweep_terminates_the_engine_it_started(repo, monkeypatch):
     """`subprocess.run` kills its child outright on any exception, with the
     engine's copy stranded. The engine is told to stop instead and waited

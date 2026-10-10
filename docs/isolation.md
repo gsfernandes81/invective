@@ -75,7 +75,15 @@ A run stopped by ^C or SIGTERM removes its copy (`process.stopping_on_sigterm`
 turns the signal into an interrupt that unwinds through the copy's
 `finally`). A second SIGTERM during the cleanup is ignored, so the removal
 is not cut short; SIGKILL is the way to stop a cleanup that hangs, and the
-marker covers what that leaves.
+marker covers what that leaves. With more than one worker, a refusal, ^C or
+SIGTERM stops every worker's run and removes every copy.
+
+While the workers run (one or more), a ^C or SIGTERM is held where it lands and
+raised where the main thread waits for them (`mutate._Held`). Raised where it
+lands, it can cut a lock's release short, and a worker that needs the lock to
+end would wait for ever, and the removal of the copies with it. A SIGTERM held
+with a ^C is the one raised, whichever landed first, so a supervisor's SIGTERM
+still ends the process by SIGTERM.
 
 The sweep forwards a SIGTERM to its engine, waits for the engine's copy to
 be gone, then dies by the signal itself. `pytest --mutate` ends the
@@ -85,6 +93,35 @@ On Windows, `TerminateProcess` ends a process outright; the marker is what
 covers a terminated run there. As a pid namespace's init (a container's
 entry point), both `invective run` and `invective sweep` remove the copy
 and exit 128 + the signal's number.
+
+## Workers
+
+With `workers` above 1, each worker has a copy of its own, made from the first
+(`tree.working_tree`'s `source`), or a worktree of the one commit `--ref`
+resolves to. The first copy runs the selection alone, then every copy runs it at
+once, and each must be green: a selection green alone and red at once is
+refused, as one whose tests are not safe to run in parallel or depend on their
+order.
+
+The copies' runs go on side by side, so the suite is taken to be one whose
+tests are independent of their order and safe to run in parallel, the bar
+pytest-xdist sets. A test that holds a port, a fixed path or a database another
+copy's run uses can fail and score a kill that is no mutant's, or pass and let
+a mutant survive. For a suite that breaks this, the verdicts are not
+guaranteed; with one worker, the runs are one at a time.
+
+Confirmation is the diagnosis, asked for with `--confirm` (`--mutate-confirm`,
+`confirm` in `[tool.invective]`). Every kill is then confirmed after the last
+mutant has run, with nothing else running, in the first copy restored to the
+original: its killer alone, which must also pass alone on the original, or else
+the whole selection, whose verdict stands. Before any kill is confirmed, the
+whole selection is run there once more, and the run is refused unless it
+passes. A kill its killer does not make alone is named in the report
+(`unreproduced`) and in the closing lines: its killer is likely a test that
+depends on its order or on another copy's run. A kill with no killer to run
+alone (a kill by time, by a module, or under `--tests` holding an option) that
+the whole selection lets through is named too, as `mutate.NO_KILLER`, and its
+survivor carries `confirmed` as a kill does. A survivor is not run again.
 
 ## The import-from-outside refusal
 

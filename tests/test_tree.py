@@ -872,3 +872,26 @@ def test_a_stop_during_the_removal_of_the_worktree_still_removes_the_copy(
         with trees.git_ref(repo, "HEAD"):
             pass
     assert _left(tmp_path) == []
+
+
+def test_a_copy_of_a_copy_is_marked_for_the_project(tmp_path):
+    """A worker's copy is made from the first: the same files, `exclude`
+    matched from its top as from the project's, and a marker of its own
+    that names this process and the project, never the first copy's."""
+    root = os.path.realpath(tmp_path / "project")
+    write_tree(root, {"pkg/a.py": "x = 1\n", "var/big.dat": "x\n",
+                      "pkg/var/kept.txt": "y\n"})
+    with trees.working_tree(root, ("var/*",)) as first:
+        # What is in the first copy and not in the project: excluded from
+        # the first copy's top all the same, and a marker the clone must
+        # not take for its own.
+        write_tree(first, {"var/late.dat": "x\n", trees.MARKER: json.dumps(
+            {"pid": os.getpid(), "root": root, "ns": None, "first": True})})
+        with trees.working_tree(root, ("var/*",), source=first) as clone:
+            assert _files(clone) == ["pkg/a.py", "pkg/var/kept.txt"]
+            with open(os.path.join(clone, trees.MARKER),
+                      encoding="utf-8") as fh:
+                marker = json.load(fh)
+            assert marker == {"pid": os.getpid(), "root": root,
+                              "ns": trees._namespace()}
+    assert not os.path.exists(first) and not os.path.exists(clone)

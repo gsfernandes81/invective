@@ -5,6 +5,8 @@
     fail-on-survivors = true   # a survivor no comment accepts fails the run
     max-accepted = 10          # so do more accepted survivors than this
     exclude = ["var/*"]        # left out of the copy the mutants are run in
+    workers = 1                # mutants run at once; "auto" for one per CPU
+    confirm = false            # with workers, confirm each kill alone
 
 An unknown key is a refusal, so that a misspelt one is not read as absent.
 
@@ -22,6 +24,7 @@ reaches, is refused.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from collections.abc import Iterator, Sequence
 from itertools import islice
@@ -38,10 +41,67 @@ class Config(NamedTuple):
     fail_on_survivors: bool = False
     max_accepted: int | None = None
     exclude: tuple[str, ...] = ()
+    workers: int | str = 1
+    confirm: bool = False
 
 
-_KEYS = {"fail-on-survivors": bool, "max-accepted": int, "exclude": list}
+#: Each key and its type; `workers`, a count or "auto", has a check of its
+#: own (`workers`).
+_KEYS = {"fail-on-survivors": bool, "max-accepted": int, "exclude": list,
+         "workers": (int, str), "confirm": bool}
 _SAID = {bool: "true or false", int: "a whole number", list: "a list"}
+
+#: The most copies "auto" makes: each is a whole copy of the project, and
+#: past this the mutants' texts, made one at a time, are what a campaign
+#: waits for.
+AUTO_MOST = 8
+
+#: The CPU quota of this process's cgroup (v2): `max` or a quota, then the
+#: period it is counted over, both in microseconds.
+_CPU_MAX = "/sys/fs/cgroup/cpu.max"
+
+
+def workers(value: int | str, name: str = "workers",
+            most: int | None = None) -> int:
+    """How many mutants *value* runs at once: a whole number above 0, as a
+    number or as its digits, the way a command line gives it; or "auto",
+    one for each CPU this process may use (`_cpus`), at most `AUTO_MOST`.
+    Either is at most *most*, the number of mutants: a worker more would
+    run its copy's baseline beside the others and then nothing. Anything
+    else is a refusal naming *name*."""
+    if value == "auto":
+        return max(1, min(_cpus(), AUTO_MOST,
+                          AUTO_MOST if most is None else most))
+    count = value
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        count = int(value)
+    # `bool` is an `int` to isinstance, and `true` is no count.
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        return count if most is None else max(1, min(count, most))
+    raise Refusal('%s must be a whole number above 0 or "auto", not %r'
+                  % (name, value))
+
+
+def _cpus() -> int:
+    """The CPUs this process may run on, and no more than its cgroup's
+    quota allows: a container given two CPUs of a host's sixty-four sees all
+    sixty-four, and a copy for each would only queue for the two."""
+    if hasattr(os, "process_cpu_count"):
+        count = os.process_cpu_count()
+    elif hasattr(os, "sched_getaffinity"):
+        count = len(os.sched_getaffinity(0))
+    else:
+        count = None
+    count = count or os.cpu_count() or 1
+    try:
+        with open(_CPU_MAX, encoding="ascii") as fh:
+            quota, period = fh.read().split()
+        if quota != "max":
+            count = min(count, max(1, int(quota) // int(period)))
+    except (OSError, ValueError):
+        # No cgroup v2 file to read: Windows, macOS, or a cgroup v1 host.
+        pass
+    return count
 
 
 #: What marks a repository's own directory, the version-control directories
@@ -314,6 +374,9 @@ def load(root: str) -> Config:
         if kind is None:
             raise Refusal("[tool.invective] has no setting %r; it has %s"
                           % (key, ", ".join(sorted(_KEYS))))
+        if key == "workers":
+            workers(value, "[tool.invective] workers")
+            continue
         # `bool` is an `int` to isinstance, and `true` is no count.
         if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
             raise Refusal("[tool.invective] %s must be %s, not %r"
@@ -322,4 +385,5 @@ def load(root: str) -> Config:
     if not all(isinstance(pattern, str) for pattern in exclude):
         raise Refusal("[tool.invective] exclude must be a list of strings")
     return Config(table.get("fail-on-survivors", False),
-                  table.get("max-accepted"), tuple(exclude))
+                  table.get("max-accepted"), tuple(exclude),
+                  table.get("workers", 1), table.get("confirm", False))

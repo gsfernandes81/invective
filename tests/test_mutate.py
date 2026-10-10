@@ -1726,7 +1726,7 @@ def test_a_run_given_its_settings_file_is_not_searched_for_one(tmp_path,
     member = os.path.join(top, "m")
     runs = []
 
-    def timed_out(where, tests, timeout, selection, options, target):
+    def timed_out(where, tests, timeout, selection, options, target, *rest):
         runs.append(options)
         return mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT")
 

@@ -93,6 +93,14 @@ def pytest_addoption(parser):
         "--mutate-ref", metavar="REF",
         help="make the mutants from this git commit, branch or tag instead of "
              "the files as they stand")
+    group.addoption(
+        "--mutate-workers", metavar="N",
+        help="run N mutants at once, each in a copy of its own, as `invective "
+             "run --workers` does")
+    group.addoption(
+        "--mutate-confirm", action="store_true",
+        help="with workers, confirm each kill with nothing else running, as "
+             "`invective run --confirm` does")
 
 
 def pytest_load_initial_conftests(early_config, parser, args):
@@ -407,6 +415,11 @@ def pytest_runtestloop(session):
             raise mutate.Refusal("pytest collected no tests, so there is "
                                  "nothing to notice a mutant")
         rules = settings.load(root)
+        workers = config.getoption("mutate_workers")
+        if workers is None:
+            workers = rules.workers
+        else:
+            settings.workers(workers, "--mutate-workers")
         selection = [_node(item, root) for item in session.items]
         # Every run starts at the top of the copy and collects the
         # selection's files. Its pytest's search for settings starts where
@@ -424,7 +437,8 @@ def pytest_runtestloop(session):
                 root, target, typed, _only(config),
                 config.getoption("mutate_limit"), say=say,
                 ref=config.getoption("mutate_ref"), exclude=rules.exclude,
-                selection=selection, options=options)
+                selection=selection, options=options, workers=workers,
+                confirm=config.getoption("mutate_confirm") or rules.confirm)
             reports.append(report)
             failures.extend("%s: %s" % (report["target"], failure)
                             for failure in mutate.gate(report, rules))

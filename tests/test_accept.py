@@ -118,6 +118,86 @@ def test_a_setting_that_cannot_be_right_is_refused(tmp_path, table, says):
     assert says in str(caught.value)
 
 
+def test_confirm_is_read_from_the_settings(tmp_path):
+    write_tree(str(tmp_path), {"pyproject.toml": (
+        "[tool.invective]\nconfirm = true\n")})
+    assert config.load(str(tmp_path)) == Config(confirm=True)
+    write_tree(str(tmp_path), {"pyproject.toml": (
+        "[tool.invective]\nconfirm = 1\n")})
+    with pytest.raises(Refusal) as caught:
+        config.load(str(tmp_path))
+    assert "confirm must be true or false" in str(caught.value)
+
+
+@pytest.mark.parametrize("value, setting", [("3", 3), ('"auto"', "auto")])
+def test_workers_is_a_count_or_auto(tmp_path, value, setting):
+    write_tree(str(tmp_path), {"pyproject.toml": (
+        "[tool.invective]\nworkers = %s\n" % value)})
+    assert config.load(str(tmp_path)) == Config(workers=setting)
+
+
+@pytest.mark.parametrize("value, said", [
+    ("true", "True"), ("0", "0"), ("-1", "-1"), ('"autos"', "'autos'"),
+    ("2.0", "2.0"), ("[2]", "[2]")])
+def test_a_count_of_workers_that_cannot_be_right_is_refused_by_name(
+        tmp_path, value, said):
+    write_tree(str(tmp_path), {"pyproject.toml": (
+        "[tool.invective]\nworkers = %s\n" % value)})
+    with pytest.raises(Refusal) as caught:
+        config.load(str(tmp_path))
+    assert str(caught.value) == (
+        '[tool.invective] workers must be a whole number above 0 or "auto", '
+        "not %s" % said)
+
+
+@pytest.mark.parametrize("value, count", [(1, 1), (12, 12), ("12", 12),
+                                          ("auto", 6)])
+def test_a_count_of_workers_is_taken_as_given_or_as_its_digits(
+        monkeypatch, value, count):
+    monkeypatch.setattr(config, "_cpus", lambda: 6)
+    assert config.workers(value) == count
+    # A cap on the mutants there are applies to every count.
+    assert config.workers(value, most=2) == min(count, 2)
+    assert config.workers(value, most=0) == 1
+
+
+def test_auto_is_at_most_AUTO_MOST(monkeypatch):
+    monkeypatch.setattr(config, "_cpus", lambda: 64)
+    assert config.workers("auto") == config.AUTO_MOST == 8
+    assert config.workers("auto", most=50) == 8
+    assert config.workers("auto", most=0) == 1
+
+
+@pytest.mark.parametrize("quota, cpus", [
+    (None, 6), ("max 100000\n", 6), ("200000 100000\n", 2),
+    ("250000 100000\n", 2), ("50000 100000\n", 1), ("garbled\n", 6)])
+def test_auto_counts_the_cpus_this_process_may_use_and_its_quota(
+        tmp_path, monkeypatch, quota, cpus):
+    """A container given two CPUs of a host's sixty-four sees every one of
+    them, and a worker for each would only queue for the two."""
+    cpu_max = tmp_path / "cpu.max"
+    if quota is not None:
+        cpu_max.write_text(quota, encoding="ascii")
+    monkeypatch.setattr(config, "_CPU_MAX", str(cpu_max))
+    monkeypatch.setattr(config.os, "process_cpu_count", lambda: 6,
+                        raising=False)
+    assert config._cpus() == cpus
+
+
+def test_without_a_count_of_its_own_cpus_auto_asks_the_affinity(monkeypatch,
+                                                                tmp_path):
+    monkeypatch.setattr(config, "_CPU_MAX", str(tmp_path / "none"))
+    monkeypatch.delattr(config.os, "process_cpu_count", raising=False)
+    monkeypatch.setattr(config.os, "sched_getaffinity", lambda pid: {0, 1, 2},
+                        raising=False)
+    assert config._cpus() == 3
+    monkeypatch.delattr(config.os, "sched_getaffinity")
+    monkeypatch.setattr(config.os, "cpu_count", lambda: 5)
+    assert config._cpus() == 5
+    monkeypatch.setattr(config.os, "cpu_count", lambda: None)
+    assert config._cpus() == 1
+
+
 def _marker_above(path):
     """A marker of a project's top in a directory above *path*, or None."""
     here = os.path.dirname(path)
@@ -538,3 +618,4 @@ REPORT = {"survivors": [{}], "accepted": [{}, {}], "stale": [{}]}
 ])
 def test_the_gate_fails_a_run_only_by_the_project_s_rules(rules, failures):
     assert mutate.gate(REPORT, rules) == failures
+

@@ -62,6 +62,32 @@ def test_each_module_is_measured_against_the_collected_tests(repo, tmp_path):
     assert "1/2 killed (50.0%), 1 survived" in done.stdout
 
 
+def test_workers_are_given_as_invective_run_takes_them(repo, tmp_path):
+    """Two copies, and asked to, the kill confirmed by its killer alone."""
+    out = tmp_path / "reports.json"
+
+    done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
+                     "raise,bool", "--mutate-workers", "2", "--mutate-confirm",
+                     "--mutate-json", str(out), "pkg/tests/test_gate.py")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    (gate,) = json.loads(out.read_text(encoding="utf-8"))
+    assert gate["workers"] == 2
+    assert [(k["killer"], k["confirmed"]) for k in gate["kills"]] == [
+        (MINOR, "alone")]
+    assert done.stdout.count("copy:") == 2
+
+
+def test_a_count_of_workers_that_cannot_be_right_is_refused_by_name(repo):
+    done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-workers",
+                     "none", "pkg/tests/test_gate.py")
+
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert ('refused: --mutate-workers must be a whole number above 0 or '
+            "\"auto\", not 'none'") in done.stdout
+    assert "copy:" not in done.stdout
+
+
 def test_the_mutants_meet_only_the_tests_pytest_selected(repo, tmp_path):
     """`-k adult` leaves out the test of the refusal, so the refusal's mutant
     survives: the selection is what pytest collected, not the file named."""

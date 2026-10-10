@@ -23,13 +23,13 @@ uv add --dev git+https://github.com/gsfernandes81/invective
 To pin a release by tag:
 
 ```console
-uv add --dev git+https://github.com/gsfernandes81/invective@v0.2.1
+uv add --dev git+https://github.com/gsfernandes81/invective@v0.3.0
 ```
 
 Or install the release's wheel, which needs no build backend:
 
 ```console
-uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.2.1/invective-0.2.1-py3-none-any.whl
+uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.3.0/invective-0.3.0-py3-none-any.whl
 ```
 
 It needs pytest 8.2 or later in the same environment, and supports every
@@ -53,8 +53,32 @@ spaced through the file), and `--json report.json` writes the full report.
 `--ref` runs on a git commit, branch or tag instead of the files as they
 stand.
 
+`--workers N` runs N mutants at once, each in a copy of its own; `auto` is
+one per available CPU, at most 8. Either is at most one per mutant, and the
+`workers:` line says how many ran. `workers` in `[tool.invective]` sets the
+default, which is 1.
+
+With more than one worker, the suite has to be one whose tests are
+independent of their order and safe to run in parallel, the bar pytest-xdist
+sets. A test that shares a port, a fixed path or a database with its copy in
+another worker's run, or that needs another test to run before it, can kill a
+mutant or let one survive because of what else ran, and for such a suite the
+verdicts are not guaranteed. A selection green alone and red when every copy
+runs it at once is refused for that.
+
+`--confirm` (`confirm` in `[tool.invective]`) looks for such tests. Once the
+last mutant has run, every kill is run again with nothing else running: its
+killer alone, or else the whole selection, whose verdict stands. The entry
+carries `confirmed` (`alone` or `full`) in the report, a survivor's too when the
+whole selection let the mutant through. A kill its killer does not make alone
+is listed under `unreproduced` and in the closing lines, with that killer, the
+test to look at; so is a kill with no killer to run alone (a kill by time, by a
+module, or under `--tests` holding an option) that the whole selection lets
+through. With one worker there is nothing to confirm.
+
 ```text
 copy:      /tmp/invective-k2m1x9ab
+workers:   1
 project:   /home/me/proj
 target:    src/pkg/gate.py
 tests:     tests/test_gate.py
@@ -77,13 +101,13 @@ diff of the source file against the mutant.
 
 ## What is measured
 
-The mutants are written in a copy of the project made as the run starts, so
-your files never hold one. A run stopped by ^C or SIGTERM removes its copy;
-one killed outright leaves a copy marked with its owner, which the next
-invective to start removes. The copy is of the files as they stand:
-uncommitted edits and new files are measured. It leaves out version control,
-caches and virtual environments; `exclude` in `[tool.invective]` leaves out
-anything else, such as large data.
+The mutants are written in a copy of the project (one per worker) made as the
+run starts, so your files never hold one. A run stopped by ^C or SIGTERM
+removes its copies; one killed outright leaves them marked with their owner,
+which the next invective to start removes. The copy is of the files as they
+stand: uncommitted edits and new files are measured. It leaves out version
+control, caches and virtual environments; `exclude` in `[tool.invective]`
+leaves out anything else, such as large data.
 
 To measure a commit instead, give `--ref` (`--mutate-ref` from pytest) a
 commit, branch or tag. That is the one use invective makes of git.
@@ -99,11 +123,12 @@ pytest --mutate src/pkg/gate.py tests/test_gate.py -k refus
 
 The mutants are run against exactly the tests pytest collected, so `-k`, `-m`,
 `--deselect` and node ids all narrow the selection. `--mutate` can be given
-more than once; `--mutate-only`, `--mutate-limit`, `--mutate-json` and
-`--mutate-ref` work as `--only`, `--limit`, `--json` and `--ref` do for
-`invective run`. The tests are not run as an ordinary session: pytest's last
-line says how many were deselected or that no tests ran. The report is the
-section above it.
+more than once; `--mutate-only`, `--mutate-limit`, `--mutate-json`,
+`--mutate-ref`, `--mutate-workers` and `--mutate-confirm` work as `--only`,
+`--limit`, `--json`, `--ref`, `--workers` and `--confirm` do for `invective
+run`. The tests are not run as an ordinary session: pytest's last line says
+how many were deselected or that no tests ran. The report is the section above
+it.
 
 pytest-xdist's workers have to be off for the outer run (`-n 0`): with
 workers on, `--mutate` stops at startup with a usage error (exit 4).
@@ -138,7 +163,8 @@ The sweep tries `RAISE` only and at most 25 mutants per module unless told
 otherwise with `--only` and `--limit`. `--json` writes the results as JSON;
 each measured entry carries a `report` key with the engine's full report for
 that module (survivors, accepted, stale and kills as data, with `diff`).
-`--ref` runs on a git commit, branch or tag.
+`--ref` runs on a git commit, branch or tag. `--workers N` gives each module's
+engine N workers.
 
 `--modules` sweeps only the named module files instead of discovering them
 under `--src`:
@@ -199,6 +225,8 @@ fail-on-survivors = true   # a survivor no comment accepts, or a stale
                            # acceptance, fails the run
 max-accepted = 10          # so do more accepted survivors than this
 exclude = ["var/*"]        # left out of the copy
+workers = 1                # mutants run at once; "auto" for one per CPU
+confirm = false            # with workers, confirm each kill alone
 ```
 
 | command | exit code | meaning |
@@ -219,7 +247,7 @@ read as absent.
 - **It refuses a failing selection.** If the chosen tests do not pass before
   any edit, every mutant would count as killed and the score would be 100%
   for nothing. The same goes for a selection that collects no tests.
-- **It runs pytest only**, one mutant at a time, in a fresh process each.
+- **It runs pytest only**, in a fresh process for each mutant.
 
 ## Developing invective
 

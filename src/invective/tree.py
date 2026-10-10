@@ -46,11 +46,18 @@ MARKER = ".invective-owner"
 
 
 @contextlib.contextmanager
-def working_tree(root: str, exclude: tuple[str, ...] = ()):
+def working_tree(root: str, exclude: tuple[str, ...] = (),
+                 source: str | None = None):
     """A copy of *root* as it stands, uncommitted edits and untracked files
     included. *exclude* holds glob patterns, matched against paths relative to
-    *root* with `/` between their parts, of anything else to leave out."""
+    *root* with `/` between their parts, of anything else to leave out.
+
+    With *source*, a copy of *root* made earlier, the copy is made of that
+    instead, so that every copy of one campaign holds the same files: *root*
+    is still the project, in the marker and to the reaper, and *exclude* is
+    matched against the same paths, from the top of *source*."""
     root = os.path.abspath(root)
+    origin = root if source is None else os.path.abspath(source)
     reap(root)
     # Between here and the marker, a kill leaves an empty, unmarked
     # `invective-*` directory that no reaper touches. The window is
@@ -62,7 +69,7 @@ def working_tree(root: str, exclude: tuple[str, ...] = ()):
         left = set()
         for name in names:
             full = os.path.join(directory, name)
-            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            rel = os.path.relpath(full, origin).replace(os.sep, "/")
             if (os.path.isdir(full) and not os.path.islink(full)
                     and (name in SKIPPED
                          or os.path.isfile(os.path.join(full, "pyvenv.cfg"))
@@ -71,10 +78,12 @@ def working_tree(root: str, exclude: tuple[str, ...] = ()):
                          # never end.
                          or os.path.samefile(full, where))):
                 left.add(name)
-            elif directory == root and name == MARKER:
+            elif directory == origin and name == MARKER:
                 # A marker of the project's own -- the leaked copy of
                 # something, being measured -- would be copied over the live
-                # one, and a reaper would read a stale pid there.
+                # one, and a reaper would read a stale pid there; *source*'s
+                # is the marker of another copy, whose removal is not this
+                # one's.
                 left.add(name)
             elif any(fnmatch.fnmatchcase(rel, pattern) for pattern in exclude):
                 left.add(name)
@@ -85,10 +94,10 @@ def working_tree(root: str, exclude: tuple[str, ...] = ()):
         # copying still leaves a marked directory.
         _mark(where, root)
         try:
-            shutil.copytree(root, where, symlinks=True, ignore=ignore,
+            shutil.copytree(origin, where, symlinks=True, ignore=ignore,
                             dirs_exist_ok=True)
         except (shutil.Error, OSError) as exc:
-            raise Refusal("could not copy %s: %s" % (root, exc)) from exc
+            raise Refusal("could not copy %s: %s" % (origin, exc)) from exc
         yield where
     finally:
         _remove(where)
@@ -121,6 +130,13 @@ def git_ref(root: str, ref: str):
         yield os.path.join(tree, *prefix.split("/")) if prefix else tree
     finally:
         _discard(root, where)
+
+
+def head(where: str) -> str:
+    """The commit checked out in *where*, a copy `git_ref` made: the one
+    every other copy of the campaign is made of, however its ref has moved
+    since."""
+    return _git(where, "rev-parse", "HEAD").strip()
 
 
 def _remove(where: str) -> None:
