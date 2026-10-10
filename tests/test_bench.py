@@ -555,7 +555,7 @@ def test_the_finding_wraps_at_90_and_holds_no_dash_aside():
 
 def test_the_finding_states_the_numbers_and_the_verdicts():
     text = compare.finding(_info(), [_row()])
-    assert "| R40 | 4 | 3 of 3 | 305.0 s | 100.0 s | 3.05x | - | 1.2% |" in text
+    assert "| R40 | 4 | 3 of 3 | 305.0 s | 100.0 s | 3.05x | none | 1.2% |" in text
     joined = _joined(text)
     assert "R40 at N = 4 runs 3.05x faster after than before" in joined
     assert "same kills, survivors and acceptances" in joined

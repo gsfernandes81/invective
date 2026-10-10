@@ -731,9 +731,13 @@ def finding(info: dict, rows: Sequence[Row]) -> str:
         floor = "-" if r.floor is None else "%.1f%%" % (100 * r.floor.f)
         processes = ("-" if r.processes_before is None or r.processes_after is None
                      else "%g / %g" % (r.processes_before, r.processes_after))
-        lines.append("> | %s | %d | %d of %d | %s | %s | %s | %s | %s | %s |" % (
-            r.case, r.workers, r.kept, r.asked, _s(r.before), _s(r.after),
-            _x(r.whole), _x(r.touchable), floor, processes))
+        # "none" for an empty cell: a quoted table row is prose to
+        # `test_docs`, which reads a lone `-` between spaces as a dash aside.
+        lines.append("> | %s | %d | %d of %d | %s |" % (
+            r.case, r.workers, r.kept, r.asked, " | ".join(
+                "none" if cell == "-" else cell for cell in (
+                    _s(r.before), _s(r.after), _x(r.whole), _x(r.touchable), floor,
+                    processes))))
     touched = [r for r in rows if r.touchable is not None]
     if touched:
         # W and U, and what the floor needs of the touchable speedup, so
@@ -745,7 +749,8 @@ def finding(info: dict, rows: Sequence[Row]) -> str:
         for r in touched:
             needs = r.touchable_needs
             lines.append("> | %s | %d | %s | %s | %s | %s |" % (
-                r.case, r.workers, _s(r.before), _s(r.touchable_part),
+                r.case, r.workers, _s(r.before),
+                _s(r.touchable_part).replace("-", "none"),
                 _x(r.touchable), "inside f" if needs is None else _x(needs)))
     lines.append(">")
     said = []
