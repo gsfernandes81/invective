@@ -129,7 +129,8 @@ With the history on (`history` in `[tool.invective]`, on unless set false), each
 mutant whose last killer is remembered (`store.History`) is first run against
 that test alone. It counts as a kill only when pytest says a test failed
 (`ExitCode.TESTS_FAILED`), the test that failed is the one remembered, and
-nothing it was given is missing. Anything else leaves the mutant to the whole
+nothing it was given is missing. Anything else leaves the mutant to its
+narrower selection when coverage is on (below), and then to the whole
 selection, run as if nothing had been tried.
 
 Before the first mutant, each such test is run alone on the original, at the

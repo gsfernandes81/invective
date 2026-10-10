@@ -248,6 +248,43 @@ def test_a_probe_that_says_nothing_leaves_the_mutant_to_the_narrowed_run(
     assert run.lines[i + 1].startswith("coverage:")
 
 
+def test_a_probe_s_kill_leaves_no_narrowed_run(tree, monkeypatch):
+    """The remembered killer fails alone on the mutant: that is its kill,
+    and the covering tests are not run on it."""
+    from test_probe import RAISE, remember
+
+    remember(tree, {RAISE: MINOR})
+    run = Covered(tree, monkeypatch, REFUSAL, said=lambda r: (
+        killed_by(MINOR) if r.text and "pass" in r.text else GREEN))
+    report = run(1, only=["RAISE"], history=True, coverage=True)
+
+    assert [(k["killer"], k["via"]) for k in report["kills"]] == [
+        (MINOR, "probe")]
+    assert [(r.kind, r.tests) for r in run.runs if r.text] == [
+        ("probe", (MINOR,))]
+
+
+@pytest.mark.parametrize("narrowed, kept", [
+    (killed_by(MINOR), MINOR),
+    (mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT"), None)])
+def test_a_narrowed_kill_is_remembered_as_any_kill_is(tree, monkeypatch,
+                                                      narrowed, kept):
+    """The remembered killer passes alone on the mutant and the covering
+    test kills it: the history keeps that test in its place. A kill by
+    time names no test to run alone, so the old killer is forgotten and
+    nothing takes its place."""
+    from test_probe import RAISE, remember, remembered
+
+    remember(tree, {RAISE: ADULT})
+    run = Covered(tree, monkeypatch, REFUSAL, said=lambda r: (
+        narrowed if r.text and "pass" in r.text and r.kind == "narrowed"
+        else GREEN))
+    report = run(1, only=["RAISE"], history=True, coverage=True)
+
+    assert [k["via"] for k in report["kills"]] == ["coverage"]
+    assert remembered(tree).get(RAISE) == kept
+
+
 def test_no_unsafe_speedups_turns_coverage_off(tree, monkeypatch):
     """Asked for coverage with the unsafe speedups off, a direct call runs
     no coverage run and no narrowed run, and says only the safe ones run;

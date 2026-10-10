@@ -94,8 +94,9 @@ the project's top (a kill by time, by a module that would not import, or with no
 test named is not), and the next run tries it alone on the same mutant before
 the whole selection. When it fails there, as itself, the mutant is killed for
 the price of one test's run: the entry carries `"via": "probe"` in the report,
-and the closing lines count such kills. Anything else (it passes, another test fails, it
-runs out of time) leaves the mutant to the whole selection, so a survivor is
+and the closing lines count such kills. Anything else (it passes, another test
+fails, it runs out of time) leaves the mutant to the tests that cover its lines
+when coverage is on (below), and then to the whole selection, so a survivor is
 always the whole selection's verdict. A killer is tried only when the selection
 holds it and it is green run alone on the original; the `apart:` line counts
 those not green there and names up to three, each likely a test that depends on
