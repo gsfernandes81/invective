@@ -47,7 +47,7 @@ jobs:
           # parallel, as `-n auto` runs it; even so, the campaign takes
           # about an hour.
           - module: src/invective/mutate.py
-            tests: tests/test_mutate.py tests/test_workers.py tests/test_probe.py tests/test_speedups.py tests/test_accept.py tests/test_tree.py tests/test_coverage_selection.py
+            tests: tests/test_mutate.py tests/test_workers.py tests/test_probe.py tests/test_speedups.py tests/test_accept.py tests/test_tree.py tests/test_coverage_selection.py tests/test_cache.py
             options: --mutate-workers auto
             timeout: 120
           # The map's reading, and the engine's use of it.
@@ -61,9 +61,10 @@ jobs:
             tests: tests/test_accept.py
           - module: src/invective/config.py
             tests: tests/test_accept.py tests/test_speedups.py
-          # The history's engine tests are the probe's.
+          # The history's engine tests are the probe's, and the cache's
+          # are its own.
           - module: src/invective/store.py
-            tests: tests/test_store.py tests/test_probe.py
+            tests: tests/test_store.py tests/test_probe.py tests/test_cache.py
           # The git tests are the engine's: a run on a ref.
           - module: src/invective/tree.py
             tests: tests/test_tree.py tests/test_mutate.py tests/test_workers.py
