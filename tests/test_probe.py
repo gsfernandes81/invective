@@ -233,18 +233,23 @@ def test_the_header_names_three_of_the_tests_not_green_apart():
         "the whole selection" % mutate.NOT_GREEN_APART)
 
 
-def test_a_killer_missing_on_the_original_is_never_probed_and_not_named(
+def test_a_killer_missing_on_the_original_is_never_probed_and_is_named(
         tree, monkeypatch):
+    """A killer the run alone cannot find, as the plugin says it: the one
+    test the file names is not there, so nothing is collected (pytest's 5),
+    and the run is not green. It is not tried, and the header names it."""
     remember(tree, {RAISE: MINOR})
     said = world({RAISE: [MINOR]})
     run = Probing(tree, monkeypatch, lambda r: (
-        GREEN._replace(missing=(MINOR,)) if r.alone and r.text is None
-        else said(r)))
+        mutate.Verdict(False, ExitCode.NO_TESTS_COLLECTED, "no tests ran", "",
+                       missing=(MINOR,))
+        if r.alone and r.text is None else said(r)))
     report = run()
     assert run.probed() == []
     assert "via" not in report["kills"][0]
     assert "history:   1 remembered, 0 usable" in run.lines
-    assert not any(line.startswith("apart:") for line in run.lines)
+    assert ("apart:     1 %s: %s; --no-unsafe-speedups runs only the whole "
+            "selection" % (mutate.NOT_GREEN_APART, MINOR)) in run.lines
 
 
 @pytest.mark.parametrize("probe", [
