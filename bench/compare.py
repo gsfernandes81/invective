@@ -1354,10 +1354,6 @@ class Session:
         with open(os.path.join(self.work, OWNER), "w", encoding="utf-8") as fh:
             fh.write(str(os.getpid()))
         setup_log = os.path.join(self.logs, "setup.log")
-        for side in self.sides.values():
-            side.sha = check(["git", "-C", self.repo, "rev-parse", "--verify",
-                              "--end-of-options", side.ref + "^{commit}"],
-                             "resolving %s" % side.ref).strip()
         projects = {self.projects[c.project] for c in self.cases}
         requires = sorted({r for p in projects for r in p.requires}
                           | set(self.args.with_))
@@ -2215,9 +2211,17 @@ def main(argv: list[str] | None = None) -> int:
             "after": Side("after", args.after,
                           settings=common + parse_pairs(args.set_after, "--set-after"),
                           env=common_env + parse_pairs(args.env_after, "--env-after"))}
+        for tool in ("git", "uv"):
+            if shutil.which(tool) is None:
+                raise BenchError("%s is not on PATH, and the tool needs it" % tool)
         if args.repo is None:
             args.repo = check(["git", "-C", HERE, "rev-parse", "--show-toplevel"],
                               "finding this repository").strip()
+        # Before anything is made: a ref that is not there leaves nothing.
+        for side in sides.values():
+            side.sha = check(["git", "-C", args.repo, "rev-parse", "--verify",
+                              "--end-of-options", side.ref + "^{commit}"],
+                             "resolving %s" % side.ref).strip()
         if args.out is None:
             stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             args.out = os.path.join(args.repo, "bench", "results", stamp)

@@ -715,6 +715,26 @@ def test_a_run_is_ok_only_when_it_ran_and_reported():
     assert compare.status_of(_timed(-15, timed_out=True), True) == "timeout"
 
 
+def test_a_ref_that_is_not_there_is_refused_before_anything_is_made(tmp_path, capsys):
+    """Each mistyped ref left an empty results directory behind."""
+    out = tmp_path / "out"
+    assert compare.main(["no-such-ref-at-all", "HEAD", "--repo", ROOT,
+                         "--out", str(out)]) == 2
+    assert "resolving no-such-ref-at-all" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_a_missing_tool_is_refused_by_name(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(compare.shutil, "which",
+                        lambda name: None if name == "uv" else "/bin/" + name)
+    # The fixture's case, so that a tool that went on anyway would run that
+    # and not a real one.
+    assert compare.main(["HEAD", "HEAD", "--repo", ROOT, "--quick",
+                         "--cases-file", str(_project(tmp_path)), "--case", "F",
+                         "--out", str(tmp_path / "out")]) == 2
+    assert "uv is not on PATH" in capsys.readouterr().err
+
+
 def test_an_out_directory_with_something_in_it_is_refused(tmp_path, capsys):
     """Rows appended to another session's files would be read as its own."""
     (tmp_path / "runs.tsv").write_text("seq\n", encoding="utf-8")
