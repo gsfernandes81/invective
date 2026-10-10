@@ -155,6 +155,23 @@ def test_a_narrower_selection_red_on_the_original_is_not_used(
     assert seen[0].reds == (MINOR,)
 
 
+def test_the_tests_red_on_the_original_are_named_once_and_only_tests():
+    """Two selections red by one test name it once; a run cut at its time,
+    a module that would not import and a run that collected nothing name no
+    test, and are left out of the plan all the same."""
+    candidates = [mutate.Candidate("narrowed-%d.txt" % i, (MINOR,), (i,))
+                  for i in range(6)]
+    gated = [(verdict, 1.0) for verdict in (
+        killed_by(MINOR), killed_by(MINOR),
+        mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT"),
+        killed_by("pkg/tests/test_gate.py", ExitCode.INTERRUPTED),
+        killed_by("", ExitCode.NO_TESTS_COLLECTED), GREEN)]
+    narrowing = mutate._narrowing(candidates, gated, "")
+    assert narrowing.reds == (MINOR,)
+    assert narrowing.plan == {5: mutate.Narrowed("narrowed-5.txt",
+                                                 frozenset({MINOR}), 1.0)}
+
+
 def test_a_narrower_selection_short_of_a_test_is_not_used_and_not_red(
         tree, monkeypatch):
     seen = []

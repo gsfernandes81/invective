@@ -1299,10 +1299,10 @@ class Narrowed(NamedTuple):
 class Narrowing(NamedTuple):
     """What the coverage run came to: each mutant's narrower selection, by
     its site's index (*plan*), and why there is none when coverage was not
-    used (*unused*, `""` when it was). *reds* are the node ids that failed
-    first in each narrower selection that was not green on the original,
-    run apart from the rest of the selection; each such selection is left
-    out of *plan*."""
+    used (*unused*, `""` when it was). *reds* are the tests, each once, that
+    failed first in a narrower selection not green on the original, run
+    apart from the rest of the selection; each such selection is left out
+    of *plan*."""
 
     plan: dict[int, Narrowed]
     unused: str
@@ -1422,7 +1422,10 @@ def _narrowing(candidates: list[Candidate], gated: list, unused: str
     plan, reds = {}, []
     for candidate, (verdict, took) in zip(candidates, gated, strict=True):
         if not verdict.ok:
-            reds.append(verdict.killer)
+            # Named by its test, once: a run cut at its time, or one that
+            # collected nothing or not a module, names no test.
+            if "::" in verdict.killer and verdict.killer not in reds:
+                reds.append(verdict.killer)
         elif not verdict.missing:
             plan.update(dict.fromkeys(candidate.idxs, Narrowed(
                 candidate.path, frozenset(candidate.tests), took)))
