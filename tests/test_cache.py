@@ -530,6 +530,30 @@ def test_a_harness_or_signal_kill_is_never_cached(tree, monkeypatch, verdict):
     assert run.ran() == [RAISE]
 
 
+def test_a_kill_by_a_conftest_that_will_not_import_is_never_cached(
+        tree, monkeypatch):
+    """(SD) pytest stops at it with the code of a usage error: a kill once
+    the original passes in the same copy, and one the cache does not keep,
+    whose verdict field it reads past."""
+    stopped = mutate.Verdict(False, ExitCode.USAGE_ERROR, "", "",
+                             conftest="pkg/tests/conftest.py")
+
+    def said(run):
+        if run.text is not None and BY_TEXT[run.text] == RAISE:
+            return stopped
+        return GREEN
+
+    report = Caching(tree, monkeypatch, said)()
+    (kill,) = report["kills"]
+    assert (kill["killer"], kill["code"]) == ("pkg/tests/conftest.py",
+                                              ExitCode.USAGE_ERROR)
+    assert RAISE not in kept(tree) and len(kept(tree)) == 5
+    run = Caching(tree, monkeypatch, said)
+    again = run()
+    assert run.ran() == [RAISE]
+    assert _without_via(again) == report
+
+
 # --------------------------------------------------------------------------
 # Resume
 

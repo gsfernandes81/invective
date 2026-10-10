@@ -238,8 +238,9 @@ What is kept (`store.sound`): a survivor, accepted or not, which only the whole
 selection makes; and a kill with a test or module named and pytest's code for a test
 that failed or a module that would not import (`ExitCode.TESTS_FAILED`,
 `ExitCode.INTERRUPTED`). A kill by time, a narrowed one included, by a signal or a
-crash, with another of pytest's codes, or with nothing named is never kept: each can be
-the machine's load or memory. Nor is a refusal, a run cut short, or a verdict read back,
+crash, with another of pytest's codes (a conftest that would not import among them), or
+with nothing named is never kept: each can be the machine's load or memory, or the
+harness. Nor is a refusal, a run cut short, or a verdict read back,
 which put again would lose its `origin`.
 
 ### The read rule
