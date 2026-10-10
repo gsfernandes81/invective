@@ -35,6 +35,20 @@ setting on one side:
 uv run bench/compare.py HEAD HEAD --case R40 --workers 4 --set-after confirm=true
 ```
 
+A feature that remembers (history, a cache) is measured warm, each side's
+timed run following an untimed one; a cache's re-run is also held to the
+pytest processes it must start:
+
+```console
+uv run bench/compare.py main HEAD --case R40 --workers 1,4 --unit warm --expect-rerun-processes
+```
+
+The recorded R40 run at four workers with `--confirm` follows the pairs:
+
+```console
+uv run bench/compare.py main HEAD --case R40 --workers 1,4 --confirm-run
+```
+
 | Flag | What it sets |
 |---|---|
 | `--case NAME` | a case of `bench/cases.toml`; repeated or comma-separated; R40 when none is given |
@@ -52,6 +66,10 @@ uv run bench/compare.py HEAD HEAD --case R40 --workers 4 --set-after confirm=tru
 | `--threshold X` | the discard threshold, in place of 1.15 and its adjustment |
 | `--timeout SECONDS` | a run past this is ended and recorded as a timeout |
 | `--out DIR` | where the results go; when not given, a new directory named for the time, under `results` in `bench/` |
+| `--unit cold`, `--unit warm` | each slot of a pair one timed run, or an untimed run then the timed one (below); cold when not given |
+| `--same-processes` | exit 4 unless the two sides of every pair started as many pytest processes |
+| `--expect-rerun-processes` | with `--unit warm`: exit 4 unless each timed run after starts its untimed run's runs of the original and one run a kill by time |
+| `--confirm-run` | after the pairs, one recorded run of each case by the after side at the largest count of workers, with `--confirm`; exit 5 unless it names nothing it could not reproduce |
 | `--setup-only` | set up and check every project, then stop before the first pair |
 | `--keep` | keep the worktrees, venvs and copies, to look at a run that failed |
 
@@ -65,17 +83,27 @@ deselections rather than replacing them.
 - **Both sides alike.** Each side gets a git worktree of its ref and a uv venv
   of the same Python, holding invective from that worktree, pytest, and what the
   cases' projects require, with every module compiled when it is installed. Each
-  project is copied once for each side, so the two never share a tree. Every run
-  is cold: the copy's `.invective` is removed before it. Both sides are timed by
+  project is copied once for each side, so the two never share a tree. Every
+  slot of a pair starts from nothing remembered: the copy's `.invective` is
+  removed before it, whether or not the engine keeps anything there. Both sides
+  are timed by
   the same instrument, the tool's own (`bench/instrument.py`), whichever ref it
   measures. At one worker no `--workers` flag is passed, so a ref older than the
   workers can be the before side.
-- **Order.** A pair is one run of each side, of one case at one count of
+- **Order.** A pair is one slot of each side, of one case at one count of
   workers, back to back. Pairs alternate their order: before then after, then
   after then before, and so on, so a drift in one direction favours neither side.
   The pairs of a case and count run one after another, in a block.
+- **Units.** Cold (the default), a slot is one timed run. Warm (`--unit warm`),
+  a slot is an untimed run and then the timed one, which has the untimed run's
+  `.invective` to remember, so the timed run is what a user's second run costs:
+  a warm history, or a cache's unchanged re-run. Only the timed run is compared,
+  and the untimed run's wall time, status, verdict counts and pytest processes
+  are recorded beside it. Its verdicts are held to the case's as well, since a
+  run that remembers must come to what the one it remembers did. An untimed run
+  that fails ends its slot with no timed run.
 - **Drift.** A calibration (a plain serial `pytest -q -p no:cacheprovider` of one
-  fixed file, in the before venv) runs just before and just after every run, and
+  fixed file, in the before venv) runs just before and just after every slot, and
   back to back runs share the one between them. Calibrations are compared only
   with each other: a pair is discarded when the largest calibration around its
   runs is more than 1.15x the smallest (`compare.THRESHOLD` in the tool). When a
@@ -120,6 +148,26 @@ deselections rather than replacing them.
   whole-run speedup if the touchable part cost nothing. With several workers the
   runs overlap, their seconds are no part of the wall time, and only the whole
   run is reported.
+- **The pytest processes.** Each row the instrument records is one
+  `mutate.Copy.run`, which starts one pytest process, so a run's rows are the
+  count of processes it started. It needs no timing, so it decides before any
+  ratio does. Every pair's two counts are recorded and reported.
+  `--same-processes` fails the session (exit 4) on a pair whose sides differ, or
+  where a side has no count: a cold run of a feature with nothing remembered
+  starts what the engine before it started. `--expect-rerun-processes` holds
+  each timed run of the after side, in a warm unit, to the count a re-run that
+  remembers every verdict it can starts: the untimed run's runs of the original
+  on the campaign's own selection (every copy's baseline, and the first copy's
+  second run of the original that several workers make), and one run for each
+  mutant the untimed run killed by time, since a kill by time is never
+  remembered. A gate or a probe runs a file of its own and is not counted among
+  them.
+- **The confirm run.** `--confirm-run` adds, after the pairs, one cold run of
+  each case by the after side at the largest count of workers with `--confirm`.
+  It is recorded, never judged on time, and its report's `unreproduced` must be
+  empty: a kill it names, or a report that does not say (an engine without
+  confirmation, a run that died), fails the session with exit 5. One worker
+  confirms nothing, so it needs a count above 1 in `--workers`.
 
 Each run's wall time is taken around the process on every platform; its user
 and system seconds come from `resource`, which Windows lacks. A ^C or a SIGTERM
@@ -133,10 +181,10 @@ The out directory holds:
 
 | File | What it holds |
 |---|---|
-| `summary.txt` | the sides, the machine, the table below, and every discard, died run and inconclusive case |
+| `summary.txt` | the sides, the machine, the table below, every discard, died run and inconclusive case, every process count not met, and the confirm run's `unreproduced` |
 | `finding.md` | a `**Finding:**` block in `CLAUDE.md`'s form, ready to paste |
-| `runs.tsv` | one row a run: wall, user, sys, the calibrations before and after it, exit code, status, verdict counts, instrumented runs, fixed seconds, phase marks |
-| `pairs.tsv` | one row a pair: its order, calibrations, spread, status and ratios |
+| `runs.tsv` | one row a slot: wall, user, sys, the calibrations before and after it, exit code, status, verdict counts, pytest processes (`runs`), fixed seconds, phase marks, the unit; for a warm slot the untimed run's (`prime_`) wall, exit, status, verdict counts and processes; the expected processes of a re-run; and for the confirm run (pair `confirm`) how many kills it could not reproduce |
+| `pairs.tsv` | one row a pair: its order, calibrations, spread, status, ratios, and each side's pytest processes with whether they agree and what a re-run was expected to start |
 | `calibrations.tsv` | one row a calibration: its runs and their median |
 | `verdicts.txt` | every verdict difference, when there is one |
 | `session.json` | the command line, the conditions and each block's pair statuses |
@@ -159,6 +207,7 @@ The summary's columns, one row for each case and count of workers:
 | `touchable`, `ceiling` | the same median for the touchable part, and the ceiling, at one worker |
 | `f (nbrs)` | the noise floor and how many neighbours it came from |
 | `beyond 2f` | whether the speedup is further than `2f` from 1, or `inconclusive` |
+| `processes` | the median pytest processes before and after, `differ` when a kept pair's two differed, and `rerun ok` or `rerun missed` under `--expect-rerun-processes` |
 | `verdicts` | `equal`, `load only`, or `DIFFER` |
 
 | Exit status | Meaning |
@@ -167,6 +216,8 @@ The summary's columns, one row for each case and count of workers:
 | 1 | a run died, or a case is inconclusive |
 | 2 | the setup or a calibration failed, or the arguments are wrong |
 | 3 | the verdicts differ |
+| 4 | a pytest process count asked for was not met |
+| 5 | the confirm run named a kill it could not reproduce, or did not say |
 | 130 | stopped by a ^C or a SIGTERM |
 
 The Finding's closing sentences state the numbers. Before it goes into a page,
@@ -218,9 +269,15 @@ under 3 s), and such a case is recorded, not judged on time.
 - **The sides.** Before is `main` at the pull request's base, after is its
   head; or the head twice, with its feature off before and on after.
 - **The conditions.** Python 3.14, `confirm` off in every judged run (its
-  default), cold runs, and the cases and counts of workers the pull request's
-  plan judges, three pairs each. R40 at one and at four workers is in every
+  default), the unit the rule judges (cold, or warm for a feature that
+  remembers), and the cases and counts of workers the pull request's plan
+  judges, three pairs each. R40 at one and at four workers is in every
   measurement, since it is the case the noise floor of more-itertools comes from.
+- **The proxies.** Where the plan has a process count, it is checked before any
+  time: `--same-processes` on cold runs of a feature with nothing remembered,
+  `--expect-rerun-processes` on a cache's warm re-runs.
+- **The confirm run.** `--confirm-run` with four among the counts of workers,
+  and its `unreproduced` empty, or explained in the Finding.
 - **The numbers.** The whole-run speedup first; for a speedup rule, the
   touchable speedup and the ceiling beside it, with `--fixed` naming what the
   change cannot touch. Every number with its floor `f` and the count of
