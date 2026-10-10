@@ -23,13 +23,13 @@ uv add --dev git+https://github.com/gsfernandes81/invective
 To pin a release by tag:
 
 ```console
-uv add --dev git+https://github.com/gsfernandes81/invective@v0.5.0
+uv add --dev git+https://github.com/gsfernandes81/invective@v0.5.1
 ```
 
 Or install the release's wheel, which needs no build backend:
 
 ```console
-uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.5.0/invective-0.5.0-py3-none-any.whl
+uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.5.1/invective-0.5.1-py3-none-any.whl
 ```
 
 It needs pytest 8.2 or later in the same environment, and supports every
@@ -187,7 +187,7 @@ only the tests that ran its lines, found by one coverage run of the selection
 before the first mutant. It needs the `coverage` extra:
 
 ```console
-uv add --dev --extra coverage git+https://github.com/gsfernandes81/invective@v0.5.0
+uv add --dev --extra coverage git+https://github.com/gsfernandes81/invective@v0.5.1
 ```
 
 A mutant is run against its narrower selection at the mutants' whole budget
