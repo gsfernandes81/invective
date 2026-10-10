@@ -32,6 +32,10 @@ on its own code, one module per job. To do that for one module locally:
 uv run pytest -n 0 --mutate src/invective/mutate.py tests/test_mutate.py
 ```
 
+A local run keeps each killer in `.invective/` at the checkout's top
+(`docs/memory.md`), and the next one tries it first. The workflow's runs start
+with none.
+
 ## Judging a check
 
 A new or changed test must be seen red before its green is trusted: run

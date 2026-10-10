@@ -1070,3 +1070,31 @@ def test_settings_above_a_repository_refuse_a_ref_once(tmp_path, monkeypatch,
             in said.err)
     assert engine.commands == []
     assert "measured" not in said.out
+
+
+def test_the_sweep_forwards_the_switch_and_refuses_a_flag_against_it(
+        tree, monkeypatch, capsys):
+    monkeypatch.chdir(tree)
+    commands = []
+
+    def engine(cmd, cwd):
+        commands.append(cmd)
+        return 0, "1/1 killed (100.0%), 0 survived\n", ""
+
+    monkeypatch.setattr(sweep, "_engine", engine)
+    assert sweep.main(["--src", "pkg", "--tests-dir", "pkg/tests",
+                       "--modules", "pkg/gate.py",
+                       "--no-unsafe-speedups"]) == 0
+    (cmd,) = commands
+    assert "--no-unsafe-speedups" in cmd
+    assert sweep.main(["--src", "pkg", "--tests-dir", "pkg/tests",
+                       "--modules", "pkg/gate.py", "--workers", "2",
+                       "--no-unsafe-speedups"]) == 2
+    assert len(commands) == 1
+    assert ("--workers 2 runs mutants at once, and --no-unsafe-speedups "
+            "turns that off") in capsys.readouterr().err
+    write_tree(tree, {"pyproject.toml": "[tool.pytest.ini_options]\n"
+                      "[tool.invective]\nunsafe-speedups = false\n"})
+    assert sweep.main(["--src", "pkg", "--tests-dir", "pkg/tests",
+                       "--modules", "pkg/gate.py", "--workers", "2"]) == 2
+    assert len(commands) == 1

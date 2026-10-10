@@ -35,7 +35,7 @@ from invective.process import OWN_GROUP, stop
 #: name, by the `pyvenv.cfg` every one of them holds.
 SKIPPED = frozenset({".git", ".hg", ".svn", ".tox", ".nox", "__pycache__",
                      ".pytest_cache", ".mypy_cache", ".ruff_cache",
-                     "node_modules"})
+                     "node_modules", ".invective"})
 
 #: The file at the top of a copy's directory that names its owner:
 #: `{"pid": ..., "root": ..., "ns": ...}`, the process the copy belongs to,

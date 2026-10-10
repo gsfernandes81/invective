@@ -1564,9 +1564,10 @@ def test_a_quick_session_measures_one_pair_and_leaves_nothing_behind(tmp_path):
 @sessions
 def test_a_warm_session_with_every_check_and_a_confirm_run(tmp_path):
     """Warm slots, both process checks and the confirm run, end to end. The
-    engine at HEAD remembers nothing, so its re-run starts every process its
-    untimed run did: the sides agree, the re-run's count is missed, and the
-    session fails on that alone."""
+    engine at HEAD remembers each mutant's killer, not its verdict, so its
+    re-run starts more processes than a re-run that remembered every verdict
+    would: the sides agree, the re-run's count is missed, and the session
+    fails on that alone."""
     cases = _project(tmp_path)
     done = subprocess.run(_argv(tmp_path, cases, "--unit", "warm", "--workers", "2",
                                 "--same-processes", "--expect-rerun-processes",
@@ -1579,17 +1580,20 @@ def test_a_warm_session_with_every_check_and_a_confirm_run(tmp_path):
     runs = _rows(out / "runs.tsv")
     assert [(r["pair"], r["side"], r["unit"]) for r in runs] == [
         ("1", "before", "warm"), ("1", "after", "warm"), ("confirm", "after", "cold")]
-    # Three runs of the original (the first copy's twice, as two workers
-    # make it) and two mutants: five processes, every time; a re-run that
-    # remembered would start the three and nothing for the two kills, which
-    # were not by time.
-    assert [(r["prime_runs"], r["runs"]) for r in runs[:2]] == [("5", "5")] * 2
+    # The untimed run: three runs of the original (the first copy's twice,
+    # as two workers make it) and two mutants, five processes. The timed
+    # run has the untimed run's history: the three, the one killer of both
+    # mutants run alone on the original, and that killer alone on each
+    # mutant, which kills it, six. A re-run that remembered every verdict
+    # would start the three and nothing for the two kills, which were not
+    # by time.
+    assert [(r["prime_runs"], r["runs"]) for r in runs[:2]] == [("5", "6")] * 2
     assert all(r["prime_status"] == "ok" and r["prime_killed"] == "2" for r in runs[:2])
     assert runs[2]["unreproduced"] == "0"
     pair, = _rows(out / "pairs.tsv")
     assert (pair["same_processes"], pair["expected_processes"]) == ("True", "3")
     summary = (out / "summary.txt").read_text(encoding="utf-8")
-    assert "5/5 rerun missed" in summary
+    assert "6/6 rerun missed" in summary
     assert "F N=2 with --confirm (ok): unreproduced []" in summary
     finding = _joined((out / "finding.md").read_text(encoding="utf-8"))
     assert "The F run at N = 2 with `--confirm` named no kill" in finding

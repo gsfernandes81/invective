@@ -25,8 +25,8 @@ import subprocess
 import sys
 import tempfile
 
-from invective.config import (check_pytest_settings, project_root,
-                              relative_to_root, workers)
+from invective.config import (check_pytest_settings, load, project_root,
+                              relative_to_root, settle, workers)
 from invective.errors import Refusal
 from invective.mutate import UNREACHED
 from invective.process import (STOP_GRACE, Terminated, exit_by,
@@ -307,6 +307,9 @@ def parser():
     ap.add_argument("--workers", metavar="N",
                     help="give each module's engine N workers, as `invective "
                          "run --workers` takes them")
+    ap.add_argument("--no-unsafe-speedups", action="store_true",
+                    help="give each module's engine --no-unsafe-speedups, as "
+                         "`invective run` takes it")
     return ap
 
 
@@ -330,8 +333,12 @@ def main(argv=None):
             if not os.path.isdir(os.path.join(root, given)):
                 raise Refusal("%s is not a directory under %s" % (given, root))
         # Once here, rather than as a refusal by every module's engine.
+        flags = {}
         if args.workers is not None:
             workers(args.workers, "--workers")
+            flags["workers"] = ("--workers", args.workers)
+        settle(load(root), flags, "--no-unsafe-speedups"
+               if args.no_unsafe_speedups else "")
         _settle(args, root)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
@@ -391,6 +398,8 @@ def _sweep(args, root):
             cmd += ["--ref", args.ref]
         if args.workers is not None:
             cmd += ["--workers", args.workers]
+        if args.no_unsafe_speedups:
+            cmd.append("--no-unsafe-speedups")
         # **The per-module report is asked for and read, not re-derived from
         # the printed summary.** The summary carries a score; the engine's
         # JSON carries which test killed each mutant, and that is the half

@@ -23,13 +23,13 @@ uv add --dev git+https://github.com/gsfernandes81/invective
 To pin a release by tag:
 
 ```console
-uv add --dev git+https://github.com/gsfernandes81/invective@v0.3.0
+uv add --dev git+https://github.com/gsfernandes81/invective@v0.4.0
 ```
 
 Or install the release's wheel, which needs no build backend:
 
 ```console
-uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.3.0/invective-0.3.0-py3-none-any.whl
+uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.4.0/invective-0.4.0-py3-none-any.whl
 ```
 
 It needs pytest 8.2 or later in the same environment, and supports every
@@ -58,13 +58,14 @@ one per available CPU, at most 8. Either is at most one per mutant, and the
 `workers:` line says how many ran. `workers` in `[tool.invective]` sets the
 default, which is 1.
 
-With more than one worker, the suite has to be one whose tests are
-independent of their order and safe to run in parallel, the bar pytest-xdist
-sets. A test that shares a port, a fixed path or a database with its copy in
-another worker's run, or that needs another test to run before it, can kill a
-mutant or let one survive because of what else ran, and for such a suite the
-verdicts are not guaranteed. A selection green alone and red when every copy
-runs it at once is refused for that.
+The suite has to be one whose tests are independent of their order and, with
+more than one worker, safe to run in parallel: the bar pytest-xdist sets. A
+test that needs another test to run before it can fail when it is run alone (a
+remembered killer, below), and one that shares a port, a fixed path or a
+database with its copy in another worker's run can kill a mutant or let one
+survive because of what else ran. For such a suite the verdicts are not
+guaranteed. A selection green alone and red when every copy runs it at once is
+refused for that.
 
 `--confirm` (`confirm` in `[tool.invective]`) looks for such tests. Once the
 last mutant has run, every kill is run again with nothing else running: its
@@ -76,12 +77,41 @@ test to look at; so is a kill with no killer to run alone (a kill by time, by a
 module, or under `--tests` holding an option) that the whole selection lets
 through. With one worker there is nothing to confirm.
 
+`--no-unsafe-speedups` (`unsafe-speedups = false` in `[tool.invective]`) is for a
+suite outside that bar. It turns off every speedup that can give a wrong verdict
+there, so that each mutant is run against the whole selection, in its order, one
+at a time: workers, and the remembered killer. A speedup that cannot (each
+mutant made from one parse of the module) stays on; `config.SPEEDUPS` says
+which side each one is on. A value in `[tool.invective]` that would turn an
+unsafe speedup back on gives way to it, and a flag that would (`--workers 4`) is
+refused. Set in `[tool.invective]`, the switch is undone there only: no flag
+turns it off. The `speedups:` line says which unsafe speedups a run uses
+(`unsafe ones on: workers, history`), that it uses none (`no unsafe ones on`),
+or that they are off (`safe ones only`).
+
+The test that killed each mutant is remembered in `.invective/history.json` at
+the project's top (a kill by time, by a module that would not import, or with no
+test named is not), and the next run tries it alone on the same mutant before
+the whole selection. When it fails there, as itself, the mutant is killed for
+the price of one test's run: the entry carries `"via": "probe"` in the report,
+and the closing lines count such kills. Anything else (it passes, another test fails, it
+runs out of time) leaves the mutant to the whole selection, so a survivor is
+always the whole selection's verdict. A killer is tried only when the selection
+holds it and it is green run alone on the original; the `apart:` line counts
+those not green there and names up to three, each likely a test that depends on
+its order. The `history:` line says how many mutants have a killer remembered
+and how many of those are tried. On the command line, a killer is tried only
+when `--tests` holds paths and node ids alone (`history:   not used: --tests
+has options`). `history = false` in `[tool.invective]` turns it off. The
+directory holds a `.gitignore` of its own, so nothing in it is committed.
+
 ```text
 copy:      /tmp/invective-k2m1x9ab
 workers:   1
 project:   /home/me/proj
 target:    src/pkg/gate.py
 tests:     tests/test_gate.py
+speedups:  unsafe ones on: history
 baseline:  green in 0.4s
 mutants:   6
 
@@ -97,17 +127,20 @@ killed run points at the file's own lines; an entry that carries
 The JSON report also names, for every killed mutant, the first test that
 failed on it. Each mutant's run reports that through invective's own pytest
 plugin. Every entry (survivor, kill or accepted) carries a `diff`: a unified
-diff of the source file against the mutant.
+diff of the source file against the mutant. At its top, `workers` says how many
+workers ran and `unsafe_speedups` whether the unsafe speedups were allowed
+(false with `--no-unsafe-speedups`).
 
 ## What is measured
 
 The mutants are written in a copy of the project (one per worker) made as the
-run starts, so your files never hold one. A run stopped by ^C or SIGTERM
-removes its copies; one killed outright leaves them marked with their owner,
-which the next invective to start removes. The copy is of the files as they
-stand: uncommitted edits and new files are measured. It leaves out version
-control, caches and virtual environments; `exclude` in `[tool.invective]`
-leaves out anything else, such as large data.
+run starts, so your files never hold one. The one thing a run writes in the
+project is `.invective/`, the killers it remembers, which the copy leaves out.
+A run stopped by ^C or SIGTERM removes its copies; one killed outright leaves
+them marked with their owner, which the next invective to start removes. The
+copy is of the files as they stand: uncommitted edits and new files are
+measured. It leaves out version control, caches and virtual environments;
+`exclude` in `[tool.invective]` leaves out anything else, such as large data.
 
 To measure a commit instead, give `--ref` (`--mutate-ref` from pytest) a
 commit, branch or tag. That is the one use invective makes of git.
@@ -124,11 +157,11 @@ pytest --mutate src/pkg/gate.py tests/test_gate.py -k refus
 The mutants are run against exactly the tests pytest collected, so `-k`, `-m`,
 `--deselect` and node ids all narrow the selection. `--mutate` can be given
 more than once; `--mutate-only`, `--mutate-limit`, `--mutate-json`,
-`--mutate-ref`, `--mutate-workers` and `--mutate-confirm` work as `--only`,
-`--limit`, `--json`, `--ref`, `--workers` and `--confirm` do for `invective
-run`. The tests are not run as an ordinary session: pytest's last line says
-how many were deselected or that no tests ran. The report is the section above
-it.
+`--mutate-ref`, `--mutate-workers`, `--mutate-confirm` and
+`--mutate-no-unsafe-speedups` work as `--only`, `--limit`, `--json`, `--ref`,
+`--workers`, `--confirm` and `--no-unsafe-speedups` do for `invective run`. The
+tests are not run as an ordinary session: pytest's last line says how many were
+deselected or that no tests ran. The report is the section above it.
 
 pytest-xdist's workers have to be off for the outer run (`-n 0`): with
 workers on, `--mutate` stops at startup with a usage error (exit 4).
@@ -164,7 +197,7 @@ otherwise with `--only` and `--limit`. `--json` writes the results as JSON;
 each measured entry carries a `report` key with the engine's full report for
 that module (survivors, accepted, stale and kills as data, with `diff`).
 `--ref` runs on a git commit, branch or tag. `--workers N` gives each module's
-engine N workers.
+engine N workers, and `--no-unsafe-speedups` is passed on to each engine.
 
 `--modules` sweeps only the named module files instead of discovering them
 under `--src`:
@@ -227,6 +260,8 @@ max-accepted = 10          # so do more accepted survivors than this
 exclude = ["var/*"]        # left out of the copy
 workers = 1                # mutants run at once; "auto" for one per CPU
 confirm = false            # with workers, confirm each kill alone
+history = true             # try each mutant's last killer alone first
+unsafe-speedups = true     # false: only those safe for any suite
 ```
 
 | command | exit code | meaning |

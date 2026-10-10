@@ -188,7 +188,9 @@ def test_without_a_count_of_its_own_cpus_auto_asks_the_affinity(monkeypatch,
                                                                 tmp_path):
     monkeypatch.setattr(config, "_CPU_MAX", str(tmp_path / "none"))
     monkeypatch.delattr(config.os, "process_cpu_count", raising=False)
-    monkeypatch.setattr(config.os, "sched_getaffinity", lambda pid: {0, 1, 2},
+    # This process's own affinity, which pid 0 names.
+    monkeypatch.setattr(config.os, "sched_getaffinity",
+                        lambda pid: {0, 1, 2} if pid == 0 else {0},
                         raising=False)
     assert config._cpus() == 3
     monkeypatch.delattr(config.os, "sched_getaffinity")

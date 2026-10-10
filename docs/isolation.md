@@ -32,7 +32,7 @@ included (`tree.working_tree`). `--ref` checks out a commit instead
 
 What is skipped (`tree.SKIPPED`): `.git`, `.hg`, `.svn`, `.tox`, `.nox`,
 `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`,
-`node_modules`, and any directory holding `pyvenv.cfg`.
+`node_modules`, `.invective`, and any directory holding `pyvenv.cfg`.
 
 `__pycache__` and `.pytest_cache` matter for correctness: a copied `.pyc`
 whose mtime is in the future and whose size matches a mutant's would run
@@ -108,7 +108,7 @@ tests are independent of their order and safe to run in parallel, the bar
 pytest-xdist sets. A test that holds a port, a fixed path or a database another
 copy's run uses can fail and score a kill that is no mutant's, or pass and let
 a mutant survive. For a suite that breaks this, the verdicts are not
-guaranteed; with one worker, the runs are one at a time.
+guaranteed; with `--no-unsafe-speedups`, the runs are one at a time.
 
 Confirmation is the diagnosis, asked for with `--confirm` (`--mutate-confirm`,
 `confirm` in `[tool.invective]`). Every kill is then confirmed after the last
@@ -122,6 +122,45 @@ depends on its order or on another copy's run. A kill with no killer to run
 alone (a kill by time, by a module, or under `--tests` holding an option) that
 the whole selection lets through is named too, as `mutate.NO_KILLER`, and its
 survivor carries `confirmed` as a kill does. A survivor is not run again.
+
+## The remembered killer
+
+With the history on (`history` in `[tool.invective]`, on unless set false), each
+mutant whose last killer is remembered (`store.History`) is first run against
+that test alone. It counts as a kill only when pytest says a test failed
+(`ExitCode.TESTS_FAILED`), the test that failed is the one remembered, and
+nothing it was given is missing. Anything else leaves the mutant to the whole
+selection, run as if nothing had been tried.
+
+Before the first mutant, each such test is run alone on the original, at the
+mutants' time budget (`mutate._gate`), and only one that passes there, with
+nothing missing, is tried. With more than one worker these runs are made side
+by side, as the mutants' are. A test the selection does not hold is never
+tried: from pytest, the tests it collected; on the command line, the tests the
+first baseline kept (`INVECTIVE_INVENTORY`), and only when `--tests` holds
+paths and node ids alone, since an option among them (`-k`) would be left out
+of a run of one test.
+
+The probe relies on the suite's tests being independent of their order: such
+a test fails alone as it fails in the whole selection, so its kill is the whole
+selection's. In a suite whose tests depend on their order, it can be a kill the
+whole selection in its order would not make. Either way the entry is marked
+`"via": "probe"`, and the closing lines count those kills. A test not green
+alone on the original, where the whole selection passed, is likely such a
+test, and the header's `apart:` line names it (`mutate.NOT_GREEN_APART`).
+With `--confirm` and more than one worker, a probe's kill is confirmed like
+any other.
+
+## The unsafe speedups
+
+A speedup is unsafe when it can give a wrong verdict on a suite whose tests
+depend on their order or are not safe to run in parallel: workers, and the
+remembered killer. `--no-unsafe-speedups` (`unsafe-speedups = false`) turns
+every one of them off (`config.settle`), so that each mutant is run against the
+whole selection in its order, one at a time, and keeps each speedup that cannot
+change a verdict on any suite. `config.SPEEDUPS` puts every speedup on its side.
+A value in `[tool.invective]` that would turn an unsafe one on gives way to the
+switch; a flag that would is refused.
 
 ## The import-from-outside refusal
 
@@ -156,6 +195,10 @@ and fails in the silent direction invective exists to refuse.
   mutants, and do not work on Windows.
 - A lightweight runner that calls test functions directly.
 - Coverage selection without a confirmation re-run of survivors.
+- The last killer put first in the selection's order. A reordered selection
+  runs with no gate: a killer that needs an earlier test to have run scores a
+  kill that is no mutant's, which the remembered killer's run alone on the
+  original catches.
 - A cache keyed on the target and the tests only.
 
 > **Finding:** (2026-10-07, or3 benchmark, 4 cores, nothing else running)

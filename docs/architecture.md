@@ -11,6 +11,7 @@ The engine, the plugin, and how one mutant is run; settled.
 | `invective.sweep` | Every module in a source tree, each against its tests |
 | `invective.tree` | The copy (or git worktree) a campaign's mutants are written in |
 | `invective.process` | The processes invective starts: their groups, how they are stopped, and SIGTERM |
+| `invective.store` | What a run keeps in the project between runs: `.invective/` and its killer history |
 | `invective.accept` | Survivors accepted in the source, beside the code they are about |
 | `invective.config` | The `[tool.invective]` table, the project's top, and the pytest settings check |
 | `invective.errors` | `Refusal`: the one way invective declines to run |
@@ -35,11 +36,16 @@ popped so a pytest the suite starts does not inherit them:
   keeps and no others.
 - `INVECTIVE_VERDICT`: a file the plugin writes at the session's end with
   the first failing test's node id, the selected tests that were not found,
-  and whether the target was loaded from outside the copy.
+  whether the target was loaded from outside the copy, and when
+  `INVECTIVE_INVENTORY` asks for it, the node ids the run kept (`selected`).
 - `INVECTIVE_TARGET`: the mutated module's path from the copy's top, `/`
   separators. The plugin checks the tests loaded it from inside the copy.
 - `INVECTIVE_TYPED`: how many trailing arguments are paths for pytest's
   settings search, not tests to collect.
+- `INVECTIVE_INVENTORY`: set, the verdict lists the tests the run kept, in
+  their order, after every deselection. The first baseline asks for it when
+  the history is on, so that a remembered killer is tried only when the
+  selection holds it.
 
 ## The copy
 
@@ -48,7 +54,8 @@ directory. `tree.git_ref` checks out a commit as a detached git worktree.
 Both are context managers that yield the path of the copy's top, remove it
 on exit (including after a SIGTERM), and begin by removing copies whose
 owner is dead (`tree.reap`). What is skipped: `tree.SKIPPED` (version
-control, caches, `node_modules`) and any directory holding `pyvenv.cfg`.
+control, caches, `node_modules`, invective's own `.invective`) and any
+directory holding `pyvenv.cfg`.
 `[tool.invective] exclude` leaves out anything else.
 
 A mutant is written by replacing the target file in the copy with the
@@ -62,6 +69,16 @@ Each mutant is run as `python -m pytest` in the copy, in a process group
 of its own (`process.OWN_GROUP`), so that stopping the run stops everything
 it started. The killer comes from the plugin, which writes it to the file
 `INVECTIVE_VERDICT` names, not from the printed output.
+
+## How a mutant is measured
+
+`mutate._measure` tries each attempt in its order: the first to come to an
+outcome decides, and when none does, the whole selection decides. An attempt
+can kill a mutant, never let one survive (`mutate._SURVIVOR_VIA`). The one
+attempt is the remembered killer run alone (`mutate.probe_attempt`),
+there when the history is on and has a killer for the mutant that passed alone
+on the original. Every run of a mutant, an attempt's and the whole selection's,
+is made through `mutate.Copy.run`, which writes the mutant once.
 
 ## Workers
 

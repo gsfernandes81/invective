@@ -160,7 +160,7 @@ def by_text(run):
 
 def _digest(report):
     kept = {key: value for key, value in report.items()
-            if key not in ("target", "workers")}
+            if key not in ("target", "workers", "unsafe_speedups")}
     # Pinned with `TIMED_OUT` at -1. Its value is any code pytest cannot
     # exit with (its acceptance says so), and a kill by time is pinned as
     # `TIMED_OUT`, whatever that is.
