@@ -220,20 +220,22 @@ the other), or a map coverage cannot read.
 > more.
 
 > **Finding:** (2026-10-10, the owner's machine: AMD Ryzen AI 9 HX 370, 12 cores, 24
-> logical CPUs, on AC, WSL2 with Linux 6.18, Python 3.14.7; more-itertools at
-> `81c21a8`, `TestConcurrentTee::test_concurrent_consumers` deselected; R40 is 40
-> mutants of `recipes.py` against `test_recipes.py`, RALL all 288; cold runs, wall
-> time, a calibration of `pytest -q tests/test_recipes.py` (median of three) around
-> every run, a pair discarded past 1.15x. Against `main`: this branch at `fdbc19c`
-> with `coverage = true`, `main` at `dcd47a5` at one worker and `7d1dac3` at four,
-> one pair per row, `f` 2.0% from no neighbour. The re-fit after the remembered
-> killer: `a5d9f60` against `fdbc19c`, both with `coverage = true`, three ABBA pairs
-> per row, the median of the ratios within them, `f` 2.0% from two neighbours)
+> logical CPUs, on AC, WSL2 with Linux 6.18, Python 3.14.7; more-itertools at `81c21a8`,
+> `TestConcurrentTee::test_concurrent_consumers` deselected; R40 is 40 mutants of
+> `recipes.py` against `test_recipes.py`, RALL all 288, M300 300 mutants of `more.py`
+> against `test_more.py`; cold runs, wall time, a calibration of `pytest -q
+> tests/test_recipes.py` (median of three) around every run, a pair discarded past
+> 1.15x. Against `main`: this branch at `fdbc19c` with `coverage = true`, `main` at
+> `dcd47a5` for R40 and RALL at one worker and `7d1dac3` at four and for M300, one pair
+> per row, `f` 2.0% from no neighbour. The re-fit after the remembered killer: `a5d9f60`
+> against `fdbc19c`, both with `coverage = true`, three ABBA pairs per row, the median
+> of the ratios within them, `f` 2.0% from two neighbours)
 >
 > | against | case | N | before | after | speedup | touchable | processes | verdicts |
 > |---|---|---|---|---|---|---|---|---|
 > | `main` | R40 | 1 | 214.4 s | 203.1 s | 1.06x | 1.15x | 41 / 46 | equal |
 > | `main` | RALL | 1 | 1377.6 s | 1260.4 s | 1.09x | 1.16x | 289 / 338 | equal |
+> | `main` | M300 | 1 | 839.3 s | 736.0 s | 1.14x | 1.30x | 301 / 341 | equal |
 > | `main` | R40 | 4 | 66.1 s | 65.1 s | 1.01x | none | 45 / 50 | equal |
 > | `main` | RALL | 4 | 369.9 s | 334.9 s | 1.10x | none | 293 / 342 | equal |
 > | re-fit | R40 | 1 | 199.5 s | 198.8 s | 1.00x | 1.01x | 46 / 46 | equal |
@@ -243,15 +245,16 @@ the other), or a map coverage cannot read.
 > |---|---|---|---|---|---|
 > | `main` | R40 | 1 | 89.7 s | 1.15x | 1.11x |
 > | `main` | RALL | 1 | 832.1 s | 1.16x | 1.07x |
+> | `main` | M300 | 1 | 443.8 s | 1.30x | 1.08x |
 >
 > At one worker, coverage runs a cold campaign of the recipes suite 6% (R40) to 9%
-> (RALL) faster, its touchable part 1.15x and 1.16x, beyond what its floor needs; at
-> four workers, 1% and 10%. It starts more pytest processes (the coverage run, and a
-> narrowed run before each whole run it does not spare), and every verdict is the
-> same. After the remembered killer, it runs as fast as on its own: 1.00x at one
-> worker (1.00x to 1.01x across the pairs) and 0.99x at four, with the same
-> processes. Not measured: attrs, whose run is refused at its first mutant (issue
-> #35), and the 300 mutants of `more.py`.
+> (RALL) faster, its touchable part 1.15x and 1.16x, and the 300 mutants of `more.py`
+> 14% faster, its touchable part 1.30x, each beyond what its floor needs; at four
+> workers, the recipes suite 1% and 10%. It starts more pytest processes (the coverage
+> run, and a narrowed run before each whole run it does not spare), and every verdict is
+> the same. After the remembered killer, it runs as fast as on its own: 1.00x at one
+> worker (1.00x to 1.01x across the pairs) and 0.99x at four, with the same processes.
+> Not measured: attrs, whose run is refused at its first mutant (issue #35).
 
 ## The unsafe speedups
 
