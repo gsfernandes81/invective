@@ -61,7 +61,7 @@ target = "more_itertools/recipes.py"
 tests = ["tests/test_recipes.py"]
 only = "CMP,BOOL,NOT,CONST,RAISE"
 
-# Coverage's large judged case beside RALL; it stands in for T120 while invective refuses attrs' import-breaking mutants (issue #35).
+# Coverage's second large judged case, beside RALL.
 [cases.M300]
 project = "more-itertools"
 target = "more_itertools/more.py"
@@ -70,7 +70,9 @@ only = "CMP,BOOL,NOT,CONST,RAISE"
 limit = 300
 
 # Its tests are every file pytest collects under `tests`, less the two that
-# fail here, as plain paths, so that the selection stays plain.
+# fail here, as plain paths, so that the selection stays plain. A mutant that
+# breaks code `_make.py` runs at import stops pytest at attrs' conftest, which
+# imports it: a kill, once the original passes in the same copy.
 [cases.T120]
 project = "attrs"
 target = "src/attr/_make.py"
