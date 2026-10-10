@@ -1563,9 +1563,10 @@ def _breaks_after_one(then):
 def test_a_runner_that_breaks_after_the_baseline_is_refused(repo, then,
                                                             said):
     """pytest's usage error, or a selection that runs nothing, once the
-    baseline was green: when the original fails the same way in the same
-    copy, or no conftest would not import, it is the runner and not the
-    mutation, and every mutant would be scored for it."""
+    baseline was green, is refused as the runner's, since every mutant
+    would be scored for it: a stop at a conftest when the original stops
+    there too in the same copy, and any other usage error or empty
+    selection as it is."""
     commit(repo, _breaks_after_one(then))
     with pytest.raises(mutate.Refusal) as caught:
         mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"],
