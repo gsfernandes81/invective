@@ -79,6 +79,12 @@ THRESHOLD = 1.15
 #: that noisy would discard every pair at 1.15x.
 FIRST_PAIR_SPREAD = 0.05
 
+#: The most that relaxation goes to: a first calibration caught in the very
+#: drift the rule exists for (8.5, 8.6, then 30 s) would otherwise set a
+#: threshold of 8.6x and discard nothing all session. A machine that needs
+#: more is too noisy to measure on, and its pairs are discarded.
+THRESHOLD_MOST = 1.5
+
 #: The least noise floor taken from fewer than `NEIGHBOURS_LEAST` neighbours,
 #: or from none: R40's same-engine pairs on a quiet VM ran 0.99x to 1.06x, so
 #: two percent is the least the data allows.
@@ -271,9 +277,14 @@ def session_threshold(first_pair: Sequence[Sequence[float]]) -> tuple[float, str
     took the runs *first_pair* (one sequence of seconds per calibration),
     and why: `THRESHOLD`, unless a calibration spread more than
     `FIRST_PAIR_SPREAD` on its own, when it is 1 + three times the largest
-    such spread."""
+    such spread, at most `THRESHOLD_MOST`."""
     own = max((spread(runs) - 1 for runs in first_pair), default=0.0)
     if own > FIRST_PAIR_SPREAD:
+        if 1 + 3 * own > THRESHOLD_MOST:
+            return THRESHOLD_MOST, (
+                "%.2fx, the most it is relaxed to: a calibration of the first pair "
+                "spread %.1f%% on its own, and the machine is too noisy to measure "
+                "on" % (THRESHOLD_MOST, 100 * own))
         return 1 + 3 * own, ("%.2fx: a calibration of the first pair spread %.1f%% "
                              "on its own" % (1 + 3 * own, 100 * own))
     return THRESHOLD, "%.2fx" % THRESHOLD

@@ -135,6 +135,17 @@ def test_a_noisy_first_pair_sets_the_threshold_at_three_times_its_spread():
     assert "10.0%" in how
 
 
+def test_the_relaxed_threshold_stops_at_its_most():
+    """One calibration caught in a drift (another job starting) would
+    otherwise relax the threshold past any drift, and switch the rule off."""
+    threshold, how = compare.session_threshold([[8.5, 8.6, 30.0], [8.5, 8.6]])
+    assert threshold == compare.THRESHOLD_MOST == 1.5
+    assert "too noisy" in how
+    # Just under the most is kept as it is.
+    threshold, _how = compare.session_threshold([[10.0, 11.6]])
+    assert threshold == pytest.approx(1.48)
+
+
 def test_a_single_run_calibration_says_nothing_of_its_own_spread():
     threshold, _how = compare.session_threshold([[10.0], [20.0]])
     assert threshold == compare.THRESHOLD
