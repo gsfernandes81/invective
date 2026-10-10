@@ -299,7 +299,7 @@ A conftest beside a selection of node ids is loaded as their directory is collec
 one that will not import there is that directory's collection error, a kill named by the
 directory with no run of the original.
 
-An empty selection (exit 5) stays a refusal even when the original passes. A mutant that
+An empty selection (exit 5) is a refusal even when the original passes. A mutant that
 renames the selected tests (a parameter's id), or that a conftest deciding what to
 collect from the target collects nothing for, leaves nothing to run, and no test failed
 on it.
