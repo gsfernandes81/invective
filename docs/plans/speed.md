@@ -1,14 +1,13 @@
 # Speed options
 
-Options 2 and 4 for faster runs without losing the fresh-process guarantee;
+Option 4 for faster runs without losing the fresh-process guarantee;
 planned.
 
 ## Intent
 
-We intend to build options 2 and 4 below. We are open to dropping any of
-them if the code complexity is not worth the return: measure on a real
-project before and after each one, and cut the ones that do not pay for
-themselves.
+We intend to build option 4 below. We are open to dropping it if the code
+complexity is not worth the return: measure on a real project before and
+after, and cut it if it does not pay for itself.
 
 ## Options
 
@@ -19,21 +18,7 @@ minutes. All multipliers are estimates, not measurements.
 
 | # | Option | Estimated speedup | Risk to correctness |
 |---|---|---|---|
-| 2 | Coverage-guided selection: run only the tests that cover the mutated lines, then re-run every survivor against the full selection before reporting it | 2-8x, about 3x on the reference case; about 2.6x on a first run | A survivor is still one the whole selection let through. Falls back to the full selection when coverage is missing or a line has no covering test. Opt-in, `coverage` as an optional extra. |
 | 4 | Cache verdicts, keyed on the mutated module's text, the ordered selection, every test file and `conftest.py`, pytest config, interpreter and distribution versions, and the repository files the baseline imported | 1x on a first run; 10-50x on a sweep where one module changed | Unsound for files only a child interpreter imports. Timeouts are never cached; cached verdicts are marked in the report. Opt-in. |
-
-## How they combine
-
-- **Survivors are the floor in every case.** Nothing in 2 helps
-  them: a survivor has no killer, and 2's confirmation pass puts it back
-  at the full suite. Re-running the full selection is safer than running
-  only the tests the subset skipped, which changes process and order.
-- **4 is weaker without 2.** The whole module's text is in the key, so
-  any edit to a module invalidates all of its mutants; what is left is the
-  sweep case, modules that did not change. Saying which mutants a changed
-  test affects needs option 2's coverage map.
-- `invective sweep` already narrows to the test files that import the
-  module, which makes 2's gain smaller there.
 
 > **Finding:** (2026-10-01, this repo, 4 cores, Python 3.11, pytest 9.1.1)
 >

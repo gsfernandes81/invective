@@ -78,6 +78,59 @@ def test_workers_are_given_as_invective_run_takes_them(repo, tmp_path):
     assert done.stdout.count("copy:") == 2
 
 
+def test_pytest_mutate_narrows_when_the_project_asks(repo, tmp_path):
+    """With `coverage = true`, the refusal's mutant is killed by the one test
+    that ran its line, run alone; the node ids the coverage run recorded,
+    of tests in a directory below the top, are those each run can find."""
+    commit(repo, {"pyproject.toml": ("[tool.pytest.ini_options]\n"
+                                     "[tool.invective]\ncoverage = true\n")})
+    out = tmp_path / "reports.json"
+
+    done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-only",
+                     "raise,bool", "--mutate-json", str(out),
+                     "pkg/tests/test_gate.py")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    (gate,) = json.loads(out.read_text(encoding="utf-8"))
+    assert [(k["killer"], k.get("via")) for k in gate["kills"]] == [
+        (MINOR, "coverage")]
+    assert [s["line"] for s in gate["survivors"]] == [4]
+    assert gate["coverage"] == {"narrowed": 2, "unused": ""}
+    assert "coverage:  2/2 mutants narrowed (2 selection(s))" in done.stdout
+    assert "1 of the kills were the covering tests run alone" in done.stdout
+
+
+@pytest.mark.parametrize("listed", [False, True], ids=["command", "plugin"])
+def test_the_coverage_variable_is_popped_on_both_paths(repo, tmp_path,
+                                                       listed):
+    """A coverage run on the command line's path has no selection file, and
+    the variable is popped there too: a pytest a test starts would inherit
+    it and record a map of its own over the run's."""
+    box, seen = tmp_path / "box", tmp_path / "seen.txt"
+    box.mkdir()
+    write_tree(repo, {"pkg/tests/test_env.py": (
+        "import os\n"
+        "\n"
+        "def test_env():\n"
+        "    with open(%r, 'w') as fh:\n"
+        "        fh.write(repr(os.environ.get('INVECTIVE_COVERAGE')))\n"
+        % str(seen))})
+    env = {"INVECTIVE_COVERAGE": str(box), "INVECTIVE_TARGET": "pkg/gate.py"}
+    if listed:
+        selection = tmp_path / "selection.txt"
+        selection.write_text("pkg/tests/test_env.py::test_env\n",
+                             encoding="utf-8")
+        env.update(INVECTIVE_SELECTION=str(selection), INVECTIVE_TYPED="1")
+
+    done = pytest_in(repo, "-p", "pytest_invective", "pkg/tests/test_env.py",
+                     env=env)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert seen.read_text(encoding="utf-8") == "None"
+    assert json.loads((box / "tests.json").read_text(encoding="utf-8")) == [
+        "pkg/tests/test_env.py::test_env"]
+
+
 def test_a_count_of_workers_that_cannot_be_right_is_refused_by_name(repo):
     done = pytest_in(repo, "--mutate", "pkg/gate.py", "--mutate-workers",
                      "none", "pkg/tests/test_gate.py")
