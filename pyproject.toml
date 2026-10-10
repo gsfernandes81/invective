@@ -20,6 +20,12 @@ requires-python = ">=3.11"
 # it, and invective imports it, so it is named here too.
 dependencies = ["pytest>=8.2", "iniconfig>=2"]
 
+# Coverage-guided selection (`coverage = true` in `[tool.invective]`). 7.13
+# is the first whose wheels carry the `.pth` file that starts coverage in a
+# child interpreter, so a line only a child runs is credited to its test.
+[project.optional-dependencies]
+coverage = ["coverage>=7.13"]
+
 [project.scripts]
 invective = "invective.__main__:main"
 
@@ -34,9 +40,10 @@ pytest_invective = "pytest_invective"
 module-name = ["invective", "pytest_invective"]
 
 # For invective's own suite: pytest-xdist runs it on workers, and the plugin
-# and the engine both have to cope with a repository that does.
+# and the engine both have to cope with a repository that does; coverage is
+# the extra's, so that the coverage run is tested wherever the suite runs.
 [dependency-groups]
-dev = ["pytest-xdist>=3.8.0"]
+dev = ["pytest-xdist>=3.8.0", "coverage>=7.13"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

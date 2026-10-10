@@ -7,6 +7,7 @@
     exclude = ["var/*"]        # left out of the copy the mutants are run in
     workers = 1                # mutants run at once; "auto" for one per CPU
     confirm = false            # with workers, confirm each kill alone
+    coverage = false           # run each mutant first against the tests that cover it
 
 An unknown key is a refusal, so that a misspelt one is not read as absent.
 
@@ -43,12 +44,13 @@ class Config(NamedTuple):
     exclude: tuple[str, ...] = ()
     workers: int | str = 1
     confirm: bool = False
+    coverage: bool = False
 
 
 #: Each key and its type; `workers`, a count or "auto", has a check of its
 #: own (`workers`).
 _KEYS = {"fail-on-survivors": bool, "max-accepted": int, "exclude": list,
-         "workers": (int, str), "confirm": bool}
+         "workers": (int, str), "confirm": bool, "coverage": bool}
 _SAID = {bool: "true or false", int: "a whole number", list: "a list"}
 
 #: The most copies "auto" makes: each is a whole copy of the project, and
@@ -384,6 +386,8 @@ def load(root: str) -> Config:
     exclude = table.get("exclude", [])
     if not all(isinstance(pattern, str) for pattern in exclude):
         raise Refusal("[tool.invective] exclude must be a list of strings")
-    return Config(table.get("fail-on-survivors", False),
-                  table.get("max-accepted"), tuple(exclude),
-                  table.get("workers", 1), table.get("confirm", False))
+    return Config(fail_on_survivors=table.get("fail-on-survivors", False),
+                  max_accepted=table.get("max-accepted"),
+                  exclude=tuple(exclude), workers=table.get("workers", 1),
+                  confirm=table.get("confirm", False),
+                  coverage=table.get("coverage", False))

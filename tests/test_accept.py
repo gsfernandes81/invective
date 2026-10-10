@@ -129,6 +129,17 @@ def test_confirm_is_read_from_the_settings(tmp_path):
     assert "confirm must be true or false" in str(caught.value)
 
 
+def test_coverage_is_read_from_the_settings(tmp_path):
+    write_tree(str(tmp_path), {"pyproject.toml": (
+        "[tool.invective]\ncoverage = true\n")})
+    assert config.load(str(tmp_path)) == Config(coverage=True)
+    write_tree(str(tmp_path), {"pyproject.toml": (
+        "[tool.invective]\ncoverage = 'yes'\n")})
+    with pytest.raises(Refusal) as caught:
+        config.load(str(tmp_path))
+    assert "coverage must be true or false" in str(caught.value)
+
+
 @pytest.mark.parametrize("value, setting", [("3", 3), ('"auto"', "auto")])
 def test_workers_is_a_count_or_auto(tmp_path, value, setting):
     write_tree(str(tmp_path), {"pyproject.toml": (

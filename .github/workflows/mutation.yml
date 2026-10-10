@@ -47,9 +47,12 @@ jobs:
           # parallel, as `-n auto` runs it; even so, the campaign takes
           # about an hour.
           - module: src/invective/mutate.py
-            tests: tests/test_mutate.py tests/test_workers.py tests/test_accept.py tests/test_tree.py
+            tests: tests/test_mutate.py tests/test_workers.py tests/test_accept.py tests/test_tree.py tests/test_coverage_selection.py
             options: --mutate-workers auto
             timeout: 120
+          # The map's reading, and the engine's use of it.
+          - module: src/invective/covers.py
+            tests: tests/test_covers.py tests/test_coverage_selection.py
           - module: src/invective/sweep.py
             tests: tests/test_sweep.py
           - module: src/invective/__main__.py

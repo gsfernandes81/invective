@@ -13,7 +13,9 @@ command line then only start pytest's search for settings. When
 test not found, are written there as the session ends. That is how the
 engine learns which test killed a mutant. When `INVECTIVE_TARGET` names the
 mutated module, the verdict also says whether the tests loaded that module
-from somewhere other than the copy they ran in.
+from somewhere other than the copy they ran in. When `INVECTIVE_COVERAGE`
+names a directory, the run is the coverage run, and records there which test
+ran each line of the mutated module (`_Coverage`).
 
 **Nothing from `invective` is imported unless `--mutate` is given.** pytest
 before 8.4 loads plugins before a repository's own `pythonpath` setting takes
@@ -43,6 +45,20 @@ TARGET = "INVECTIVE_TARGET"
 #: selection's run are paths pytest's search for settings starts from, and
 #: not tests to collect.
 TYPED = "INVECTIVE_TYPED"
+#: The environment variable that names the directory a coverage run records
+#: its map in: which test ran each line of the target (`_Coverage`).
+COVERAGE = "INVECTIVE_COVERAGE"
+#: The environment variable that holds, during a coverage run, the place of
+#: the test running among the selection's, empty outside any test. Set here,
+#: not by the engine, and left for every child interpreter a test starts to
+#: inherit: coverage names the lines a child runs by it.
+COVERAGE_TEST = "INVECTIVE_COVERAGE_TEST"
+#: In a coverage run's directory: the selection's node ids in the order
+#: they ran, as a JSON list.
+COVERAGE_TESTS = "tests.json"
+#: In a coverage run's directory: what the name of each file of coverage's
+#: data starts with, the run's own and one for each child it measured.
+COVERAGE_DATA = "cov"
 
 #: The modules the interpreter and pytest had loaded as this plugin was
 #: imported. The engine asks for the plugin with `-p`, which pytest imports
@@ -71,6 +87,7 @@ _REPORTS = pytest.StashKey[list]()
 _FAILURES = pytest.StashKey[list]()
 _WANTED = pytest.StashKey[list]()
 _MISSING = pytest.StashKey[list]()
+_PLACE = pytest.StashKey[int]()
 
 
 def pytest_addoption(parser):
@@ -104,6 +121,12 @@ def pytest_addoption(parser):
 
 
 def pytest_load_initial_conftests(early_config, parser, args):
+    # Popped before the return below: a coverage run on the command line's
+    # path has no selection file, and a pytest its tests start must not
+    # record a map of its own over this one's.
+    box = os.environ.pop(COVERAGE, None)
+    if box is not None:
+        _Coverage.start(early_config, box)
     # Popped, not read, as the verdict's variable is below.
     path = os.environ.pop(SELECTION, None)
     if path is None:
@@ -213,6 +236,99 @@ class _Verdict:
             json.dump({"killer": self.killer,
                        "missing": self.config.stash.get(_MISSING, []),
                        "elsewhere": elsewhere}, fh)
+
+
+#: Whether this Python has `sys.monitoring` (3.12 and later).
+_MONITORING = hasattr(sys, "monitoring")
+
+#: The warnings coverage would give a coverage run, none of which says the
+#: map is wrong: a project that makes warnings errors would otherwise fail
+#: its coverage run on one, and run every mutant against the whole
+#: selection. `no-sysmon-context` is coverage's word for a map it keeps
+#: whole here by restarting the events (`_Coverage._enter`).
+_QUIET = ["no-sysmon-context", "already-imported", "module-not-imported",
+          "module-not-measured", "no-data-collected", "no-ctracer"]
+
+
+class _Coverage:
+    """A coverage run's recorder: which test ran each line of the target,
+    in the run and in every child interpreter its tests start, recorded in
+    the directory `COVERAGE` names for `invective.covers` to read.
+
+    Each line is recorded under the place of the test that ran it among the
+    selection's, as digits, from the test's setup to its teardown; outside
+    any test, as while modules are imported, under `""`. A child carries
+    the place it was started in (`COVERAGE_TEST`), read by the settings
+    every child's coverage starts from.
+
+    **The settings are invective's own, never the project's**
+    (`config_file=False`): a project's `omit` or `source` would leave the
+    target out of the map, and its `data_file` would be written over.
+    """
+
+    def __init__(self, box, cov):
+        self.box, self.cov = box, cov
+
+    @classmethod
+    def start(cls, config, box):
+        # Here and not at the top, so that a run that records no map
+        # imports nothing of coverage.
+        import coverage
+
+        here = str(config.invocation_params.dir)
+        target = os.path.join(here, *os.environ.get(TARGET, "").split("/"))
+        include = sorted({os.path.abspath(target), os.path.realpath(target)})
+        data = os.path.join(box, COVERAGE_DATA)
+        cov = coverage.Coverage(data_file=data, data_suffix=True,
+                                include=include, config_file=False)
+        cov.set_option("run:disable_warnings", _QUIET)
+        # On 3.12 and later, `sys.monitoring`, whose events are restarted
+        # at each test (`_enter`); before it, the C tracer.
+        cov.set_option("run:core", "sysmon" if _MONITORING else "ctrace")
+        settings = os.path.join(box, "rc.ini")
+        with open(settings, "w", encoding="utf-8") as fh:
+            fh.write("[run]\ndata_file = %s\nparallel = true\n"
+                     "context = ${%s}\ninclude =\n%s\n"
+                     "disable_warnings =\n%s\n"
+                     % (data, COVERAGE_TEST,
+                        "".join("    %s\n" % path for path in include),
+                        "".join("    %s\n" % slug for slug in _QUIET)))
+        os.environ["COVERAGE_PROCESS_START"] = settings
+        os.environ[COVERAGE_TEST] = ""
+        cov.start()
+        config.pluginmanager.register(cls(box, cov), "invective-coverage")
+
+    def pytest_collection_finish(self, session):
+        root = str(session.config.invocation_params.dir)
+        for place, item in enumerate(session.items):
+            item.stash[_PLACE] = place
+        with open(os.path.join(self.box, COVERAGE_TESTS), "w",
+                  encoding="utf-8") as fh:
+            json.dump([_key(item, root) for item in session.items], fh)
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_runtest_protocol(self, item):
+        self._enter(str(item.stash.get(_PLACE, "")))
+        try:
+            return (yield)
+        finally:
+            # Back to no test's, so that what runs once a test has ended (a
+            # child the session's finish starts) is credited to none.
+            self._enter("")
+
+    def _enter(self, context):
+        self.cov.switch_context(context)
+        os.environ[COVERAGE_TEST] = context
+        if _MONITORING:
+            # **Without this, a line is recorded for the first test that
+            # runs it and no other**: `sys.monitoring` turns a line's event
+            # off once coverage has seen it, and only a restart turns it
+            # back on for the next test.
+            sys.monitoring.restart_events()
+
+    def pytest_unconfigure(self):
+        self.cov.stop()
+        self.cov.save()
 
 
 def _loaded_elsewhere(copy, target):
@@ -438,7 +554,8 @@ def pytest_runtestloop(session):
                 config.getoption("mutate_limit"), say=say,
                 ref=config.getoption("mutate_ref"), exclude=rules.exclude,
                 selection=selection, options=options, workers=workers,
-                confirm=config.getoption("mutate_confirm") or rules.confirm)
+                confirm=config.getoption("mutate_confirm") or rules.confirm,
+                coverage=rules.coverage)
             reports.append(report)
             failures.extend("%s: %s" % (report["target"], failure)
                             for failure in mutate.gate(report, rules))

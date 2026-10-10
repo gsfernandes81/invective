@@ -227,6 +227,7 @@ max-accepted = 10          # so do more accepted survivors than this
 exclude = ["var/*"]        # left out of the copy
 workers = 1                # mutants run at once; "auto" for one per CPU
 confirm = false            # with workers, confirm each kill alone
+coverage = false           # run each mutant first against the tests that cover it
 ```
 
 | command | exit code | meaning |

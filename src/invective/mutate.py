@@ -39,6 +39,8 @@ import collections
 import contextlib
 import copy
 import difflib
+import functools
+import importlib.metadata
 import importlib.util
 import json
 import os
@@ -57,7 +59,7 @@ from typing import NamedTuple
 from pytest import ExitCode
 
 import pytest_invective
-from invective import process
+from invective import covers, process
 from invective.accept import read as read_accepts
 from invective.config import (Config, check_pytest_settings,
                               load as load_config, project_root,
@@ -548,8 +550,8 @@ def _wait(proc: subprocess.Popen, timeout: float,
 
 def run_tests(where: str, tests: list[str], timeout: float,
               selection: str | None = None, options: tuple[str, ...] = (),
-              target: str = "", stop: threading.Event | None = None
-              ) -> Verdict:
+              target: str = "", stop: threading.Event | None = None, *,
+              coverage: str | None = None) -> Verdict:
     """The selection, in *where*: *tests* as pytest arguments, and when
     *selection* names a file of node ids, one a line, those tests and no
     others, *tests* then deciding only where pytest's search for its
@@ -561,7 +563,10 @@ def run_tests(where: str, tests: list[str], timeout: float,
     plugin checks the tests loaded from the copy; none, and it checks
     nothing. Once *stop* is set, the run is stopped with everything it
     started and `Stopped` is raised: a signal reaches only the main thread,
-    and a run in a worker's thread learns of it this way.
+    and a run in a worker's thread learns of it this way. With *coverage*,
+    a directory, the run is the coverage run, and the plugin records in
+    that directory which test ran each line of *target*
+    (`invective.covers`).
 
     **No `-q` here, and that is load-bearing.** The run's working directory is
     the copy, so it reads the project's own pytest
@@ -584,6 +589,18 @@ def run_tests(where: str, tests: list[str], timeout: float,
             env[pytest_invective.TYPED] = str(len(tests))
         if target:
             env[pytest_invective.TARGET] = target
+        cov: list[str] = []
+        if coverage is not None:
+            # **The map is invective's, and nothing of the user's coverage
+            # may record over it**: a `COVERAGE_PROCESS_START` or
+            # `COVERAGE_FILE` of theirs would point the children's data
+            # elsewhere or start a second recorder, and pytest-cov's own
+            # variables start one in every child. Taken from this run alone:
+            # the others are run as the user's environment has them.
+            env = {name: value for name, value in env.items()
+                   if not name.startswith(("COVERAGE_", "COV_CORE_"))}
+            env[pytest_invective.COVERAGE] = coverage
+            cov = _no_cov(options)
         # `-p no:randomly` keeps the order, and so `-x`'s first failure, the
         # same from run to run; `-p no:` of a plugin that is not installed is
         # a no-op. The `no:` exclusions and `-n 0` are order-free: pytest
@@ -592,7 +609,7 @@ def run_tests(where: str, tests: list[str], timeout: float,
             raise Stopped
         proc = subprocess.Popen(
             [sys.executable, "-m", "pytest", "-p", pytest_invective.__name__,
-             *options, "-x", "-rf", "-p", "no:randomly", *_NO_WORKERS,
+             *options, *cov, "-x", "-rf", "-p", "no:randomly", *_NO_WORKERS,
              "--no-header", *tests],
             cwd=where, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env, **process.OWN_GROUP)
@@ -630,6 +647,22 @@ def run_tests(where: str, tests: list[str], timeout: float,
     # invective: accept[equivalent: 400 -> 401] any length that holds pytest's last words serves
     return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer,
                    missing, elsewhere)
+
+
+def _no_cov(options: tuple[str, ...]) -> list[str]:
+    """`--no-cov`, when pytest-cov will be loaded in a run given *options*:
+    its recorder, started by a `--cov` in the project's `addopts`, would
+    record over the coverage run's own. Nothing when it will not be, since
+    then pytest knows no such option and the run would end in a usage
+    error."""
+    if (importlib.util.find_spec("pytest_cov") is None
+            or os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD")):
+        return []
+    given = [option.removeprefix("-p") for option in options]
+    for off in ("no:cov", "no:pytest_cov"):
+        if off in given:
+            return []
+    return ["--no-cov"]
 
 
 # --------------------------------------------------------------------------
@@ -1240,6 +1273,156 @@ def _plain_tests(tests: list[str], where: str) -> bool:
         os.path.join(where, test.partition("::")[0])) for test in tests)
 
 
+# --------------------------------------------------------------------------
+# **Coverage-guided selection.** One coverage run of the whole selection,
+# before the first mutant, says which tests ran each line of the target
+# (`invective.covers`). A mutant whose lines fewer than half the tests ran is
+# run first against those tests alone, once they have passed together on the
+# original; it is a kill only when one of them fails on it. Anything else,
+# every survivor among it, is decided by the whole selection.
+
+#: The oldest coverage whose wheels start it in a child interpreter (its
+#: `.pth` file), without which a line only a child runs is no test's.
+COVERAGE_LEAST = (7, 13)
+
+
+class Narrowed(NamedTuple):
+    """The tests a mutant is run against first: the file that names them,
+    one a line (*path*), the node ids (*tests*), and how long they took
+    together on the original (*took*)."""
+
+    path: str
+    tests: frozenset[str]
+    took: float
+
+
+class Narrowing(NamedTuple):
+    """What the coverage run came to: each mutant's narrower selection, by
+    its site's index (*plan*), and why there is none when coverage was not
+    used (*unused*, `""` when it was). *reds* are the node ids that failed
+    first in each narrower selection that was not green on the original,
+    run apart from the rest of the selection; each such selection is left
+    out of *plan*."""
+
+    plan: dict[int, Narrowed]
+    unused: str
+    reds: tuple[str, ...] = ()
+
+    @property
+    def selections(self) -> int:
+        """How many distinct narrower selections *plan* holds."""
+        return len({narrowed.path for narrowed in self.plan.values()})
+
+
+def coverage_attempt(plan: dict[int, Narrowed], budget: float) -> Attempt:
+    """The attempt that runs a mutant against its narrower selection in
+    *plan*, if it has one: a kill when one of those tests failed on it, and
+    nothing else, so that what it does not kill goes on to the whole
+    selection (`_SURVIVOR_VIA`). Its run is cut at three times what the
+    tests took on the original, at least 5 s and at most *budget*: a run cut
+    short there is no kill, and the whole selection runs with all of
+    *budget*."""
+    def attempt(mutant: Mutant, copy: Copy) -> Outcome | None:
+        narrowed = plan.get(mutant.job.idx)
+        if narrowed is None:
+            return None
+        cut = min(budget, max(5.0, 3 * narrowed.took))
+        got = copy.run(mutant, cut, narrowed.path)
+        if (got.code == ExitCode.TESTS_FAILED and got.killer in narrowed.tests
+                and not got.missing):
+            return Outcome(got, "coverage")
+        # **A mutant the covering tests let through is not a survivor
+        # yet**: only the whole selection, which `_measure` runs next, in
+        # its order, can make one (`_SURVIVOR_VIA`).
+        return None
+    return attempt
+
+
+def _coverage_unavailable() -> str:
+    """Why this Python cannot record the coverage run's map; `""` when it
+    can."""
+    try:
+        version = importlib.metadata.version("coverage")
+    except importlib.metadata.PackageNotFoundError:
+        return "coverage is not installed"
+    found = re.match(r"(\d+)\.(\d+)", version)
+    if found is None or tuple(map(int, found.groups())) < COVERAGE_LEAST:
+        return "coverage %s is older than %d.%d" % ((version,) + COVERAGE_LEAST)
+    return ""
+
+
+def _narrowing(pool: _Pool, box: str, sites: list, base: float,
+               budget: float, plain: bool) -> Narrowing:
+    """Each mutant of *sites*' narrower selection, from one coverage run of
+    the whole selection on the first copy's original, and each selection
+    checked once on the original before it is used.
+
+    The coverage run is cut at ten times *base*, and at least 30 s: past
+    that its map costs more than it saves. Whatever stops the map being
+    made or read is said, never a refusal: every mutant then runs the whole
+    selection, as with coverage off.
+    """
+    unused = _coverage_unavailable()
+    if not unused and not plain:
+        unused = ("--tests holds an option, which a narrower selection "
+                  "would leave out")
+    first = pool.copies[0]
+    if not unused and re.search(r"[,$]", os.path.realpath(first.path) + box):
+        # Coverage splits a setting at a `,` and expands a `$`.
+        unused = "the target's path holds a `,` or `$`"
+    if unused:
+        return Narrowing({}, unused)
+    where = os.path.join(box, "coverage")
+    os.makedirs(where)
+    # Ten times: the slowest measured is about eight, the C tracer's on a
+    # suite that runs the target hot.
+    cap = max(30.0, base * 10)
+    got, ran = pool.on(0, lambda copy: (copy.run(None, cap, coverage=where),
+                                        copy.path))
+    if got.code == TIMED_OUT:
+        return Narrowing({}, "the coverage run took longer than %d s" % cap)
+    if not got.ok:
+        return Narrowing({}, "the coverage run exited %d" % got.code)
+    try:
+        found = covers.read(where, ran)
+    except Exception as exc:
+        # Any of them: a map that cannot be read is no map, whatever
+        # coverage raises.
+        return Narrowing({}, "the coverage run's map could not be read: %s"
+                         % exc)
+    groups: dict[tuple[str, ...], list[int]] = {}
+    for idx, _kind, node, _what in sites:
+        tests = covers.narrowed(found, node)
+        if tests is not None:
+            groups.setdefault(tests, []).append(idx)
+    files = []
+    for i, tests in enumerate(groups):
+        path = os.path.join(box, "narrowed-%d.txt" % i)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("".join(test + "\n" for test in tests))
+        files.append(path)
+    gated = pool.map(functools.partial(_gate, timeout=budget), files)
+    plan, reds = {}, []
+    for (tests, idxs), path, (verdict, took) in zip(groups.items(), files,
+                                                     gated):
+        if not verdict.ok:
+            reds.append(verdict.killer)
+        elif not verdict.missing:
+            plan.update(dict.fromkeys(idxs, Narrowed(path, frozenset(tests),
+                                                     took)))
+    return Narrowing(plan, "", tuple(reds))
+
+
+def _coverage_line(narrowing: Narrowing, mutants: int) -> str:
+    """The `coverage:` line: how many of the *mutants* were narrowed, or
+    why none was."""
+    if narrowing.unused:
+        return ("coverage:  not used: %s; every mutant runs the full "
+                "selection" % narrowing.unused)
+    return ("coverage:  %d/%d mutants narrowed (%d selections)"
+            % (len(narrowing.plan), mutants, narrowing.selections))
+
+
 def _landed(mutant: Mutant, outcome: Outcome) -> None:
     """*outcome* stands for *mutant*: called on the main thread, once for
     each mutant whose outcome is final, and never for one that is not. Every
@@ -1255,7 +1438,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
            limit: int | None, say=print, ref: str | None = None,
            exclude: tuple[str, ...] = (), selection: list[str] | None = None,
            options: tuple[str, ...] = (), workers: int | str = 1,
-           confirm: bool = False) -> dict:
+           confirm: bool = False, coverage: bool = False) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
     The mutants are written in a copy of *root* as it stands, *exclude* left
@@ -1273,6 +1456,13 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     with *confirm* and more than one worker, every kill is confirmed once
     the last mutant has run, with nothing else running, and the report
     names each kill its killer did not make alone (`unreproduced`).
+
+    With *coverage*, each mutant is run first against the tests that ran
+    its lines, when they are fewer than half the selection and pass
+    together on the original, and a kill by one of them stands; every other
+    mutant, every survivor among them, is decided by the whole selection.
+    The report says how many mutants were narrowed, or why none was
+    (`coverage`).
     """
     try:
         src_rel = relative_to_root(target, root)
@@ -1351,6 +1541,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                           % (src_rel, ",".join(only or sorted(OPERATORS))))
 
         count = workers_of(workers, most=len(sites))
+        # Whether a run of other tests than the selection's leaves out
+        # nothing it chose: on the command line, an option among the tests
+        # would be left out with them.
+        plain = selection is not None or _plain_tests(tests, first)
         # **Every copy before the first run**, so that none holds what a
         # run left behind: a cache, a database, a file a test writes.
         places = [first]
@@ -1454,6 +1648,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # time than the loaded budget gave it.
         # invective: accept[equivalent: 3 -> 4] any budget well above the baseline serves, and a kill by time is counted apart
         alone_budget = max(budget, alone * 3)
+        narrowing = Narrowing({}, "")
+        if coverage:
+            narrowing = _narrowing(pool, box, sites, base, budget, plain)
+            say(_coverage_line(narrowing, len(sites)))
         say("mutants:   %d\n" % len(sites))
 
         survivors, accepted, kills, killed, broken = [], [], [], 0, 0
@@ -1480,6 +1678,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             Job(n, idx, kind, what, node.lineno)            # type: ignore[attr-defined]
             for n, (idx, kind, node, what) in enumerate(sites, 1))
         attempts: list[Attempt] = []
+        if narrowing.plan:
+            attempts.append(coverage_attempt(narrowing.plan, budget))
 
         def made(job: Job) -> Mutant:
             try:
@@ -1661,10 +1861,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # A killer that is a test, run alone on the original, must pass
             # there, or its failing alone on the mutant says nothing. Only
             # where a run of other tests leaves out nothing the selection
-            # chose: on the command line, an option among the tests would
-            # be left out with them.
+            # chose (`plain`).
             usable = {}
-            plain = selection is not None or _plain_tests(tests, first)
             if plain:
                 killers = dict.fromkeys(
                     outcome.verdict.killer for _job, outcome in unconfirmed
@@ -1742,6 +1940,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # There whenever the kills were confirmed, empty or not, so that
             # none named reads as none found and not as none looked for.
             report["unreproduced"] = unreproduced
+        if coverage:
+            report["coverage"] = {"narrowed": len(narrowing.plan),
+                                  "unused": narrowing.unused}
         return report
 
 
@@ -1781,6 +1982,19 @@ def summary(report: dict) -> list[str]:
         # of this kind is not a well-tested file.
         lines.append("           %d of the kills were collection or internal "
                      "errors, not a test failing" % report["broken"])
+    narrowed = sum("coverage" in (k.get("via"), k.get("origin"))
+                   for k in report["kills"])
+    if narrowed:
+        # Said apart: each is a kill by fewer tests than the selection,
+        # which the whole selection, in its order, was not run to make.
+        lines.append("           %d of the kills were the covering tests "
+                     "run alone" % narrowed)
+    # `.get`: there only when coverage was asked for.
+    unused = report.get("coverage", {}).get("unused")
+    if unused:
+        # Again at the end, where it is read: asked for, coverage made no
+        # run any faster.
+        lines.append(_coverage_line(Narrowing({}, unused), report["mutants"]))
     # `.get`: there only when the kills were confirmed.
     unreproduced = report.get("unreproduced", [])
     if unreproduced:
@@ -1903,7 +2117,8 @@ def main(argv: list[str] | None = None) -> int:
                         ref=args.ref, exclude=config.exclude,
                         workers=(config.workers if args.workers is None
                                  else args.workers),
-                        confirm=args.confirm or config.confirm)
+                        confirm=args.confirm or config.confirm,
+                        coverage=config.coverage)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2
