@@ -138,12 +138,12 @@ they are more than half the selection.
 Each narrower selection is run once on the original, at the mutants' budget,
 and is used only when it passes with no test missing. A mutant with one is run
 against it first, its run cut at three times what the narrower selection took
-on the original (at least 5 s). It is a kill only when a test failed (exit 1),
-the first to fail is one of the narrower selection's, and none is missing; the
-kill carries `"via": "coverage"`. Anything else (a pass, a run cut at its time,
-a module that would not import) leaves the mutant to the whole selection, run
-next in its order, so a survivor is always the whole selection's verdict
-(`mutate._SURVIVOR_VIA`).
+on the original, at least 5 s and at most the mutants' budget. It is a kill
+only when a test failed (exit 1), the first to fail is one of the narrower
+selection's, and none is missing; the kill carries `"via": "coverage"`. Anything
+else (a pass, a run cut at its time, a module that would not import) leaves the
+mutant to the whole selection, run next in its order, so a survivor is always
+the whole selection's verdict (`mutate._SURVIVOR_VIA`).
 
 This relies on the tests being independent of their order, at any count of
 workers: a kill by fewer tests than the selection is then a kill by the whole

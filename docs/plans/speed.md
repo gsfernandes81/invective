@@ -29,7 +29,8 @@ minutes. All multipliers are estimates, not measurements.
 - On a **warm re-run** with a prior report, 3 makes a kill cost one test.
 - **Survivors are the floor in every case.** Nothing in 3 helps them: a
   survivor has no killer.
-- A cached re-run after a small change: under a minute.
+- With 4, a re-run after a small change takes under a minute: every
+  verdict but those of the changed module's mutants is read from the cache.
 
 > **Finding:** (2026-10-01, this repo, 4 cores, Python 3.11, pytest 9.1.1)
 >

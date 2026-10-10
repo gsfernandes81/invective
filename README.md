@@ -174,10 +174,10 @@ The report carries `"coverage": {"narrowed": n, "unused": reason}`: how many
 mutants had a narrower selection, and why coverage was not used (`""` when it
 was). When it cannot be used (not installed, older than 7.13, the coverage run
 red or over ten times the baseline's time, and at least 30 seconds, `--tests`
-holding an option, or a path holding a `,` or `$`), the `coverage:` line and the
-closing lines say why, and every mutant runs the whole selection. On Python 3.11
-the coverage run is slower and reaches that limit more often (the Finding in
-`docs/isolation.md`).
+holding an option, a path holding a `,` or `$`, or a map coverage cannot read),
+the `coverage:` line and the closing lines say why, and every mutant runs the
+whole selection. On Python 3.11 the coverage run is slower and reaches that
+limit more often (the Finding in `docs/isolation.md`).
 
 ## A whole source tree
 

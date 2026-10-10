@@ -96,7 +96,7 @@ def test_pytest_mutate_narrows_when_the_project_asks(repo, tmp_path):
         (MINOR, "coverage")]
     assert [s["line"] for s in gate["survivors"]] == [4]
     assert gate["coverage"] == {"narrowed": 2, "unused": ""}
-    assert "coverage:  2/2 mutants narrowed (2 selections)" in done.stdout
+    assert "coverage:  2/2 mutants narrowed (2 selection(s))" in done.stdout
     assert "1 of the kills were the covering tests run alone" in done.stdout
 
 

@@ -110,7 +110,7 @@ def test_a_mutant_the_covering_tests_kill_is_their_kill(tree, monkeypatch):
     (narrowed,) = [r for r in run.runs if r.text and r.kind == "narrowed"]
     assert "pass" in narrowed.text and narrowed.tests == (MINOR,)
     assert len(run.of("selection")) == 1 + report["mutants"] - 1
-    i = run.lines.index("coverage:  1/6 mutants narrowed (1 selections)")
+    i = run.lines.index("coverage:  1/6 mutants narrowed (1 selection(s))")
     assert run.lines[i - 1].startswith("baseline:")
     assert run.lines[i + 1] == "mutants:   6\n"
     assert mutate.summary(report)[1:] == [
@@ -150,7 +150,7 @@ def test_a_narrower_selection_red_on_the_original_is_not_used(
 
     assert report["kills"] == []
     assert report["coverage"] == {"narrowed": 0, "unused": ""}
-    assert "coverage:  0/6 mutants narrowed (0 selections)" in run.lines
+    assert "coverage:  0/6 mutants narrowed (0 selection(s))" in run.lines
     assert [r.text for r in run.of("narrowed")] == [None]
     assert seen[0].reds == (MINOR,)
 
@@ -192,7 +192,7 @@ def test_mutants_of_lines_the_same_tests_ran_share_one_selection(
     run = Covered(tree, monkeypatch, {2: ["0"], 4: ["1"]})
     report = run(1, only=["CMP", "CONST", "BOOL"], coverage=True)
     assert report["coverage"]["narrowed"] == 5
-    assert "coverage:  5/5 mutants narrowed (2 selections)" in run.lines
+    assert "coverage:  5/5 mutants narrowed (2 selection(s))" in run.lines
     gates = [r.tests for r in run.of("narrowed") if r.text is None]
     assert sorted(gates) == [(MINOR,), (ADULT,)]
     assert len({r.text for r in run.of("narrowed") if r.text}) == 5

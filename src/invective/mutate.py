@@ -1438,7 +1438,7 @@ def _coverage_line(narrowing: Narrowing, mutants: int) -> str:
     if narrowing.unused:
         return ("coverage:  not used: %s; every mutant runs the full "
                 "selection" % narrowing.unused)
-    return ("coverage:  %d/%d mutants narrowed (%d selections)"
+    return ("coverage:  %d/%d mutants narrowed (%d selection(s))"
             % (len(narrowing.plan), mutants, narrowing.selections))
 
 
