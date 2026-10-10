@@ -1385,8 +1385,8 @@ def _candidates(pool: _Pool, box: str, sites: list, base: float,
         return [], unused
     where = os.path.join(box, "coverage")
     os.makedirs(where)
-    # Ten times: the slowest measured is about eight, the C tracer's on a
-    # suite that runs the target hot.
+    # Ten times: well above the dearest recorder measured, the C tracer
+    # 3.11 has, on a suite that runs the target hot (`docs/isolation.md`).
     cap = max(30.0, base * 10)
     got, ran = pool.on(0, lambda copy: (copy.run(None, cap, coverage=where),
                                         copy.path))

@@ -165,22 +165,21 @@ least 30 s), `--tests` holding an option a run of fewer tests would leave out,
 a path holding a `,` or `$` (coverage's settings split at the one and expand
 the other), or a map coverage cannot read.
 
-> **Finding:** (2026-10-08, more-itertools at `81c21a8`, its `test_recipes.py`,
-> Python 3.13, coverage 7.13.0, 4 cores; a prototype of the coverage run's
-> recorder, taken while the design was reviewed; wall time of one run of the file)
+> **Finding:** (2026-10-10, more-itertools at `81c21a8`, its `test_recipes.py`
+> (148 tests) and `recipes.py`, this code at `def7f04`, coverage 7.16.2, pytest
+> 9.1.1, a 4-vCPU VM with nothing else running; wall time of `mutate.run_tests`
+> in the checkout, a plain run and a coverage run in turn, four of each; medians)
 >
-> | recorder | time | tests kept for each line of `recipes.py` |
-> |---|---|---|
-> | none (a plain run) | 13.5 s | |
-> | C tracer | 94 to 104 s | every one |
-> | `sys.monitoring` | 16.7 s | the first only |
-> | `sys.monitoring`, restarted at each test | 16.5 s | the C tracer's, line for line |
+> | Python | recorder | plain run | coverage run | ratio | lines mapped |
+> |---|---|---|---|---|---|
+> | 3.11.17 | C tracer | 13.0 s | 72.8 s | 5.6x | 456 |
+> | 3.14.6 | `sys.monitoring` | 8.3 s | 9.0 s | 1.09x | 500 |
 >
-> The two maps agreed on all 450 lines; with coverage 7.16.2 the last run took
-> 13.6 s. The C tracer, the only one before 3.12, costs 7 to 8 times the plain run
-> on a suite that runs the target hot, near the coverage run's limit of ten times.
-> `sys.monitoring` costs little, and keeps every test of a line only when its
-> events are restarted at each test.
+> The runs took 12.7 to 13.1 s plain and 70.2 to 75.6 s with coverage on 3.11, and
+> 7.8 to 8.5 s and 8.8 to 9.2 s on 3.14. Every coverage run on one Python mapped
+> as many lines, credited to as many tests. On 3.11, a suite that runs the target
+> hot pays over five times its plain run for the map, inside the coverage run's
+> limit of ten times; on 3.14 it pays about a tenth more.
 
 ## The import-from-outside refusal
 

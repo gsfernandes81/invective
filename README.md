@@ -176,8 +176,9 @@ was). When it cannot be used (not installed, older than 7.13, the coverage run
 red or over ten times the baseline's time, and at least 30 seconds, `--tests`
 holding an option, a path holding a `,` or `$`, or a map coverage cannot read),
 the `coverage:` line and the closing lines say why, and every mutant runs the
-whole selection. On Python 3.11 the coverage run is slower and reaches that
-limit more often (the Finding in `docs/isolation.md`).
+whole selection. On Python 3.11, which has no `sys.monitoring`, the coverage run
+costs several times a plain run (the Finding in `docs/isolation.md`), so it comes
+nearer that limit.
 
 ## A whole source tree
 
