@@ -21,12 +21,8 @@ row (`runs.tsv`), the pairs (`pairs.tsv`), the calibrations
 ready to paste (`finding.md`), with each run's log, report and instrument
 rows under `logs/`.
 
-Exit status: 0, every case concluded with equal verdicts; 1, a run died or a
-case is inconclusive; 2, the setup failed or the arguments are wrong; 3, the
-verdicts differ; 4, a pytest process count asked for by `--same-processes` or
-`--expect-rerun-processes` was not met; 5, the `--confirm-run` named a kill it
-could not reproduce, or could not say; 130, stopped by ^C or SIGTERM. The worktrees, venvs and
-copies are removed in every case unless `--keep` is given.
+The exit status says what went wrong first (`EXIT_STATUSES`). The worktrees,
+venvs and copies are removed in every case unless `--keep` is given.
 
 The tool needs git and uv, and nothing from this project's environment: it is
 the standard library only, and runs under any Python from 3.11.
@@ -52,6 +48,7 @@ import sys
 import tempfile
 import textwrap
 import time
+import traceback
 import tomllib
 from collections.abc import Callable, Iterable, Sequence
 
@@ -110,6 +107,19 @@ RAN = (0, 1)
 
 #: pytest's own exit codes; any other on a kill is a signal or a crash.
 PYTEST_CODES = range(0, 6)
+
+#: The tool's own exit statuses, each a thing that went wrong, so that a
+#: script can tell a broken verdict from a slow machine.
+EXIT_STATUSES = {
+    0: "every case concluded, with equal verdicts",
+    1: "a run died or was refused, or a case is inconclusive",
+    2: "the setup or a calibration failed, or the arguments are wrong",
+    3: "the verdicts differ",
+    4: "a pytest process count asked for was not met",
+    5: "the confirm run named a kill it could not reproduce, or did not say",
+    70: "the tool itself failed: a bug, its traceback printed",
+    130: "stopped by a ^C, a SIGTERM or a SIGHUP",
+}
 TIMED_OUT = -1
 
 
@@ -2250,6 +2260,12 @@ def main(argv: list[str] | None = None) -> int:
         except BenchError as exc:
             code = 2
             print("\nbench: %s" % exc, file=sys.stderr, flush=True)
+        except Exception:
+            # A status of its own: 1 says a run died, and this is the tool.
+            code = 70
+            traceback.print_exc()
+            print("bench: the tool failed; what ran is still written and the "
+                  "temporaries removed", file=sys.stderr, flush=True)
         finally:
             with signals_held():
                 try:

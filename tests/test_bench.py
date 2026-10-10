@@ -735,6 +735,19 @@ def test_a_missing_tool_is_refused_by_name(tmp_path, capsys, monkeypatch):
     assert "uv is not on PATH" in capsys.readouterr().err
 
 
+def test_a_bug_in_the_tool_has_an_exit_status_of_its_own(tmp_path, capsys, monkeypatch):
+    def broken(self):
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(compare.Session, "setup", broken)
+    assert compare.main(["HEAD", "HEAD", "--repo", ROOT, "--quick",
+                         "--cases-file", str(_project(tmp_path)), "--case", "F",
+                         "--out", str(tmp_path / "out")]) == 70
+    err = capsys.readouterr().err
+    assert "RuntimeError: a bug" in err and "the tool failed" in err
+    assert 70 in compare.EXIT_STATUSES
+
+
 def test_an_out_directory_with_something_in_it_is_refused(tmp_path, capsys):
     """Rows appended to another session's files would be read as its own."""
     (tmp_path / "runs.tsv").write_text("seq\n", encoding="utf-8")
