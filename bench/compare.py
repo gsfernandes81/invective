@@ -1261,6 +1261,8 @@ class Session:
         self.differences: list[str] = []
         self.differ: dict[str, str] = {}
         self.tests: dict[tuple[str, str], tuple[str, ...]] = {}
+        #: Each project's third copy, where the tool's own pytests run.
+        self.calibration_dirs: dict[str, str] = {}
         self.machine: dict = {}
         self.stopped = False
         self.started = datetime.datetime.now(datetime.timezone.utc)
@@ -1329,7 +1331,8 @@ class Session:
                 continue
             warmed.add((project.name, args))
             timed = run_timed([side.python, "-m", "pytest", "-q", "-p",
-                               "no:cacheprovider", *args], side.dirs[project.name],
+                               "no:cacheprovider", *args],
+                              self.calibration_dirs[project.name],
                               self.env_for(side, project), log)
             if timed.code != 0:
                 raise BenchError("%s is not green in the before venv (exit %s): "
@@ -1360,26 +1363,44 @@ class Session:
                 where = side.worktree
             else:
                 where = os.path.join(self.work, side.label, project.name)
-                os.makedirs(os.path.dirname(where), exist_ok=True)
-                if source:
-                    # Fetched from the cache, not cloned: a clone of it takes
-                    # its branches, and it has none.
-                    check(["git", "init", "--quiet", where],
-                          "copying %s" % project.name, log=log)
-                    check(["git", "-C", where, "fetch", "--quiet", "--depth", "1",
-                           source, project.commit], "copying %s" % project.name,
-                          log=log)
-                    check(["git", "-C", where, "checkout", "--quiet", "--detach",
-                           project.commit], "checking out %s" % project.name, log=log)
-                else:
-                    shutil.copytree(project.path, where, ignore=shutil.ignore_patterns(
-                        "__pycache__", ".invective", ".pytest_cache"))
+                self._copy(project, source, where, log)
             for table, lines in project.pyproject:
                 edit_pyproject(where, table, lines)
             if side.settings:
                 edit_pyproject(where, "tool.invective",
                                ["%s = %s" % (k, toml_value(v)) for k, v in side.settings])
             side.dirs[project.name] = where
+        # **A third copy, for every pytest the tool itself starts**: the
+        # calibrations, the collections and the warm-up. What they leave
+        # behind that a campaign's copy takes (a `.hypothesis` database, a
+        # `.coverage`) would otherwise be in one side's tree and not the
+        # other's. Without the side's settings, which no plain run reads.
+        where = os.path.join(self.work, "calibration", project.name)
+        if project.self_:
+            shutil.copytree(self.sides["before"].worktree, where,
+                            ignore=shutil.ignore_patterns(".git", "__pycache__",
+                                                          ".invective"))
+        else:
+            self._copy(project, source, where, log)
+        for table, lines in project.pyproject:
+            edit_pyproject(where, table, lines)
+        self.calibration_dirs[project.name] = where
+
+    def _copy(self, project: Project, source: str | None, where: str, log: str) -> None:
+        """*project* at *where*: from the cache, by its commit, or copied
+        from its `path`."""
+        os.makedirs(os.path.dirname(where), exist_ok=True)
+        if source:
+            # Fetched from the cache, not cloned: a clone of it takes its
+            # branches, and it has none.
+            check(["git", "init", "--quiet", where], "copying %s" % project.name, log=log)
+            check(["git", "-C", where, "fetch", "--quiet", "--depth", "1", source,
+                   project.commit], "copying %s" % project.name, log=log)
+            check(["git", "-C", where, "checkout", "--quiet", "--detach", project.commit],
+                  "checking out %s" % project.name, log=log)
+        else:
+            shutil.copytree(project.path, where, ignore=shutil.ignore_patterns(
+                "__pycache__", ".invective", ".pytest_cache"))
 
     def env_for(self, side: Side, project: Project) -> dict:
         """The environment of a run on *project* by *side*: this one's, with
@@ -1412,7 +1433,8 @@ class Session:
         said = check([side.python, "-m", "pytest", "--collect-only", "-q",
                       "-p", "no:cacheprovider", *files],
                      "collecting %s to check its deselections" % project.name,
-                     cwd=side.dirs[project.name], env=self.env_for(side, project),
+                     cwd=self.calibration_dirs[project.name],
+                     env=self.env_for(side, project),
                      log=log)
         still = [node for node in project.deselect if node in said.split()]
         if still:
@@ -1429,7 +1451,7 @@ class Session:
                 said = check([side.python, "-m", "pytest", "--collect-only", "-q",
                               "-p", "no:cacheprovider", *case.collect],
                              "collecting %s's tests" % case.name,
-                             cwd=side.dirs[project.name],
+                             cwd=self.calibration_dirs[project.name],
                              env=self.env_for(side, project), log=log)
                 files = sorted({line.partition("::")[0] for line in said.splitlines()
                                 if "::" in line})
@@ -1466,7 +1488,7 @@ class Session:
         runs: list[float] = []
         want = project.calibrate_runs
         while True:
-            timed = run_timed(argv, side.dirs[project.name],
+            timed = run_timed(argv, self.calibration_dirs[project.name],
                               self.env_for(side, project), log)
             if timed.code != 0:
                 raise BenchError("the calibration failed (exit %s), so the project "

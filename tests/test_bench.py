@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 
 import pytest
 
@@ -720,10 +721,13 @@ def _session(tmp_path, project, **sides):
     *tmp_path*, with nothing set up: for one step of a session alone."""
     args = argparse.Namespace(fixed="baseline,timeout", out=str(tmp_path / "out"),
                               repo=ROOT, threshold=None)
-    side = compare.Side("before", "HEAD", python=sys.executable,
-                        dirs={project.name: str(tmp_path)}, **sides)
-    return compare.Session(args, {project.name: project}, [], [1], 1, 0,
-                           {"before": side, "after": side})
+    # The sides' copies are not where the tool's own pytests run.
+    session = compare.Session(args, {project.name: project}, [], [1], 1, 0, {
+        label: compare.Side(label, "HEAD", python=sys.executable,
+                            dirs={project.name: str(tmp_path / "no-such-side")}, **sides)
+        for label in compare.SIDES})
+    session.calibration_dirs = {project.name: str(tmp_path)}
+    return session
 
 
 def test_a_runs_environment_carries_the_deselections_then_the_sides_options(
@@ -756,6 +760,19 @@ def test_a_deselection_is_checked_against_a_collection(tmp_path):
     project = _deselecting(tmp_path)
     session = _session(tmp_path, project)
     session._check_deselected(project, str(tmp_path / "log"))
+
+
+def test_a_cases_collected_tests_are_the_files_named_less_the_excluded(tmp_path):
+    """T120's tests: every file a collection names, in the third copy, as
+    plain paths, less the excluded."""
+    project = _deselecting(tmp_path)
+    (tmp_path / "tests" / "test_skipme.py").write_text("def test_y():\n    pass\n",
+                                                       encoding="utf-8")
+    session = _session(tmp_path, project)
+    case = compare.Case("T", "p", "m.py", collect=("tests",),
+                        collect_exclude=("skipme",))
+    session._collect(case, str(tmp_path / "log"))
+    assert session.tests[("T", "before")] == ("tests/test_x.py",)
 
 
 def test_a_deselection_that_does_not_take_stops_the_session(tmp_path, monkeypatch):
@@ -798,12 +815,21 @@ class _Engine:
     an engine that remembers does, and writes what *behave* gives it for
     the run (a report, instrument rows and an exit code)."""
 
-    def __init__(self, behave):
+    def __init__(self, behave, calibrations=()):
         self.behave = behave
         self.seen = []
         self.argvs = []
+        self.cwds = []
+        #: The seconds each calibration run takes, in turn; and where each
+        #: ran. A run of plain pytest, with no instrument, is one.
+        self.calibrations = list(calibrations)
+        self.calibrated_in = []
 
     def __call__(self, argv, cwd, env, log, timeout=None):
+        if compare.INSTRUMENT not in argv:
+            self.calibrated_in.append(cwd)
+            return compare.Timed(0, self.calibrations.pop(0), None, None, False)
+        self.cwds.append(cwd)
         memory = os.path.join(cwd, ".invective")
         self.seen.append(os.path.exists(memory))
         os.makedirs(memory, exist_ok=True)
@@ -829,10 +855,13 @@ class _Engine:
         return compare.Timed(code, 5.0 if prime else 1.0, None, None, False)
 
 
-def _engine_session(tmp_path, monkeypatch, behave, pairs=1, via="run", **flags):
+def _engine_session(tmp_path, monkeypatch, behave, pairs=1, via="run",
+                    calibrations=(), repeats=0, **flags):
     """A session of one case on a project of nothing, its runs made by
-    `_Engine`: the schedule, the units and the checks, without a venv."""
-    engine = _Engine(behave)
+    `_Engine`: the schedule, the units and the checks, without a venv.
+    With *calibrations*, the project is calibrated, one run a calibration,
+    each taking the next of them in seconds."""
+    engine = _Engine(behave, calibrations)
     monkeypatch.setattr(compare, "run_timed", engine)
     options = dict(fixed="baseline,timeout", out=str(tmp_path / "out"), repo=ROOT,
                    threshold=None, timeout=None, unit="cold", same_processes=False,
@@ -845,8 +874,11 @@ def _engine_session(tmp_path, monkeypatch, behave, pairs=1, via="run", **flags):
         sides[label] = compare.Side(label, "HEAD", sha="0" * 40, python=sys.executable,
                                     dirs={"p": str(tmp_path / label)})
     case = compare.Case("C", "p", "m.py", ("t.py",), via=via)
-    session = compare.Session(args, {"p": compare.Project("p", path="x")}, [case],
-                              [1], pairs, 0, sides)
+    project = compare.Project("p", path="x", calibrate=("t.py",) if calibrations else (),
+                              calibrate_runs=1)
+    session = compare.Session(args, {"p": project}, [case], [1], pairs, repeats, sides)
+    (tmp_path / "calibration").mkdir()
+    session.calibration_dirs = {"p": str(tmp_path / "calibration")}
     os.makedirs(session.logs)
     session.tests = {("C", label): ("t.py",) for label in compare.SIDES}
     return session, engine, case
@@ -921,6 +953,47 @@ def test_the_before_sides_touchable_seconds_are_the_pairs_U(tmp_path, monkeypatc
     pair, = _rows(tmp_path / "out" / "pairs.tsv")
     assert float(pair["before_touchable"]) == pytest.approx(0.5)
     assert session.rows()[0].touchable_part == pytest.approx(0.5)
+
+
+def test_the_tools_own_pytests_run_in_a_third_copy(tmp_path, monkeypatch):
+    """What a calibration leaves in its tree (a `.hypothesis` database) would
+    be copied into one side's campaigns and not the other's."""
+    session, engine, _case = _engine_session(tmp_path, monkeypatch, _same, pairs=2,
+                                             calibrations=[8.0] * 20)
+    session.run()
+    assert set(engine.calibrated_in) == {str(tmp_path / "calibration")}
+    assert set(engine.cwds) == {str(tmp_path / "before"), str(tmp_path / "after")}
+
+
+def test_the_warm_up_runs_in_the_third_copy(tmp_path, monkeypatch):
+    session, engine, _case = _engine_session(tmp_path, monkeypatch, _same,
+                                             calibrations=[8.0])
+    session._warm(str(tmp_path / "log"))
+    assert engine.calibrated_in == [str(tmp_path / "calibration")]
+
+
+def test_a_project_is_placed_three_times(tmp_path):
+    """One copy for each side, with its settings, and one for the tool's
+    own pytests, with the project's edits and no side's settings."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text("[tool.pytest.ini_options]\n",
+                                           encoding="utf-8")
+    project = compare.Project("p", path=str(source),
+                              pyproject=(("tool.pytest.ini_options", ("x = 1",)),))
+    session = _session(tmp_path / "s", project)
+    session.work = str(tmp_path / "work")
+    session.sides = {label: compare.Side(label, "HEAD", settings=[("confirm", "true")])
+                     for label in compare.SIDES}
+    session._place(project, str(tmp_path / "log"))
+    where = {label: session.sides[label].dirs["p"] for label in compare.SIDES}
+    where["calibration"] = session.calibration_dirs["p"]
+    assert len(set(where.values())) == 3
+    for label, path in where.items():
+        with open(os.path.join(path, "pyproject.toml"), encoding="utf-8") as fh:
+            said = tomllib.loads(fh.read())
+        assert said["tool"]["pytest"]["ini_options"] == {"x": 1}
+        assert ("invective" in said["tool"]) == (label != "calibration"), label
 
 
 def test_the_pairs_process_counts_are_recorded(tmp_path, monkeypatch):
