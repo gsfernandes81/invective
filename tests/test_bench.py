@@ -884,6 +884,16 @@ def _calls(mutants=2, baselines=1):
                     "kind": "CMP", "line": i + 1, "change": "x"} for i in range(mutants)]
 
 
+def _runs_of(report):
+    """One instrument row for each kill of *report* the verdict cache does
+    not keep, matched to it as the instrument matches a run to its entry:
+    the runs a re-run makes again. The report's entries carry no diff, so
+    neither side has a mark."""
+    return [{"n": 100 + i, "prefix": "", "seconds": 0.2, "target": "m.py",
+             "kind": k["kind"], "line": k["line"], "change": k["change"]}
+            for i, k in enumerate(report["kills"]) if compare._not_kept(k)]
+
+
 class _Engine:
     """`run_timed` in place of a run of invective: it says whether the
     run's project held a `.invective` when it started, leaves one behind, as
@@ -1150,34 +1160,90 @@ def test_same_processes_fails_without_the_instrument(tmp_path, monkeypatch):
 
 
 def test_a_rerun_starts_its_baselines_and_one_run_a_kill_by_time():
+    report = _report(timeouts=2)
     calls = _calls(mutants=5, baselines=4) + [
-        {"n": None, "prefix": "probe-", "seconds": 0.1}]
-    assert compare.rerun_expected(calls, [_report(timeouts=2)]) == 6
+        {"n": None, "prefix": "probe-", "seconds": 0.1}] + _runs_of(report)
+    assert compare.rerun_expected(calls, [report]) == 6
     assert compare.rerun_expected(None, [_report()]) is None
 
 
 def test_a_rerun_runs_again_every_kill_load_made():
-    """A kill a signal ended (the OOM killer at N = 4) is never remembered
-    either, so a correct re-run starts one more process for it."""
+    """A kill a signal ended (the OOM killer at N = 4) is never kept either,
+    so a correct re-run starts one more process for it."""
     report = _report(timeouts=1)
     report["kills"].append({"kind": "CMP", "line": 8, "change": "x", "code": -9,
                             "killer": ""})
-    assert compare.rerun_expected(_calls(), [report]) == 1 + 2
+    assert compare.rerun_expected(_calls() + _runs_of(report), [report]) == 1 + 2
 
 
-def test_a_coverage_run_is_no_baseline():
+def test_a_coverage_run_is_no_baseline_but_a_rerun_repeats_it():
     """A run of the original with the coverage handshake is a feature's
-    run, not the engine's baseline: neither expected again of a re-run nor
-    left out of the touchable part."""
+    run, not the engine's baseline: a re-run makes it again, so it is
+    expected of one, and it stays in the touchable part."""
     calls = _calls() + [{"n": None, "prefix": "", "coverage": True, "seconds": 9.0}]
-    assert compare.rerun_expected(calls, [_report(timeouts=0)]) == 1
+    assert compare.rerun_expected(calls, [_report(timeouts=0)]) == 2
     assert compare.fixed_seconds(calls, set(), ["baseline"]) == 0.5
+
+
+def test_a_rerun_counts_the_coverage_run_the_untimed_run_made():
+    """One that never started one (coverage not installed, `--tests` with
+    an option) made no row, and its re-run makes none either."""
+    coverage = {"n": None, "prefix": "", "coverage": True, "seconds": 9.0}
+    report = _report(timeouts=0)
+    assert compare.rerun_expected(_calls() + [coverage], [report]) == 2
+    assert compare.rerun_expected(_calls(), [report]) == 1
+
+
+def _narrowed(entry, *seconds):
+    """The rows of *entry*'s mutant: its narrowed run, then its full run
+    when *seconds* has two."""
+    return [{"n": 7, "prefix": prefix, "seconds": took, "target": "m.py",
+             "kind": entry["kind"], "line": entry["line"],
+             "change": entry["change"]}
+            for prefix, took in zip(("narrowed-", ""), seconds)]
+
+
+def test_a_rerun_counts_the_narrowed_and_the_full_run_of_a_mutant_not_kept():
+    """A narrowed run that passed and a full run that timed out are two
+    runs a re-run makes again; a narrowed run that timed out is one."""
+    report = _report(timeouts=1)
+    timeout = report["kills"][1]
+    assert compare.rerun_expected(_calls() + _narrowed(timeout, 1.0, 30.0),
+                                  [report]) == 1 + 2
+    assert compare.rerun_expected(_calls() + _narrowed(timeout, 30.0),
+                                  [report]) == 1 + 1
+
+
+def test_a_rerun_does_not_count_the_runs_of_a_kept_verdict():
+    """Survivors, the accepted, and kills by a test or a module are read
+    back, with their narrowed runs or without."""
+    report = _report(timeouts=0, survived=[1])
+    report["accepted"] = [{"kind": "NOT", "line": 5, "change": "not X -> X"}]
+    report["kills"].append({"kind": "CMP", "line": 6, "change": "Eq -> NotEq",
+                            "code": 2, "killer": "t.py"})
+    entries = report["kills"] + report["survivors"] + report["accepted"]
+    rows = [row for entry in entries for row in _narrowed(entry, 1.0, 1.0)]
+    assert compare.rerun_expected(_calls() + rows, [report]) == 1
+    assert compare.rerun_expected(_calls() + [row for entry in entries for row in
+                                              _narrowed(entry, 1.0)],
+                                  [report]) == 1
+
+
+@pytest.mark.parametrize("code, killer, kept", [
+    (1, "t.py::test_a", True), (2, "t.py", True), (3, "t.py::test_a", False),
+    (4, "t.py", False), (5, "t.py", False), (-1, "TIMEOUT", False),
+    (-9, "", False), (1, "", False)])
+def test_which_kills_a_cache_keeps(code, killer, kept):
+    """`store.sound`'s kills, as the tool reads them from a report."""
+    assert compare._not_kept({"code": code, "killer": killer}) is not kept
 
 
 def _rerun(rows):
     def behave(side, prime, argv):
         if side == "after" and not prime:
             return _report(), _calls(mutants=rows - 1), 0
+        if side == "after":
+            return _report(), _calls() + _runs_of(_report()), 0
         return _report(), _calls(), 0
     return behave
 
@@ -1225,6 +1291,8 @@ def test_one_missed_rerun_marks_the_case_missed(tmp_path, monkeypatch):
         if side == "after" and not prime:
             timed.append(1)
             return _report(), _calls(mutants=len(timed)), 0
+        if side == "after":
+            return _report(), _calls() + _runs_of(_report()), 0
         return _report(), _calls(), 0
 
     session, _engine, _case = _engine_session(
@@ -1566,11 +1634,11 @@ def test_a_quick_session_measures_one_pair_and_leaves_nothing_behind(tmp_path):
 
 @sessions
 def test_a_warm_session_with_every_check_and_a_confirm_run(tmp_path):
-    """Warm slots, both process checks and the confirm run, end to end. The
-    engine at HEAD remembers each mutant's killer, not its verdict, so its
-    re-run starts more processes than a re-run that remembered every verdict
-    would: the sides agree, the re-run's count is missed, and the session
-    fails on that alone."""
+    """Warm slots, both process checks and the confirm run, end to end. With
+    its verdict cache off, the engine at HEAD remembers each mutant's
+    killer, not its verdict, so its re-run starts more processes than a
+    re-run that remembered every verdict would: the sides agree, the
+    re-run's count is missed, and the session fails on that alone."""
     cases = _project(tmp_path)
     done = subprocess.run(_argv(tmp_path, cases, "--unit", "warm", "--workers", "2",
                                 "--same-processes", "--expect-rerun-processes",
@@ -1600,6 +1668,30 @@ def test_a_warm_session_with_every_check_and_a_confirm_run(tmp_path):
     assert "F N=2 with --confirm (ok): unreproduced []" in summary
     finding = _joined((out / "finding.md").read_text(encoding="utf-8"))
     assert "The F run at N = 2 with `--confirm` named no kill" in finding
+    assert not _left_behind(tmp_path)
+
+
+@sessions
+def test_a_warm_session_with_the_cache_on_starts_what_a_rerun_is_expected_to(
+        tmp_path):
+    """The same session with the fixture's verdict cache on: its re-run
+    reads both kills, so it starts the three runs of the original and
+    nothing else, no killer gated and no mutant run, and the session
+    passes."""
+    cases = _project(tmp_path)
+    settings = tmp_path / "fixture" / "pyproject.toml"
+    settings.write_text(settings.read_text(encoding="utf-8")
+                        + "[tool.invective]\ncache = true\n", encoding="utf-8")
+    done = subprocess.run(_argv(tmp_path, cases, "--unit", "warm", "--workers", "2",
+                                "--same-processes", "--expect-rerun-processes",
+                                "--confirm-run", "--threshold", "1000"),
+                          capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout + done.stderr
+    runs = _rows(tmp_path / "out" / "runs.tsv")
+    assert [(r["prime_runs"], r["runs"]) for r in runs[:2]] == [("5", "3")] * 2
+    pair, = _rows(tmp_path / "out" / "pairs.tsv")
+    assert (pair["same_processes"], pair["expected_processes"]) == ("True", "3")
+    assert runs[2]["unreproduced"] == "0"
     assert not _left_behind(tmp_path)
 
 
