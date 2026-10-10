@@ -320,13 +320,10 @@ def _hex(data: str | bytes) -> str:
 def _digest(path: str) -> str:
     """The SHA-256 of the file *path*, a link read through; of the link's
     own text when it leads nowhere."""
-    try:
-        with open(path, "rb") as fh:
-            return hashlib.file_digest(fh, "sha256").hexdigest()
-    except OSError:
-        if not os.path.islink(path):
-            raise
+    if os.path.islink(path) and not os.path.exists(path):
         return _hex("link:" + os.readlink(path))
+    with open(path, "rb") as fh:
+        return hashlib.file_digest(fh, "sha256").hexdigest()
 
 
 def _toml(value: object) -> object:
@@ -591,8 +588,7 @@ class Cache:
 
     def __init__(self, root: str, key: str, count: int, confirm: bool, *,
                  target: str, say: Callable[[str], object],
-                 safe_only: bool = False,
-                 origins: Iterable[str] = ("",)) -> None:
+                 safe_only: bool, origins: Iterable[str]) -> None:
         origins = frozenset(origins) | {""}
         if safe_only and (count > 1 or len(origins) > 1):
             raise ValueError("no run with the unsafe speedups off has %d "
@@ -717,4 +713,5 @@ class Cache:
                 if path != self.where and os.path.isdir(path):
                     others.append((os.path.getmtime(path), path))
         for _mtime, path in sorted(others, reverse=True)[KEEP:]:
-            shutil.rmtree(path, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                shutil.rmtree(path)

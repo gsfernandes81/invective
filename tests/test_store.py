@@ -425,6 +425,9 @@ CHANGES = {
         store, "sys", _python(prefix="/elsewhere")),
     "the executable": lambda k, mp, base: mp.setattr(
         store, "sys", _python(executable="/elsewhere/python")),
+    "a distribution's name": lambda k, mp, base: mp.setattr(
+        store.importlib.metadata, "distributions",
+        lambda: [_Dist(name="other")]),
     "a distribution's version": lambda k, mp, base: mp.setattr(
         store.importlib.metadata, "distributions",
         lambda: [_Dist(version="1.1")]),
@@ -501,6 +504,7 @@ IGNORED = {
     "README.md": lambda k, mp: k.write("README.md", "read me again\n"),
     "a comment in pyproject": lambda k, mp: k.write(
         "pyproject.toml", "# a comment\n" + PROJECT["pyproject.toml"]),
+
     "PYTEST_CURRENT_TEST": lambda k, mp: mp.setenv("PYTEST_CURRENT_TEST", "x"),
     "PYTEST_VERSION": lambda k, mp: mp.setenv("PYTEST_VERSION", "1"),
     "PYTEST_XDIST_WORKER": lambda k, mp: mp.setenv("PYTEST_XDIST_WORKER", "gw9"),
@@ -536,6 +540,75 @@ def test_a_pyproject_with_a_date_hashes_and_the_date_counts(keyed):
     keyed.write("pyproject.toml", PROJECT["pyproject.toml"]
                 + "[tool.x]\nd = 2026-10-11\nt = 10:00:00\n")
     assert keyed.key() != before
+
+
+def test_the_order_of_pyproject_s_tables_and_keys_is_not_in_the_key(keyed):
+    keyed.write("pyproject.toml", PROJECT["pyproject.toml"]
+                + "[tool.x]\na = 1\nb = 2\n")
+    before = keyed.key()
+    keyed.write("pyproject.toml", "[tool.x]\nb = 2\na = 1\n"
+                + PROJECT["pyproject.toml"])
+    assert keyed.key() == before
+
+
+def test_the_order_files_were_found_in_is_not_in_the_key(keyed):
+    """The walk's order is the filesystem's, which two copies need not
+    share."""
+    hashed = store.hash_tree(keyed.copy, keyed.top)
+    backwards = store.Tree(hashed.top, dict(reversed(hashed.files.items())),
+                           dict(reversed(hashed.data.items())))
+    assert list(backwards.files) != list(hashed.files)
+    keys = [store.campaign_key(tree_, keyed.copy, "src/pkg/mod.py",
+                               keyed.args["tests"], [], [UNIT, INTEGRATION],
+                               [], ["lib/util.py", "src/pkg/__init__.py"])
+            for tree_ in (hashed, backwards)]
+    assert keys[0] == keys[1]
+
+
+def test_the_map_leaves_out_what_the_copy_leaves_out_and_the_owner(keyed):
+    """Its version control, caches and virtual environments, and the pid
+    of the process the copy belongs to, at its top; a file of that name
+    anywhere else is the project's."""
+    for rel in (tree.MARKER, ".git", "tests/__pycache__/t.pyc",
+                "tests/node_modules/x.js", "tests/venv/pyvenv.cfg",
+                "tests/venv/lib.py", "tests/unit/" + tree.MARKER):
+        keyed.write(rel, "x")
+    hashed = store.hash_tree(keyed.copy, keyed.top)
+    assert {name for name in hashed.files
+            if not name.startswith(tuple(PROJECT))} == {
+        "tests/unit/" + tree.MARKER}
+    assert set(PROJECT) <= set(hashed.files)
+    assert set(hashed.data) == {"pyproject.toml"}
+
+
+def test_a_path_outside_the_tree_is_named_whole(tmp_path, monkeypatch):
+    hashed = store.Tree(str(tmp_path / "top"), {}, {})
+    for path in (str(tmp_path), str(tmp_path / "other" / "x.py"),
+                 str(tmp_path / "topx" / "x.py")):
+        assert hashed.key(path) == path
+    assert hashed.key(str(tmp_path / "top" / "a" / "b.py")) == "a/b.py"
+
+    def other_drive(path, start):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(store.os.path, "relpath", other_drive)
+    assert hashed.key(str(tmp_path / "top" / "a.py")) == str(
+        tmp_path / "top" / "a.py")
+
+
+def test_a_directory_the_walk_cannot_read_is_an_error(tmp_path, monkeypatch):
+    """A directory left out of the map would be a change the key misses."""
+    write_tree(str(tmp_path / "copy"), {"sub/a.txt": "x"})
+    real = os.scandir
+
+    def scandir(path="."):
+        if os.path.basename(path) == "sub":
+            raise PermissionError("no access")
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    with pytest.raises(OSError):
+        store.hash_tree(str(tmp_path / "copy"), str(tmp_path / "copy"))
 
 
 def test_a_pyproject_that_is_not_toml_is_hashed_as_it_is(keyed):
@@ -932,7 +1005,7 @@ def test_campaigns_beyond_the_current_and_three_newest_are_pruned(tmp_path):
     cache = _cache(tmp_path)
     cache.put(TEXT, True, 0, "", "", "")
     other = store.Cache(str(tmp_path), "e" * 64, 1, False, target="other.py",
-                        say=print)
+                        say=print, safe_only=False, origins=[""])
     other.put(TEXT, True, 0, "", "", "")
     os.utime(other.where, (1, 1))
     ages = {}
@@ -952,6 +1025,31 @@ def test_campaigns_beyond_the_current_and_three_newest_are_pruned(tmp_path):
     shutil.rmtree(cache.where)
     cache.put(TEXT + "x", True, 0, "", "", "")
     assert cache.on_record() == 1
+
+
+def test_a_campaign_that_cannot_be_removed_is_left(tmp_path, monkeypatch):
+    cache = _cache(tmp_path)
+    for name in "0123":
+        os.makedirs(os.path.join(cache.campaigns, name * 24))
+
+    def held(path):
+        raise PermissionError("held open")
+
+    monkeypatch.setattr(store.shutil, "rmtree", held)
+    cache.finish()
+    assert len(os.listdir(cache.campaigns)) == 4
+
+
+def test_a_write_sweeps_old_temporaries_unless_told_not_to(tmp_path):
+    """The history's writes sweep as they always have; the cache's, told
+    not to, leave it to its first put."""
+    old = tmp_path / "tmpold.json"
+    for sweep, left in ((False, True), (True, False)):
+        old.write_text("{", encoding="utf-8")
+        os.utime(old, (1, 1))
+        args = {} if sweep else {"sweep": False}
+        assert store.write_json(str(tmp_path / "f.json"), {}, print, **args)
+        assert old.exists() is left
 
 
 def test_finishing_a_campaign_that_kept_nothing_is_fine(tmp_path):
