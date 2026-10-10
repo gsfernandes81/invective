@@ -197,8 +197,9 @@ one that will not import there is that directory's collection error, a kill name
 directory with no run of the original.
 
 An empty selection (exit 5) stays a refusal even when the original passes. A mutant that
-renames the tests (a parameter's id) or skips every one leaves nothing to run, and no
-test failed on it.
+renames the selected tests (a parameter's id), or that a conftest deciding what to
+collect from the target collects nothing for, leaves nothing to run, and no test failed
+on it.
 
 ## Pytest settings
 

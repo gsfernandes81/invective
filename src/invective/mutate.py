@@ -1273,9 +1273,10 @@ def _final(verdict: Verdict, mutant: Mutant, copy: Copy,
     # The baseline proved this selection collects, and no module or
     # conftest failed to import, so no test failed: this is the harness (an
     # option pytest does not know, a test it cannot find), or a mutant that
-    # left the selection nothing to run, its tests renamed (a parameter's
-    # id) or all skipped. Scoring either as a kill would be arithmetic over
-    # a run that executed no test.
+    # left the selection nothing to run: its tests renamed (a parameter's
+    # id), or none collected by a conftest that decides from the target
+    # what to collect. Scoring either as a kill would be arithmetic over a
+    # run that executed no test.
     raise Refusal(
         "%s:%d %s made pytest exit %d -- it collected nothing, so "
         "this is the runner and not the mutation. Counting it as "
