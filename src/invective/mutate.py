@@ -1892,7 +1892,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     answered = {job.idx for job in order if job.idx in known
                                 and kept.get(made(job).text) is not None}
                 unanswered = {idx: killer for idx, killer in known.items()
-                          if idx not in answered}
+                              if idx not in answered}
                 collected = set(got.selected if selection is None
                                 else selection)
                 killers = list(dict.fromkeys(
