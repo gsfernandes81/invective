@@ -1746,6 +1746,35 @@ def test_a_kill_at_a_conftest_is_confirmed_by_the_whole_selection(
     assert [r.copy for r in run.runs if r.text is None].count(0) == 4
 
 
+def test_a_killer_alone_collecting_nothing_leaves_the_kill_to_the_selection(
+        tree, monkeypatch):
+    """Confirming, a killer run alone on its mutant is judged as an attempt
+    is, never as the whole selection: one that collects nothing (a mutant
+    that renamed it) says only that it did not fail alone, and the whole
+    selection decides, here a stop at a conftest the original passes."""
+    seen, lock = collections.Counter(), threading.Lock()
+
+    def said(r):
+        if r.text is None:
+            return GREEN
+        if r.alone:
+            return mutate.Verdict(False, ExitCode.NO_TESTS_COLLECTED, "", "")
+        with lock:
+            seen[r.text] += 1
+            again = seen[r.text] > 1
+        return STOPPED if again else killed_by(MINOR)
+
+    report = Campaign(tree, monkeypatch, said=said)(
+        2, only=["CMP", "BOOL", "RAISE"], confirm=True)
+
+    assert report["killed"] == report["mutants"] == 4
+    assert {(k["killer"], k["confirmed"]) for k in report["kills"]} == {
+        (CONFTEST, "full")}
+    assert {(u["killer"], u["alone"], u["again"])
+            for u in report["unreproduced"]} == {
+        (MINOR, "passes alone on the mutant", "killed")}
+
+
 def test_a_gate_runs_the_file_s_tests_on_the_original(tmp_path, monkeypatch):
     runs = []
     monkeypatch.setattr(mutate, "run_tests", lambda *a: runs.append(a) or GREEN)
