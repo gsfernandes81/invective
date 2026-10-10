@@ -15,7 +15,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from conftest import (FILES, MARKERLESS, MONOREPO, WORKSPACE, commit,
-                      monorepo, no_pytest_settings_above, write_tree)
+                      monorepo, no_pytest_settings_above,
+                      path_fails_in_the_plugin, write_tree)
 
 #: This checkout's own `src`, ahead of any installed copy, so that the pytest
 #: started here loads the plugin under test.
@@ -573,6 +574,90 @@ def test_the_verdict_lists_the_tests_kept_when_asked(tmp_path):
     assert json.loads(verdict.read_text(encoding="utf-8")) == {
         "killer": "", "missing": [], "elsewhere": "",
         "selected": ["test_two.py::test_first", "test_two.py::test_third"]}
+
+
+@pytest.mark.parametrize("conftest, option, said", [
+    ("raise ImportError('broken')\n", [],
+     {"killer": "", "missing": [], "elsewhere": "",
+      "conftest": "tests/conftest.py"}),
+    ("", ["--no-such-option"], None),
+], ids=["conftest", "option"])
+def test_a_conftest_that_will_not_import_is_named_in_the_verdict(
+        tmp_path, conftest, option, said):
+    """pytest stops at a conftest that will not import with the code of a
+    usage error, as it does at an option it does not know, and before any
+    session: the verdict names the conftest, from the top of the run, and
+    says nothing for the option, so that the engine can tell the two
+    apart."""
+    write_tree(tmp_path, {"tests/conftest.py": conftest,
+                          "tests/test_one.py": "def test_one():\n    pass\n"})
+    verdict = tmp_path / "verdict.json"
+
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n", "0",
+         "-p", "pytest_invective", *option, "tests"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": SRC,
+             "INVECTIVE_VERDICT": str(verdict)})
+
+    assert done.returncode == 4, done.stdout + done.stderr
+    if said is None:
+        assert not verdict.exists()
+    else:
+        assert json.loads(verdict.read_text(encoding="utf-8")) == said
+
+
+@pytest.mark.parametrize("fails", ["write", "path"])
+def test_a_conftest_the_plugin_cannot_name_is_still_a_usage_error(tmp_path,
+                                                                  fails):
+    """The plugin's handler of a conftest that will not import cannot write
+    the verdict, or cannot read the conftest's path: the run still ends as
+    pytest ends it, with a usage error (4), and names no conftest. An
+    exception from the handler would end it 1 instead, which the engine
+    scores as a kill without running the original."""
+    write_tree(tmp_path, {"tests/conftest.py": "raise ImportError('broken')\n",
+                          "tests/test_one.py": "def test_one():\n    pass\n"})
+    path = SRC
+    if fails == "write":
+        verdict = tmp_path / "not-there" / "verdict.json"
+    else:
+        verdict = tmp_path / "verdict.json"
+        path = path_fails_in_the_plugin(tmp_path / "site")
+
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n", "0",
+         "-p", "pytest_invective", "tests"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": path,
+             "INVECTIVE_VERDICT": str(verdict)})
+
+    assert done.returncode == 4, done.stdout + done.stderr
+    assert "ImportError while loading conftest" in done.stdout + done.stderr
+    assert not verdict.exists()
+
+
+def test_a_moved_conftest_failure_leaves_the_plugin_loading_naming_none(
+        tmp_path, monkeypatch):
+    """`ConftestImportFailure` is pytest's private name. Moved, the plugin
+    still loads, so every pytest still starts, and a conftest that will not
+    import goes through it unnamed: a usage error naming no conftest, which
+    the engine refuses rather than kills."""
+    import _pytest.config
+    failure = _pytest.config.ConftestImportFailure
+    monkeypatch.delattr(_pytest.config, "ConftestImportFailure")
+    plugin = _plugin_here()
+    verdict = tmp_path / "verdict.json"
+    monkeypatch.setenv("INVECTIVE_VERDICT", str(verdict))
+    monkeypatch.delenv("INVECTIVE_SELECTION", raising=False)
+    early = SimpleNamespace(invocation_params=SimpleNamespace(dir=tmp_path))
+
+    hook = plugin.pytest_load_initial_conftests(early, None, [])
+    next(hook)
+    stopped = failure(tmp_path / "conftest.py", cause=ImportError("broken"))
+    with pytest.raises(failure) as caught:
+        hook.throw(stopped)
+    assert caught.value is stopped
+    assert not verdict.exists()
 
 
 def test_the_plugin_remembers_each_killer_and_runs_it_alone_next_time(

@@ -23,13 +23,13 @@ uv add --dev git+https://github.com/gsfernandes81/invective
 To pin a release by tag:
 
 ```console
-uv add --dev git+https://github.com/gsfernandes81/invective@v0.5.0
+uv add --dev git+https://github.com/gsfernandes81/invective@v0.5.1
 ```
 
 Or install the release's wheel, which needs no build backend:
 
 ```console
-uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.5.0/invective-0.5.0-py3-none-any.whl
+uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.5.1/invective-0.5.1-py3-none-any.whl
 ```
 
 It needs pytest 8.2 or later in the same environment, and supports every
@@ -187,7 +187,7 @@ only the tests that ran its lines, found by one coverage run of the selection
 before the first mutant. It needs the `coverage` extra:
 
 ```console
-uv add --dev --extra coverage git+https://github.com/gsfernandes81/invective@v0.5.0
+uv add --dev --extra coverage git+https://github.com/gsfernandes81/invective@v0.5.1
 ```
 
 A mutant is run against its narrower selection at the mutants' whole budget
@@ -325,7 +325,14 @@ read as absent.
 
 - **It refuses a failing selection.** If the chosen tests do not pass before
   any edit, every mutant would count as killed and the score would be 100%
-  for nothing. The same goes for a selection that collects no tests.
+  for nothing. The same goes for a selection that collects no tests, and for
+  a mutant's run that pytest ends with a usage error or with nothing
+  collected: it ran no test, so it says nothing of the mutant. The exception
+  is a conftest that will not import. A mutant that breaks code a conftest
+  imports stops pytest there, before any test, and the selection is then run
+  once more on the original in the same copy (once per copy). Green, the
+  mutant is killed, the conftest is its killer, and the closing lines count
+  it among the collection or internal errors; not green, the run is refused.
 - **It runs pytest only**, in a fresh process for each mutant.
 
 ## Developing invective

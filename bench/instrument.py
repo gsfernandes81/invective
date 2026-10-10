@@ -11,8 +11,11 @@ original), the
 selection file's prefix (`""` for the campaign's own), whether it carried the
 coverage handshake, its seconds and what it came to. MARKS gets the seconds
 from the start at which the campaign said its `baseline:` line (`baseline`),
-closed its pool (`pool`), first restored a copy (`confirm_start`) and
-returned its report (`end`).
+closed its pool (`pool`), first restored a copy to confirm its kills
+(`confirm_start`) and returned its report (`end`). The restore
+`Copy.original` makes, to run the original again where a mutant stopped
+pytest at a conftest, is the campaign's and not confirmation's: it is no
+mark.
 
 It runs under the side's own interpreter, against whichever invective that
 venv holds, so every hook is taken only where the version has it: an
@@ -93,11 +96,26 @@ def install(calls: str) -> None:
     copy = getattr(m, "Copy", None)
     if copy is None:
         return
+    # Whether this thread is inside `Copy.original`, whose restore is made
+    # mid-campaign, at a copy's first stop at a conftest.
+    inside = threading.local()
+    if hasattr(copy, "original"):
+        real_original = copy.original
+
+        def original(self, *args, **kwargs):
+            inside.original = True
+            try:
+                return real_original(self, *args, **kwargs)
+            finally:
+                inside.original = False
+
+        copy.original = original
     if hasattr(copy, "restore"):
         real_restore = copy.restore
 
         def restore(self, *args, **kwargs):
-            _mark("confirm_start")
+            if not getattr(inside, "original", False):
+                _mark("confirm_start")
             return real_restore(self, *args, **kwargs)
 
         copy.restore = restore

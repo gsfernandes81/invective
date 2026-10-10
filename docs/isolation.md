@@ -278,6 +278,35 @@ every one survives silently. The usual cause is an editable install whose
 `pythonpath` setting naming `src`, or a `conftest.py` that puts the copy's
 own `src` first on `sys.path` from its own `__file__`.
 
+## A run that tests nothing
+
+A mutant's run of the whole selection that pytest ends with a usage error (exit 4) or
+with nothing collected (exit 5), and that names no module as failing, ran no test. It
+says nothing of the mutant, and the campaign is refused (`mutate._final`): the baseline
+proved this selection collects, so the runner is what broke.
+
+The one exception is a conftest that will not import, which stops pytest with a usage
+error before any test, and which the plugin names in the verdict. A conftest that
+imports the target fails so whenever a mutant breaks code run at import, and no test can
+import the code then: the suite noticed, as it does when a test module will not import.
+To tell that mutant from a broken runner, the original is run again on the same selection
+in the same copy (`mutate.Copy.original`), on the worker that owns the copy. Green, the
+mutant is killed, the conftest is its killer, and the closing lines count it among the
+collection or internal errors. Not green, the campaign is refused. Each copy runs the
+original again once, at its first such mutant: the original is the same text all
+campaign, and every kill made in a copy already rests on its being green there. With
+`--confirm`, such a kill has no test to run alone, so the whole selection decides it
+again in the first copy, and one that then passes is named as `mutate.NO_KILLER`.
+
+A conftest beside a selection of node ids is loaded as their directory is collected, so
+one that will not import there is that directory's collection error, a kill named by the
+directory with no run of the original.
+
+An empty selection (exit 5) is a refusal even when the original passes. A mutant that
+renames the selected tests (a parameter's id), or that a conftest deciding what to
+collect from the target collects nothing for, leaves nothing to run, and no test failed
+on it.
+
 ## Pytest settings
 
 Every run goes by what pytest's own search finds in the tree the mutants
