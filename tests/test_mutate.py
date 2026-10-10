@@ -22,8 +22,8 @@ from invective import tree as trees
 from invective.tree import git_ref
 
 from conftest import (FILES, MARKERLESS, MONOREPO, WORKSPACE, commit, git,
-                      monorepo, no_pytest_settings_above, slow_run,
-                      write_tree)
+                      monorepo, no_pytest_settings_above,
+                      path_fails_in_the_plugin, slow_run, write_tree)
 
 SAMPLE = '''
 def refuse(n, flag, other):
@@ -1587,6 +1587,20 @@ def test_a_mutant_that_leaves_nothing_to_run_is_refused(repo):
         mutate.mutate(repo, os.path.join(repo, "pkg", "flags.py"),
                       ["pkg/tests"], ["CONST"], None)
     assert "flags.py:1 True -> False made pytest exit 5" in str(caught.value)
+
+
+def test_a_conftest_stop_the_plugin_cannot_name_is_refused(repo, tmp_path,
+                                                          monkeypatch):
+    """When the plugin cannot name the conftest a mutant stopped pytest at,
+    the run is a usage error naming nothing, which is refused: never a kill
+    with no run of the original to check it."""
+    commit(repo, {**AT_IMPORT, **_conftest("from pkg import ready\n")})
+    monkeypatch.setenv("PYTHONPATH",
+                       path_fails_in_the_plugin(tmp_path / "site"))
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(repo, os.path.join(repo, "pkg", "ready.py"),
+                      ["pkg/tests/test_ready.py"], ["CONST"], None)
+    assert "ready.py:1 True -> False made pytest exit 4" in str(caught.value)
 
 
 def test_workers_in_the_repository_s_own_options_are_turned_off(repo):

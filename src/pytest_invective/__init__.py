@@ -130,16 +130,35 @@ def pytest_load_initial_conftests(early_config, parser, args):
         # from a runner that could not start.
         verdict = os.environ.get(VERDICT)
         if verdict:
-            where = str(exc.path)
-            try:
-                where = os.path.relpath(where, early_config.invocation_params.dir)
-            except ValueError:
-                # On another drive (Windows): its whole path, which names it.
-                pass
-            with open(verdict, "w", encoding="utf-8") as fh:
-                json.dump({"killer": "", "missing": [], "elsewhere": "",
-                           "conftest": where.replace(os.sep, "/")}, fh)
+            _name_conftest(verdict, exc, early_config)
         raise
+
+
+def _name_conftest(verdict, exc, early_config):
+    """Write the verdict naming the conftest *exc* stopped pytest at, or
+    write nothing at all.
+
+    **This never raises.** An exception from here would replace *exc*, which
+    pytest exits 4 for, with one it exits 1 for, and the engine scores a
+    run that ends 1 naming no test as a kill, with no run of the original to
+    check it. With no verdict, the run is a usage error no conftest is named
+    for, which the engine refuses.
+    """
+    try:
+        where = os.fspath(exc.path)
+        try:
+            where = os.path.relpath(where, early_config.invocation_params.dir)
+        except ValueError:
+            # On another drive (Windows): its whole path, which names it.
+            pass
+        said = json.dumps({"killer": "", "missing": [], "elsewhere": "",
+                           "conftest": where.replace(os.sep, "/")})
+        # One write of the whole text: one cut short is no JSON, and the
+        # engine reads it as no verdict.
+        with open(verdict, "w", encoding="utf-8") as fh:
+            fh.write(said)
+    except Exception:
+        pass
 
 
 def _select(early_config, args, path):

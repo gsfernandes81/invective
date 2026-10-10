@@ -15,7 +15,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from conftest import (FILES, MARKERLESS, MONOREPO, WORKSPACE, commit,
-                      monorepo, no_pytest_settings_above, write_tree)
+                      monorepo, no_pytest_settings_above,
+                      path_fails_in_the_plugin, write_tree)
 
 #: This checkout's own `src`, ahead of any installed copy, so that the pytest
 #: started here loads the plugin under test.
@@ -551,6 +552,35 @@ def test_a_conftest_that_will_not_import_is_named_in_the_verdict(
         assert not verdict.exists()
     else:
         assert json.loads(verdict.read_text(encoding="utf-8")) == said
+
+
+@pytest.mark.parametrize("fails", ["write", "path"])
+def test_a_conftest_the_plugin_cannot_name_is_still_a_usage_error(tmp_path,
+                                                                  fails):
+    """The plugin's handler of a conftest that will not import cannot write
+    the verdict, or cannot read the conftest's path: the run still ends as
+    pytest ends it, with a usage error (4), and names no conftest. An
+    exception from the handler would end it 1 instead, which the engine
+    scores as a kill without running the original."""
+    write_tree(tmp_path, {"tests/conftest.py": "raise ImportError('broken')\n",
+                          "tests/test_one.py": "def test_one():\n    pass\n"})
+    path = SRC
+    if fails == "write":
+        verdict = tmp_path / "not-there" / "verdict.json"
+    else:
+        verdict = tmp_path / "verdict.json"
+        path = path_fails_in_the_plugin(tmp_path / "site")
+
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n", "0",
+         "-p", "pytest_invective", "tests"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": path,
+             "INVECTIVE_VERDICT": str(verdict)})
+
+    assert done.returncode == 4, done.stdout + done.stderr
+    assert "ImportError while loading conftest" in done.stdout + done.stderr
+    assert not verdict.exists()
 
 
 def test_the_plugin_remembers_each_killer_and_runs_it_alone_next_time(
