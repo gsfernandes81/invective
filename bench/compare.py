@@ -23,7 +23,9 @@ rows under `logs/`.
 
 Exit status: 0, every case concluded with equal verdicts; 1, a run died or a
 case is inconclusive; 2, the setup failed or the arguments are wrong; 3, the
-verdicts differ; 130, stopped by ^C or SIGTERM. The worktrees, venvs and
+verdicts differ; 4, a pytest process count asked for by `--same-processes` or
+`--expect-rerun-processes` was not met; 5, the `--confirm-run` named a kill it
+could not reproduce, or could not say; 130, stopped by ^C or SIGTERM. The worktrees, venvs and
 copies are removed in every case unless `--keep` is given.
 
 The tool needs git and uv, and nothing from this project's environment: it is
@@ -392,6 +394,39 @@ def ratios(before: float, after: float, before_fixed: float | None,
 
 
 # --------------------------------------------------------------------------
+# The pytest processes
+
+
+def process_count(calls: Sequence[dict] | None) -> int | None:
+    """How many pytest processes a run started: one for each `Copy.run`
+    the instrument recorded, or None without the instrument."""
+    return None if calls is None else len(calls)
+
+
+def rerun_expected(calls: Sequence[dict] | None, reports: Sequence[dict]) -> int | None:
+    """How many pytest processes a re-run that remembers every verdict it
+    can starts, from the run before it (*calls*, *reports*): its baseline
+    runs again (each run of the original on the campaign's own selection),
+    and one run for each mutant it killed by time, since a kill by time is
+    never remembered. None without the instrument."""
+    if calls is None:
+        return None
+    baselines = sum(1 for row in calls if row.get("n") is None and not row.get("prefix"))
+    timeouts = sum(1 for report in reports for k in report["kills"]
+                   if k.get("code") == TIMED_OUT)
+    return baselines + timeouts
+
+
+def unreproduced_of(reports: Sequence[dict]) -> list | None:
+    """The kills a `--confirm` run could not reproduce, from every report;
+    None when a report does not say, as one whose kills were not confirmed
+    does not."""
+    if not reports or any("unreproduced" not in report for report in reports):
+        return None
+    return [item for report in reports for item in report["unreproduced"]]
+
+
+# --------------------------------------------------------------------------
 # Verdicts
 
 
@@ -483,6 +518,25 @@ class Row:
     ceiling: float | None
     floor: Floor | None
     verdicts: str
+    #: The median pytest processes each side's runs in kept pairs started,
+    #: and whether any kept pair's sides started different numbers.
+    processes_before: float | None = None
+    processes_after: float | None = None
+    processes_differ: bool = False
+    #: With `--expect-rerun-processes`: "ok", or "missed" when a kept pair's
+    #: after run started other than the count expected of it.
+    rerun: str = "-"
+
+    @property
+    def processes(self) -> str:
+        if self.processes_before is None or self.processes_after is None:
+            return "-"
+        said = "%g/%g" % (self.processes_before, self.processes_after)
+        if self.processes_differ:
+            said += " differ"
+        if self.rerun != "-":
+            said += " rerun %s" % self.rerun
+        return said
 
     @property
     def conclusive(self) -> bool:
@@ -512,7 +566,7 @@ def table(rows: Sequence[Row]) -> list[str]:
     """The summary's table: speedups are before over after, so above 1 is
     faster; each a median over the kept pairs, of the ratio within each."""
     head = ["case", "N", "pairs", "before", "after", "speedup", "range",
-            "touchable", "ceiling", "f (nbrs)", "beyond 2f", "verdicts"]
+            "touchable", "ceiling", "f (nbrs)", "beyond 2f", "processes", "verdicts"]
     body = []
     for r in rows:
         pairs = "%d/%d" % (r.kept, r.asked)
@@ -527,7 +581,7 @@ def table(rows: Sequence[Row]) -> list[str]:
             beyond = "inconclusive"
         body.append([r.case, str(r.workers), pairs, _s(r.before), _s(r.after),
                      _x(r.whole), rng, _x(r.touchable), _x(r.ceiling), floor,
-                     beyond, r.verdicts])
+                     beyond, r.processes, r.verdicts])
     widths = [max(len(line[i]) for line in [head] + body) for i in range(len(head))]
     return ["  ".join(cell.ljust(w) for cell, w in zip(line, widths)).rstrip()
             for line in [head] + body]
@@ -547,7 +601,9 @@ def finding(info: dict, rows: Sequence[Row]) -> str:
     *info* holds: date, cpu, cores, os, python, before and after (each a
     dict of ref, sha, settings, env), cases (name -> (command, project,
     where)), deselected (project -> node ids), pairs, workers, calibration
-    (project -> what it runs), threshold and fixed."""
+    (project -> what it runs), threshold and fixed; and, when they are
+    there, unit ("cold" or "warm") and confirm (a list of dicts of case,
+    workers, status and unreproduced)."""
     def side(name):
         s = info[name]
         text = "%s `%s` at `%s`" % (name, s["ref"], s["sha"][:7])
@@ -564,23 +620,29 @@ def finding(info: dict, rows: Sequence[Row]) -> str:
         % (project, ", ".join("`%s`" % node for node in nodes))
         for project, nodes in info["deselected"].items() if nodes)
     calibrated = "; ".join("on %s, %s" % kv for kv in info["calibration"].items())
+    unit = ("each run cold" if info.get("unit", "cold") == "cold" else
+            "warm: in each slot an untimed run from a fresh `.invective`, then the "
+            "timed run")
     conditions = (
         "%s, %s, %s, %s, %s; %s, %s; %s%s; workers %s; %s ABBA pair(s) per case "
-        "and N, wall time; a calibration just before and after every run (%s), a pair "
-        "discarded past %s; touchable part leaves out %s"
+        "and N, %s, wall time; a calibration just before and after every run (%s), "
+        "a pair discarded past %s; touchable part leaves out %s"
         % (info["date"], info["cpu"], info["cores"], info["os"], info["python"],
            side("before"), side("after"), cases, deselected,
-           ", ".join(map(str, info["workers"])), info["pairs"],
+           ", ".join(map(str, info["workers"])), info["pairs"], unit,
            calibrated or "none", info["threshold"], info["fixed"]))
     lines = _wrap("**Finding:** (%s)" % conditions)
     lines.append(">")
-    lines.append("> | case | N | pairs | before | after | speedup | touchable | f |")
-    lines.append("> |---|---|---|---|---|---|---|---|")
+    lines.append("> | case | N | pairs | before | after | speedup | touchable | f "
+                 "| processes |")
+    lines.append("> |---|---|---|---|---|---|---|---|---|")
     for r in rows:
         floor = "-" if r.floor is None else "%.1f%%" % (100 * r.floor.f)
-        lines.append("> | %s | %d | %d of %d | %s | %s | %s | %s | %s |" % (
+        processes = ("-" if r.processes_before is None or r.processes_after is None
+                     else "%g / %g" % (r.processes_before, r.processes_after))
+        lines.append("> | %s | %d | %d of %d | %s | %s | %s | %s | %s | %s |" % (
             r.case, r.workers, r.kept, r.asked, _s(r.before), _s(r.after),
-            _x(r.whole), _x(r.touchable), floor))
+            _x(r.whole), _x(r.touchable), floor, processes))
     lines.append(">")
     said = []
     for r in rows:
@@ -605,6 +667,16 @@ def finding(info: dict, rows: Sequence[Row]) -> str:
             sentence += " That is inside 2f, so it is no change."
         if not r.conclusive:
             sentence += " Fewer pairs were kept than asked, so it is inconclusive."
+        if r.processes_before is not None and r.processes_after is not None:
+            sentence += (" Its sides started %g and %g pytest processes%s." % (
+                r.processes_before, r.processes_after,
+                ", and in some pair the two differed" if r.processes_differ else ""))
+        if r.rerun == "ok":
+            sentence += (" Every timed run after started as many as expected of a "
+                         "re-run: the baselines, and one a kill by time.")
+        elif r.rerun == "missed":
+            sentence += (" A timed run after did not start the baselines and one a "
+                         "kill by time, as a re-run is expected to.")
         said.append(sentence)
     differ = sorted({r.case for r in rows if r.verdicts == "DIFFER"})
     load = sorted({r.case for r in rows if r.verdicts == "load only"})
@@ -616,6 +688,18 @@ def finding(info: dict, rows: Sequence[Row]) -> str:
     if rows and all(r.verdicts == "equal" for r in rows):
         said.append("Every run of a case had the same kills, survivors and "
                     "acceptances.")
+    for c in info.get("confirm", ()):
+        head = "The %s run at N = %d with `--confirm`" % (c["case"], c["workers"])
+        if c["unreproduced"] is None:
+            said.append("%s did not say what it could not reproduce (%s)."
+                        % (head, c["status"]))
+        elif not c["unreproduced"]:
+            said.append("%s named no kill it could not reproduce." % head)
+        else:
+            said.append("%s named %d kill(s) it could not reproduce: %s." % (
+                head, len(c["unreproduced"]), ", ".join(
+                    "line %s %s" % (u.get("line"), u.get("change"))
+                    for u in c["unreproduced"])))
     lines += _wrap(" ".join(said))
     return "\n".join(lines) + "\n"
 
@@ -957,6 +1041,14 @@ class Run:
     marks: dict = dataclasses.field(default_factory=dict)
     log: str = ""
     position: int = 0
+    #: "timed", "prime" for a warm slot's untimed first run, or "confirm".
+    kind: str = "timed"
+    #: A warm slot's untimed first run.
+    prime: "Run | None" = None
+    #: The pytest processes a re-run is expected to start, when asked.
+    expected: int | None = None
+    #: What a confirm run could not reproduce; None when it did not say.
+    unreproduced: list | None = None
 
     @property
     def ok(self) -> bool:
@@ -973,11 +1065,26 @@ class Calibration:
 RUN_COLUMNS = ["seq", "case", "project", "workers", "pair", "position", "side",
                "ref", "commit", "wall", "user", "sys", "cal_before", "cal_after",
                "exit", "status", "killed", "survived", "accepted", "timeouts",
-               "runs", "fixed", "marks", "log"]
+               "runs", "fixed", "marks", "log", "unit", "prime_wall", "prime_exit",
+               "prime_status", "prime_killed", "prime_survived", "prime_accepted",
+               "prime_timeouts", "prime_runs", "expected_runs", "unreproduced"]
 PAIR_COLUMNS = ["case", "workers", "pair", "order", "before_seq", "after_seq",
                 "calibrations", "spread", "threshold", "status", "speedup",
-                "touchable", "ceiling", "before_fixed", "after_fixed"]
+                "touchable", "ceiling", "before_fixed", "after_fixed",
+                "before_processes", "after_processes", "same_processes",
+                "expected_processes"]
 CAL_COLUMNS = ["seq", "case", "project", "command", "runs", "median", "log"]
+
+
+def _counts(reports: Sequence[dict], prefix: str = "") -> dict:
+    """A run's verdicts counted, as runs.tsv's columns."""
+    if not reports:
+        return {}
+    v = verdicts(reports).values()
+    return {prefix + "killed": sum(x[0] == "killed" for x in v),
+            prefix + "survived": sum(x[0] == "survived" for x in v),
+            prefix + "accepted": sum(x[0] == "accepted" for x in v),
+            prefix + "timeouts": sum(x[0] == "killed" and x[1] == TIMED_OUT for x in v)}
 
 
 def _tsv(path: str, columns: list[str], row: dict) -> None:
@@ -1028,6 +1135,9 @@ class Session:
         if args.threshold is not None:
             self.threshold, self.threshold_set = args.threshold, True
             self.threshold_how = "%.2fx, as given" % args.threshold
+        self.unit = getattr(args, "unit", "cold")
+        self.process_failures: list[str] = []
+        self.confirmed: list[dict] = []
         self.first_verdicts: dict[str, tuple[Run, dict]] = {}
         self.differences: list[str] = []
         self.differ: dict[str, str] = {}
@@ -1260,7 +1370,7 @@ class Session:
     # -- one run
 
     def argv(self, case: Case, side: Side, workers: int, report: str,
-             calls: str, marks: str) -> list[str]:
+             calls: str, marks: str, confirm: bool = False) -> list[str]:
         tests = list(self.tests[(case.name, side.label)])
         argv = [side.python, INSTRUMENT, "--calls", calls, "--marks", marks]
         if case.via == "pytest":
@@ -1273,6 +1383,8 @@ class Session:
             # Left out at one, so a ref from before workers can be compared.
             if workers != 1:
                 argv += ["--mutate-workers", str(workers)]
+            if confirm:
+                argv += ["--mutate-confirm"]
             return argv + tests
         argv += ["run", "--target", case.target, "--tests", *tests]
         if case.only:
@@ -1282,45 +1394,76 @@ class Session:
         argv += ["--json", report]
         if workers != 1:
             argv += ["--workers", str(workers)]
+        if confirm:
+            argv += ["--confirm"]
         return argv + list(case.options)
 
     def run_one(self, case: Case, workers: int, pair: int, position: int,
-                label: str, done: dict[str, Run]) -> Run:
-        """One run of *case* by side *label*, put in *done* as it starts, so
-        that a run a ^C stops is recorded with the rest."""
+                label: str, done: dict[str, Run], confirm: bool = False) -> Run:
+        """One slot of *case* by side *label*, put in *done* as it starts, so
+        that a run a ^C stops is recorded with the rest. The slot starts from
+        a fresh `.invective`. Cold, it is one timed run; warm (`--unit warm`),
+        an untimed run first, whose memory the timed run then has. *confirm*
+        makes it the one cold run with `--confirm`."""
         side = self.sides[label]
         project = self.projects[case.project]
         self.seq += 1
-        run = Run(self.seq, case.name, workers, pair, label, position=position)
+        run = Run(self.seq, case.name, workers, pair, label, position=position,
+                  kind="confirm" if confirm else "timed")
         done[label] = run
-        stem = os.path.join(self.logs, "%03d-%s-n%d-%s" % (run.seq, case.name,
-                                                           workers, label))
+        stem = os.path.join(self.logs, "%03d-%s-n%d-%s%s" % (
+            run.seq, case.name, workers, label, "-confirm" if confirm else ""))
         run.log = stem + ".log"
-        report, calls, marks = (stem + ".report.json", stem + ".calls.jsonl",
-                                stem + ".marks.json")
-        where = side.dirs[project.name]
-        # Cold: nothing a run remembers is kept for the next.
-        _rmtree(os.path.join(where, ".invective"))
-        print("[%d] %s N=%d pair %d %s ..." % (run.seq, case.name, workers, pair + 1,
-                                              label), end=" ", flush=True)
+        # Nothing a slot remembers reaches the next, on either side, whether
+        # or not the engine keeps anything there.
+        _rmtree(os.path.join(side.dirs[project.name], ".invective"))
+        print("[%d] %s N=%d %s %s ..." % (
+            run.seq, case.name, workers, "confirm" if confirm else "pair %d" % (pair + 1),
+            label), end=" ", flush=True)
         self.runs.append(run)
-        self.sequences.setdefault((case.name, workers), []).append(run)
+        if not confirm:
+            self.sequences.setdefault((case.name, workers), []).append(run)
         try:
-            run.timed = run_timed(self.argv(case, side, workers, report, calls, marks),
-                                  where, self.env_for(side, project), run.log,
-                                  self.args.timeout)
+            if self.unit == "warm" and not confirm:
+                run.prime = Run(run.seq, case.name, workers, pair, label,
+                                position=position, kind="prime")
+                self._execute(run.prime, case, side, workers, stem + "-prime")
+                print("primed in %.1f s (%s)," % (run.prime.timed.wall,
+                                                  run.prime.status), end=" ", flush=True)
+                if not run.prime.ok:
+                    # No timed run is worth taking after an untimed one failed.
+                    run.status = run.prime.status
+                    print("no timed run", flush=True)
+                    print("  the untimed run %s; its log is %s"
+                          % (run.status, run.prime.log), flush=True)
+                    return run
+            self._execute(run, case, side, workers, stem, confirm)
         except KeyboardInterrupt:
             run.status = "stopped"
+            if run.prime is not None and not run.prime.status:
+                run.prime.status = "stopped"
             print("stopped", flush=True)
             raise
         finally:
             self.cal_last = None
-        run.status = status_of(run.timed, self._load(run, report, calls, marks))
         print("%.1f s, exit %s, %s" % (run.timed.wall, run.timed.code, run.status),
               flush=True)
         if run.status != "ok":
             print("  the run %s; its log is %s" % (run.status, run.log), flush=True)
         return run
+
+    def _execute(self, run: Run, case: Case, side: Side, workers: int, stem: str,
+                 confirm: bool = False) -> None:
+        """*run* made: timed, and its report, instrument rows and marks read."""
+        project = self.projects[case.project]
+        run.log = stem + ".log"
+        report, calls, marks = (stem + ".report.json", stem + ".calls.jsonl",
+                                stem + ".marks.json")
+        run.timed = run_timed(
+            self.argv(case, side, workers, report, calls, marks, confirm),
+            side.dirs[project.name], self.env_for(side, project), run.log,
+            self.args.timeout)
+        run.status = status_of(run.timed, self._load(run, report, calls, marks))
 
     def _load(self, run: Run, report: str, calls: str, marks: str) -> bool:
         try:
@@ -1348,25 +1491,31 @@ class Session:
     def _record(self, run: Run, case: Case, position: int, fixed: float | None = None):
         side = self.sides[run.side]
         t = run.timed
-        counts = {}
-        if run.reports:
-            v = verdicts(run.reports)
-            counts = {"killed": sum(x[0] == "killed" for x in v.values()),
-                      "survived": sum(x[0] == "survived" for x in v.values()),
-                      "accepted": sum(x[0] == "accepted" for x in v.values()),
-                      "timeouts": sum(x[0] == "killed" and x[1] == TIMED_OUT
-                                      for x in v.values())}
-        _tsv(os.path.join(self.out, "runs.tsv"), RUN_COLUMNS, {
+        prime = run.prime
+        row = {
             "seq": run.seq, "case": run.case, "project": case.project,
-            "workers": run.workers, "pair": run.pair + 1, "position": position + 1,
-            "side": run.side, "ref": side.ref, "commit": side.sha,
-            "wall": t.wall if t else None, "user": t.user if t else None,
-            "sys": t.sys if t else None, "cal_before": run.cal_before,
-            "cal_after": run.cal_after, "exit": t.code if t else None,
-            "status": run.status, **counts,
-            "runs": len(run.calls) if run.calls is not None else None,
+            "workers": run.workers,
+            "pair": "confirm" if run.kind == "confirm" else run.pair + 1,
+            "position": position + 1, "side": run.side, "ref": side.ref,
+            "commit": side.sha, "wall": t.wall if t else None,
+            "user": t.user if t else None, "sys": t.sys if t else None,
+            "cal_before": run.cal_before, "cal_after": run.cal_after,
+            "exit": t.code if t else None, "status": run.status,
+            **_counts(run.reports), "runs": process_count(run.calls),
             "fixed": fixed, "marks": run.marks,
-            "log": os.path.relpath(run.log, self.out)})
+            "log": os.path.relpath(run.log, self.out),
+            "unit": "cold" if run.kind == "confirm" else self.unit,
+            "expected_runs": run.expected,
+            "unreproduced": (None if run.kind != "confirm" else
+                             "not said" if run.unreproduced is None
+                             else len(run.unreproduced))}
+        if prime is not None:
+            row.update({"prime_wall": prime.timed.wall if prime.timed else None,
+                        "prime_exit": prime.timed.code if prime.timed else None,
+                        "prime_status": prime.status,
+                        **_counts(prime.reports, "prime_"),
+                        "prime_runs": process_count(prime.calls)})
+        _tsv(os.path.join(self.out, "runs.tsv"), RUN_COLUMNS, row)
 
     def _check_verdicts(self, run: Run) -> None:
         mine = verdicts(run.reports)
@@ -1378,8 +1527,10 @@ class Session:
         diff = compare_verdicts(theirs, mine)
         if not diff:
             return
-        a = "run %d (%s, N=%d)" % (first.seq, first.side, first.workers)
-        b = "run %d (%s, N=%d)" % (run.seq, run.side, run.workers)
+        a = "run %d%s (%s, N=%d)" % (first.seq, " untimed" if first.kind == "prime"
+                                     else "", first.side, first.workers)
+        b = "run %d%s (%s, N=%d)" % (run.seq, " untimed" if run.kind == "prime"
+                                     else "", run.side, run.workers)
         lines = describe(diff, a, b)
         if diff.real:
             self.differ[run.case] = "DIFFER"
@@ -1420,6 +1571,10 @@ class Session:
                     cals.append(before)
                 if after:
                     cals.append(after)
+                # The untimed run is held to the same verdicts: a run that
+                # remembers must come to what the one it remembers did.
+                if run.prime is not None and run.prime.ok:
+                    self._check_verdicts(run.prime)
                 if run.ok:
                     self._check_verdicts(run)
                 if run.status == "refused":
@@ -1459,6 +1614,7 @@ class Session:
                 print("  pair %d: %.3fx before over after%s" % (
                     k + 1, r.whole, "" if r.touchable is None
                     else ", %.3fx touchable" % r.touchable), flush=True)
+                self._processes(case, workers, k, b, a, row)
             return status
         finally:
             self.pair_status[(case.name, workers, k)] = row["status"]
@@ -1471,14 +1627,66 @@ class Session:
             self.pair_rows.append(row)
             _tsv(os.path.join(self.out, "pairs.tsv"), PAIR_COLUMNS, row)
 
+    def _processes(self, case: Case, workers: int, k: int, b: Run, a: Run,
+                   row: dict) -> None:
+        """The pair's pytest process counts, the deterministic proxy, put in
+        *row* and held to what `--same-processes` and
+        `--expect-rerun-processes` ask."""
+        counts = {"before": process_count(b.calls), "after": process_count(a.calls)}
+        same = (None if None in counts.values()
+                else counts["before"] == counts["after"])
+        row.update(before_processes=counts["before"], after_processes=counts["after"],
+                   same_processes=same)
+        where = "%s N=%d pair %d" % (case.name, workers, k + 1)
+        print("  pytest processes: %s before, %s after" % (counts["before"],
+                                                          counts["after"]), flush=True)
+        if getattr(self.args, "same_processes", False) and same is not True:
+            self.process_failures.append(
+                "%s: before started %s pytest processes, after %s"
+                % (where, counts["before"], counts["after"]))
+        if getattr(self.args, "expect_rerun_processes", False):
+            a.expected = (rerun_expected(a.prime.calls, a.prime.reports)
+                          if a.prime is not None else None)
+            row["expected_processes"] = a.expected
+            if a.expected is None or counts["after"] != a.expected:
+                self.process_failures.append(
+                    "%s: the timed run after started %s pytest processes, not the "
+                    "%s expected of a re-run" % (where, counts["after"], a.expected))
+
     def run(self) -> None:
         for case in self.cases:
             for workers in self.workers:
-                print("\n%s at N = %d: %d pair(s), ABBA" % (case.name, workers,
-                                                           self.pairs), flush=True)
+                print("\n%s at N = %d: %d pair(s), ABBA, %s" % (
+                    case.name, workers, self.pairs, self.unit), flush=True)
                 self.blocks[(case.name, workers)] = run_block(
                     self.pairs, self.repeats,
                     lambda k, sides: self.pair(case, workers, k, sides))
+        if getattr(self.args, "confirm_run", False):
+            for case in self.cases:
+                self.confirm(case, max(self.workers))
+
+    def confirm(self, case: Case, workers: int) -> Run:
+        """The one recorded run of *case* by the after side at *workers*
+        with `--confirm`, cold and untimed for any judgement: what it could
+        not reproduce must be nothing."""
+        print("\n%s at N = %d with --confirm, recorded" % (case.name, workers),
+              flush=True)
+        done: dict[str, Run] = {}
+        try:
+            run = self.run_one(case, workers, -1, 0, "after", done, confirm=True)
+            if run.ok:
+                run.unreproduced = unreproduced_of(run.reports)
+            said = ("not said" if run.unreproduced is None
+                    else "none" if not run.unreproduced
+                    else "%d kill(s)" % len(run.unreproduced))
+            print("  unreproduced: %s" % said, flush=True)
+            self.confirmed.append({"case": case.name, "workers": workers,
+                                   "status": run.status,
+                                   "unreproduced": run.unreproduced})
+            return run
+        finally:
+            if "after" in done:
+                self._record(done["after"], case, 0)
 
     # -- the results
 
@@ -1505,6 +1713,12 @@ class Session:
                                      (case.name, workers, r.pair)) == "kept"]
                          for label in SIDES}
                 speedups = [p["speedup"] for p in kept]
+                rerun = "-"
+                if getattr(self.args, "expect_rerun_processes", False) and kept:
+                    rerun = ("ok" if all(p.get("expected_processes") is not None
+                                         and p["expected_processes"]
+                                         == p.get("after_processes") for p in kept)
+                             else "missed")
                 rows.append(Row(
                     case.name, case.project, workers, self.pairs, len(kept),
                     sum(p["status"] == "discarded" for p in every),
@@ -1515,7 +1729,10 @@ class Session:
                     median(p.get("touchable") for p in kept),
                     median(p.get("ceiling") for p in kept),
                     floor.get((case.project, workers)),
-                    self.differ.get(case.name, "-")))
+                    self.differ.get(case.name, "-"),
+                    median(p.get("before_processes") for p in kept),
+                    median(p.get("after_processes") for p in kept),
+                    any(p.get("same_processes") is False for p in kept), rerun))
         return rows
 
     def info(self) -> dict:
@@ -1564,7 +1781,8 @@ class Session:
                            for c in self.cases},
             "pairs": self.pairs, "workers": self.workers, "calibration": calibration,
             "threshold": self.threshold_how,
-            "fixed": ", ".join(self.fixed) or "nothing"}
+            "fixed": ", ".join(self.fixed) or "nothing", "unit": self.unit,
+            "confirm": self.confirmed}
 
     def report(self) -> list[Row]:
         rows = self.rows()
@@ -1578,8 +1796,8 @@ class Session:
                                          self._extras("after")),
                  "machine: %s; %s; %s; %s" % (info["cpu"], info["cores"], info["os"],
                                              info["python"]),
-                 "threshold %s; touchable part leaves out %s" % (info["threshold"],
-                                                                 info["fixed"]),
+                 "threshold %s; touchable part leaves out %s; %s units"
+                 % (info["threshold"], info["fixed"], self.unit),
                  "speedups are before over after: above 1 is faster; each a median "
                  "over kept pairs of the ratio within each pair", ""]
         lines += table(rows)
@@ -1602,6 +1820,14 @@ class Session:
         if self.differences:
             notes.append("verdict differences (verdicts.txt):")
             notes += self.differences
+        if self.process_failures:
+            notes.append("pytest process counts not met:")
+            notes += ["  " + f for f in self.process_failures]
+        for c in self.confirmed:
+            notes.append("%s N=%d with --confirm (%s): unreproduced %s" % (
+                c["case"], c["workers"], c["status"],
+                "not said" if c["unreproduced"] is None
+                else json.dumps(c["unreproduced"])))
         if self.stopped:
             notes.append("stopped before the schedule ended: these are the pairs run")
         if notes:
@@ -1706,6 +1932,19 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--work", help="where the temporaries go (default the system's)")
     ap.add_argument("--repo", help="the git repository of the refs (default the "
                                    "one this file is in)")
+    ap.add_argument("--unit", choices=("cold", "warm"), default="cold",
+                    help="cold: each slot one timed run; warm: an untimed run, then "
+                         "the timed one, which remembers it (default cold)")
+    ap.add_argument("--same-processes", action="store_true",
+                    help="exit 4 unless the two sides of every pair started as many "
+                         "pytest processes")
+    ap.add_argument("--expect-rerun-processes", action="store_true",
+                    help="with --unit warm: exit 4 unless each timed run after starts "
+                         "its untimed run's baselines and one run a kill by time")
+    ap.add_argument("--confirm-run", action="store_true",
+                    help="after the pairs, one recorded run of each case by the after "
+                         "side at the largest count of workers with --confirm; exit 5 "
+                         "unless it names nothing it could not reproduce")
     ap.add_argument("--setup-only", action="store_true",
                     help="set up, check the deselections and the calibrations, and "
                          "stop before the first pair")
@@ -1735,8 +1974,14 @@ def main(argv: list[str] | None = None) -> int:
         pairs, repeats = args.pairs, args.repeats
         if pairs < 1 or repeats < 0:
             raise BenchError("--pairs is at least 1 and --repeats at least 0")
+        if args.expect_rerun_processes and args.unit != "warm":
+            raise BenchError("--expect-rerun-processes needs --unit warm: a re-run is "
+                             "the timed run of a warm slot")
         if args.quick:
             names, workers, pairs, repeats = names[:1], workers[:1], 1, 0
+        if args.confirm_run and max(workers) < 2:
+            raise BenchError("--confirm-run needs a count of workers above 1, since "
+                             "one worker confirms nothing")
         common = parse_pairs(args.set, "--set")
         common_env = parse_pairs(args.env, "--env")
         sides = {
@@ -1785,14 +2030,29 @@ def main(argv: list[str] | None = None) -> int:
                     session.cleanup()
     if code:
         return code
+    return exit_status(session, rows)
+
+
+def exit_status(session, rows: Sequence[Row]) -> int:
+    """The exit status of a *session* that ran to its end, saying why when
+    it is not 0, the first that applies: 3, verdicts that differ; 4, a
+    process count not met; 5, a confirm run that named a kill it could not
+    reproduce, or did not say; 1, a run that died or an inconclusive case."""
     if any(v == "DIFFER" for v in session.differ.values()):
         print("bench: the verdicts differ; see %s"
               % os.path.join(session.out, "verdicts.txt"), file=sys.stderr)
         return 3
+    if session.process_failures:
+        print("bench: pytest process counts not met:\n  %s"
+              % "\n  ".join(session.process_failures), file=sys.stderr)
+        return 4
+    if any(c["unreproduced"] != [] for c in session.confirmed):
+        print("bench: the --confirm run named kills it could not reproduce, or did "
+              "not say; see summary.txt", file=sys.stderr)
+        return 5
     if any(r.status != "ok" for r in session.runs) or not all(r.conclusive for r in rows):
         return 1
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

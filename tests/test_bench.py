@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -602,6 +603,352 @@ def test_a_deselection_that_does_not_take_stops_the_session(tmp_path, monkeypatc
 
 
 # --------------------------------------------------------------------------
+# Units, the pytest processes and the confirm run, against a stand-in engine
+
+
+def _report(timeouts=1, unreproduced=None, survived=()):
+    kills = [{"kind": "CMP", "line": 1, "change": "Lt -> LtE", "code": 1,
+              "killer": "t.py::test_a"}]
+    kills += [{"kind": "CMP", "line": 2 + i, "change": "Gt -> GtE", "code": -1,
+               "killer": "TIMEOUT"} for i in range(timeouts)]
+    report = {"target": "m.py", "kills": kills, "accepted": [],
+              "survivors": [{"kind": "RAISE", "line": 9, "change": "raise -> pass"}
+                            for _ in survived]}
+    if unreproduced is not None:
+        report["unreproduced"] = unreproduced
+    return report
+
+
+def _calls(mutants=2, baselines=1):
+    rows = [{"n": None, "prefix": "", "seconds": 0.5, "target": "m.py", "kind": None,
+             "line": None, "change": None}] * baselines
+    return rows + [{"n": i + 1, "prefix": "", "seconds": 0.2, "target": "m.py",
+                    "kind": "CMP", "line": i + 1, "change": "x"} for i in range(mutants)]
+
+
+class _Engine:
+    """`run_timed` in place of a run of invective: it says whether the
+    run's project held a `.invective` when it started, leaves one behind, as
+    an engine that remembers does, and writes what *behave* gives it for
+    the run (a report, instrument rows and an exit code)."""
+
+    def __init__(self, behave):
+        self.behave = behave
+        self.seen = []
+        self.argvs = []
+
+    def __call__(self, argv, cwd, env, log, timeout=None):
+        memory = os.path.join(cwd, ".invective")
+        self.seen.append(os.path.exists(memory))
+        os.makedirs(memory, exist_ok=True)
+        with open(os.path.join(memory, "remembered"), "w") as fh:
+            fh.write("x")
+        self.argvs.append(argv)
+        side = "before" if os.path.basename(cwd) == "before" else "after"
+        prime = "-prime" in log
+        report, calls, code = self.behave(side, prime, argv)
+
+        def after(flag):
+            return argv[argv.index(flag) + 1]
+
+        out = after("--json") if "--json" in argv else after("--mutate-json")
+        with open(out, "w") as fh:
+            json.dump(report, fh)
+        with open(after("--calls"), "w") as fh:
+            fh.writelines(json.dumps(row) + "\n" for row in calls)
+        with open(after("--marks"), "w") as fh:
+            fh.write("{}")
+        with open(log, "a") as fh:
+            fh.write("ran\n")
+        return compare.Timed(code, 5.0 if prime else 1.0, None, None, False)
+
+
+def _engine_session(tmp_path, monkeypatch, behave, pairs=1, via="run", **flags):
+    """A session of one case on a project of nothing, its runs made by
+    `_Engine`: the schedule, the units and the checks, without a venv."""
+    engine = _Engine(behave)
+    monkeypatch.setattr(compare, "run_timed", engine)
+    options = dict(fixed="baseline,timeout", out=str(tmp_path / "out"), repo=ROOT,
+                   threshold=None, timeout=None, unit="cold", same_processes=False,
+                   expect_rerun_processes=False, confirm_run=False)
+    options.update(flags)
+    args = argparse.Namespace(**options)
+    sides = {}
+    for label in compare.SIDES:
+        (tmp_path / label).mkdir()
+        sides[label] = compare.Side(label, "HEAD", sha="0" * 40, python=sys.executable,
+                                    dirs={"p": str(tmp_path / label)})
+    case = compare.Case("C", "p", "m.py", ("t.py",), via=via)
+    session = compare.Session(args, {"p": compare.Project("p", path="x")}, [case],
+                              [1], pairs, 0, sides)
+    os.makedirs(session.logs)
+    session.tests = {("C", label): ("t.py",) for label in compare.SIDES}
+    return session, engine, case
+
+
+def _same(side, prime, argv):
+    return _report(), _calls(), 0
+
+
+def test_a_cold_unit_runs_each_slot_once_from_nothing_remembered(tmp_path, monkeypatch):
+    """A run that found the last one's memory would be warm, and the one
+    after it in the pair would be timed against a different engine."""
+    session, engine, _case = _engine_session(tmp_path, monkeypatch, _same, pairs=2)
+    session.run()
+    assert engine.seen == [False] * 4
+    runs = _rows(tmp_path / "out" / "runs.tsv")
+    assert [(r["unit"], r["prime_wall"]) for r in runs] == [("cold", "")] * 4
+
+
+def test_a_warm_unit_times_the_run_that_remembers_the_untimed_one(tmp_path, monkeypatch):
+    """Each slot starts from nothing, so neither side and no pair inherits
+    another's memory; the second run in it is the one that remembers."""
+    session, engine, _case = _engine_session(tmp_path, monkeypatch, _same, pairs=2,
+                                             unit="warm")
+    session.run()
+    assert engine.seen == [False, True] * 4
+    runs = _rows(tmp_path / "out" / "runs.tsv")
+    assert len(runs) == 4
+    assert {(r["unit"], r["wall"], r["prime_wall"], r["prime_status"]) for r in runs} == {
+        ("warm", "1.000", "5.000", "ok")}
+    assert {(r["prime_killed"], r["prime_timeouts"], r["prime_runs"]) for r in runs} == {
+        ("2", "1", "3")}
+    assert [p["speedup"] for p in _rows(tmp_path / "out" / "pairs.tsv")] == ["1.000"] * 2
+
+
+def test_an_untimed_run_that_differs_is_a_verdict_difference(tmp_path, monkeypatch):
+    def behave(side, prime, argv):
+        return _report(survived=[1] if prime and side == "after" else []), _calls(), 0
+
+    session, _engine, _case = _engine_session(tmp_path, monkeypatch, behave,
+                                              unit="warm")
+    session.run()
+    assert session.differ["C"] == "DIFFER"
+    assert any("untimed" in line for line in session.differences)
+
+
+def test_an_untimed_run_that_dies_ends_its_slot(tmp_path, monkeypatch):
+    def behave(side, prime, argv):
+        return _report(), _calls(), 3 if prime else 0
+
+    session, engine, _case = _engine_session(tmp_path, monkeypatch, behave,
+                                             unit="warm")
+    session.run()
+    runs = _rows(tmp_path / "out" / "runs.tsv")
+    assert [(r["status"], r["prime_status"], r["wall"]) for r in runs][0] == (
+        "died", "died", "")
+    assert [p["status"] for p in _rows(tmp_path / "out" / "pairs.tsv")] == ["died"]
+
+
+def _processes(after_rows):
+    def behave(side, prime, argv):
+        return _report(), _calls(after_rows if side == "after" else 2), 0
+    return behave
+
+
+def test_the_pairs_process_counts_are_recorded(tmp_path, monkeypatch):
+    session, _engine, _case = _engine_session(tmp_path, monkeypatch, _processes(3))
+    session.run()
+    pair, = _rows(tmp_path / "out" / "pairs.tsv")
+    assert (pair["before_processes"], pair["after_processes"],
+            pair["same_processes"]) == ("3", "4", "False")
+    assert session.process_failures == []
+    row, = session.rows()
+    assert row.processes == "3/4 differ"
+
+
+def test_same_processes_fails_on_a_pair_whose_counts_differ(tmp_path, monkeypatch):
+    """A cold run with nothing remembered must start what the engine before
+    it started; a different count is a different engine, whatever the time."""
+    session, _engine, _case = _engine_session(tmp_path, monkeypatch, _processes(3),
+                                              same_processes=True)
+    session.run()
+    assert session.process_failures == [
+        "C N=1 pair 1: before started 3 pytest processes, after 4"]
+
+
+def test_same_processes_passes_on_equal_counts(tmp_path, monkeypatch):
+    session, _engine, _case = _engine_session(tmp_path, monkeypatch, _processes(2),
+                                              same_processes=True)
+    session.run()
+    assert session.process_failures == []
+    assert session.rows()[0].processes == "3/3"
+
+
+def test_same_processes_fails_without_the_instrument(tmp_path, monkeypatch):
+    """No count is no evidence the counts agree."""
+    def behave(side, prime, argv):
+        return _report(), [] if side == "after" else _calls(), 0
+
+    session, _engine, _case = _engine_session(tmp_path, monkeypatch, behave,
+                                              same_processes=True)
+    session.run()
+    assert len(session.process_failures) == 1
+    pair, = _rows(tmp_path / "out" / "pairs.tsv")
+    assert (pair["before_processes"], pair["after_processes"]) == ("3", "")
+    assert session.rows()[0].processes == "-"
+
+
+def test_a_rerun_starts_its_baselines_and_one_run_a_kill_by_time():
+    calls = _calls(mutants=5, baselines=4) + [
+        {"n": None, "prefix": "probe-", "seconds": 0.1}]
+    assert compare.rerun_expected(calls, [_report(timeouts=2)]) == 6
+    assert compare.rerun_expected(None, [_report()]) is None
+
+
+def _rerun(rows):
+    def behave(side, prime, argv):
+        if side == "after" and not prime:
+            return _report(), _calls(mutants=rows - 1), 0
+        return _report(), _calls(), 0
+    return behave
+
+
+def test_expect_rerun_processes_holds_the_after_timed_run_to_its_count(
+        tmp_path, monkeypatch):
+    """The untimed run kills one mutant by time and has one baseline, so a
+    re-run that remembers the rest starts two."""
+    session, _engine, _case = _engine_session(
+        tmp_path, monkeypatch, _rerun(2), unit="warm", expect_rerun_processes=True)
+    session.run()
+    assert session.process_failures == []
+    pair, = _rows(tmp_path / "out" / "pairs.tsv")
+    assert pair["expected_processes"] == "2"
+    assert _rows(tmp_path / "out" / "runs.tsv")[1]["expected_runs"] == "2"
+    assert session.rows()[0].rerun == "ok"
+
+
+def test_expect_rerun_processes_fails_a_rerun_that_runs_more(tmp_path, monkeypatch):
+    session, _engine, _case = _engine_session(
+        tmp_path, monkeypatch, _rerun(3), unit="warm", expect_rerun_processes=True)
+    session.run()
+    assert session.process_failures == [
+        "C N=1 pair 1: the timed run after started 3 pytest processes, not the 2 "
+        "expected of a re-run"]
+    assert session.rows()[0].rerun == "missed"
+
+
+def test_expect_rerun_processes_fails_without_the_instrument(tmp_path, monkeypatch):
+    def behave(side, prime, argv):
+        return _report(), [] if prime else _calls(), 0
+
+    session, _engine, _case = _engine_session(
+        tmp_path, monkeypatch, behave, unit="warm", expect_rerun_processes=True)
+    session.run()
+    assert session.process_failures == [
+        "C N=1 pair 1: the timed run after started 3 pytest processes, not the None "
+        "expected of a re-run"]
+
+
+def test_one_missed_rerun_marks_the_case_missed(tmp_path, monkeypatch):
+    timed = []
+
+    def behave(side, prime, argv):
+        if side == "after" and not prime:
+            timed.append(1)
+            return _report(), _calls(mutants=len(timed)), 0
+        return _report(), _calls(), 0
+
+    session, _engine, _case = _engine_session(
+        tmp_path, monkeypatch, behave, pairs=2, unit="warm",
+        expect_rerun_processes=True)
+    session.run()
+    assert len(session.process_failures) == 1
+    assert session.rows()[0].rerun == "missed"
+
+
+def test_unreproduced_is_read_from_every_report():
+    assert compare.unreproduced_of([_report(unreproduced=[])]) == []
+    assert compare.unreproduced_of([_report(unreproduced=[{"line": 1}]),
+                                    _report(unreproduced=[{"line": 2}])]) == [
+        {"line": 1}, {"line": 2}]
+    # Without the key, the kills were not confirmed: no answer, not none.
+    assert compare.unreproduced_of([_report(unreproduced=[]), _report()]) is None
+    assert compare.unreproduced_of([]) is None
+
+
+@pytest.mark.parametrize("via, flag", [("run", "--confirm"),
+                                       ("pytest", "--mutate-confirm")])
+@pytest.mark.parametrize("found", [[], [{"line": 2, "change": "Gt -> GtE"}], None])
+def test_the_confirm_run_records_what_it_could_not_reproduce(
+        tmp_path, monkeypatch, via, flag, found):
+    def behave(side, prime, argv):
+        return _report(unreproduced=found), _calls(), 0
+
+    # Warm too: the confirm run is one cold run whatever the unit.
+    session, engine, case = _engine_session(tmp_path, monkeypatch, behave, via=via,
+                                            unit="warm")
+    session.confirm(case, 4)
+    argv, = engine.argvs
+    assert flag in argv
+    assert argv[argv.index("--mutate-workers" if via == "pytest" else "--workers")
+                + 1] == "4"
+    assert engine.seen == [False]
+    assert session.confirmed == [{"case": "C", "workers": 4, "status": "ok",
+                                  "unreproduced": found}]
+    row, = _rows(tmp_path / "out" / "runs.tsv")
+    assert (row["pair"], row["side"], row["unreproduced"]) == (
+        "confirm", "after", "not said" if found is None else str(len(found)))
+
+
+def _ended(differ="equal", failures=(), confirmed=(), status="ok"):
+    return argparse.Namespace(differ={"C": differ}, process_failures=list(failures),
+                              confirmed=list(confirmed), out="out",
+                              runs=[argparse.Namespace(status=status)])
+
+
+@pytest.mark.parametrize("session, rows, status", [
+    (_ended(), [], 0),
+    (_ended(differ="load only"), [], 0),
+    (_ended(confirmed=[{"unreproduced": []}]), [], 0),
+    (_ended(status="died"), [], 1),
+    (_ended(), "inconclusive", 1),
+    (_ended(confirmed=[{"unreproduced": [{"line": 1}]}]), [], 5),
+    (_ended(confirmed=[{"unreproduced": None}], status="died"), [], 5),
+    (_ended(failures=["counts"], confirmed=[{"unreproduced": None}]), [], 4),
+    (_ended(differ="DIFFER", failures=["counts"]), [], 3),
+])
+def test_the_exit_status_says_the_worst_that_happened(session, rows, status, capsys):
+    """Each failed check has its own status, so a script can tell a broken
+    verdict from a slow machine; the most serious is the one given."""
+    if rows == "inconclusive":
+        rows = [_row(kept=1)]
+    assert compare.exit_status(session, rows) == status
+
+
+def test_the_new_checks_are_refused_where_they_cannot_hold(tmp_path, capsys):
+    """A re-run is a warm slot's second run, and one worker confirms
+    nothing: either asked otherwise would pass by never being checked."""
+    base = ["HEAD", "HEAD", "--repo", ROOT, "--out", str(tmp_path / "out")]
+    assert compare.main(base + ["--expect-rerun-processes"]) == 2
+    assert "--unit warm" in capsys.readouterr().err
+    assert compare.main(base + ["--confirm-run", "--workers", "1"]) == 2
+    assert "above 1" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_finding_names_the_unit_the_processes_and_the_confirm_run():
+    rows = [_row(processes_before=41, processes_after=41)]
+    cold = _joined(compare.finding(_info(), rows))
+    assert "each run cold" in cold
+    assert "41 / 41 |" in compare.finding(_info(), rows)
+    assert "Its sides started 41 and 41 pytest processes." in cold
+    warm = _joined(compare.finding(_info(unit="warm", confirm=[
+        {"case": "R40", "workers": 4, "status": "ok", "unreproduced": []}]),
+        [_row(processes_before=41, processes_after=12, processes_differ=True,
+              rerun="ok")]))
+    assert "an untimed run from a fresh `.invective`, then the timed run" in warm
+    assert "in some pair the two differed" in warm
+    assert "as many as expected of a re-run" in warm
+    assert "The R40 run at N = 4 with `--confirm` named no kill" in warm
+    missed = _joined(compare.finding(_info(confirm=[
+        {"case": "R40", "workers": 4, "status": "ok",
+         "unreproduced": [{"line": 7, "change": "Lt -> LtE"}]}]), [_row(rerun="missed")]))
+    assert "named 1 kill(s) it could not reproduce: line 7 Lt -> LtE" in missed
+    assert "did not start the baselines" in missed
+
+
+# --------------------------------------------------------------------------
 # The documentation's command lines
 
 
@@ -748,6 +1095,7 @@ def test_a_quick_session_measures_one_pair_and_leaves_nothing_behind(tmp_path):
     runs = _rows(out / "runs.tsv")
     assert [r["side"] for r in runs] == ["before", "after"]
     assert {r["status"] for r in runs} == {"ok"}
+    assert {(r["unit"], r["prime_wall"]) for r in runs} == {("cold", "")}
     assert [(r["killed"], r["survived"], r["exit"]) for r in runs] == [
         ("1", "1", "0"), ("1", "1", "1")]
     assert all(float(r["wall"]) > 0 and r["cal_before"] and r["cal_after"] for r in runs)
@@ -762,6 +1110,41 @@ def test_a_quick_session_measures_one_pair_and_leaves_nothing_behind(tmp_path):
     assert "`FIXTURE_LAX=1`" in _joined(finding)
     assert "`tests/test_gate.py::test_never`" in _joined(finding)
     assert (tmp_path / "cache" / "fixture.git").is_dir()
+    assert not _left_behind(tmp_path)
+
+
+@sessions
+def test_a_warm_session_with_every_check_and_a_confirm_run(tmp_path):
+    """Warm slots, both process checks and the confirm run, end to end. The
+    engine at HEAD remembers nothing, so its re-run starts every process its
+    untimed run did: the sides agree, the re-run's count is missed, and the
+    session fails on that alone."""
+    cases = _project(tmp_path)
+    done = subprocess.run(_argv(tmp_path, cases, "--unit", "warm", "--workers", "2",
+                                "--same-processes", "--expect-rerun-processes",
+                                "--confirm-run", "--threshold", "1000"),
+                          capture_output=True, text=True, timeout=600)
+    assert done.returncode == 4, done.stdout + done.stderr
+    assert "not the 3 expected of a re-run" in done.stderr
+    assert "before started" not in done.stderr
+    out = tmp_path / "out"
+    runs = _rows(out / "runs.tsv")
+    assert [(r["pair"], r["side"], r["unit"]) for r in runs] == [
+        ("1", "before", "warm"), ("1", "after", "warm"), ("confirm", "after", "cold")]
+    # Three runs of the original (the first copy's twice, as two workers
+    # make it) and two mutants: five processes, every time; a re-run that
+    # remembered would start the three and nothing for the two kills, which
+    # were not by time.
+    assert [(r["prime_runs"], r["runs"]) for r in runs[:2]] == [("5", "5")] * 2
+    assert all(r["prime_status"] == "ok" and r["prime_killed"] == "2" for r in runs[:2])
+    assert runs[2]["unreproduced"] == "0"
+    pair, = _rows(out / "pairs.tsv")
+    assert (pair["same_processes"], pair["expected_processes"]) == ("True", "3")
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "5/5 rerun missed" in summary
+    assert "F N=2 with --confirm (ok): unreproduced []" in summary
+    finding = _joined((out / "finding.md").read_text(encoding="utf-8"))
+    assert "The F run at N = 2 with `--confirm` named no kill" in finding
     assert not _left_behind(tmp_path)
 
 
