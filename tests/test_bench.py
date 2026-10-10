@@ -1463,6 +1463,35 @@ def test_a_warm_session_with_every_check_and_a_confirm_run(tmp_path):
 
 
 @sessions
+@pytest.mark.skipif(os.name == "nt", reason="sends POSIX signals")
+def test_a_sighup_ignored_on_entry_stays_ignored(tmp_path):
+    """Under `nohup` a dropped session must not stop the measurement."""
+    cases = _project(tmp_path)
+
+    def ignore_hangups():
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+    proc = subprocess.Popen(_argv(tmp_path, cases, "--threshold", "1000"),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            preexec_fn=ignore_hangups)
+    try:
+        log = tmp_path / "out" / "logs" / "001-F-n1-before.log"
+        deadline = time.monotonic() + 300
+        while not (log.exists() and log.stat().st_size > 0):
+            assert proc.poll() is None, proc.stdout.read().decode()
+            assert time.monotonic() < deadline, "the first run never started"
+            time.sleep(0.1)
+        proc.send_signal(signal.SIGHUP)
+        said = proc.communicate(timeout=300)[0].decode()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert proc.returncode == 0, said
+    assert [r["status"] for r in _rows(tmp_path / "out" / "runs.tsv")] == ["ok", "ok"]
+
+
+@sessions
 def test_verdicts_that_differ_fail_the_session_loudly(tmp_path):
     """A speedup that changes a verdict is a broken speedup, whatever its
     time: the difference is named as it is found, and the session fails."""
@@ -1484,10 +1513,11 @@ def test_verdicts_that_differ_fail_the_session_loudly(tmp_path):
 
 @sessions
 @pytest.mark.skipif(os.name == "nt", reason="sends POSIX signals")
-@pytest.mark.parametrize("how", ["a ^C at the terminal", "a SIGTERM"])
+@pytest.mark.parametrize("how", ["a ^C at the terminal", "a SIGTERM", "a SIGHUP"])
 def test_a_stopped_session_records_its_run_and_removes_its_temporaries(tmp_path, how):
     """A ^C reaches the whole foreground group, the run included; a SIGTERM
-    reaches the tool alone, which passes it on. Either way the run ends,
+    or a SIGHUP (a dropped ssh session) reaches the tool alone, which passes
+    a SIGTERM on. Either way the run ends,
     is recorded as stopped, and nothing is left behind."""
     cases = _project(tmp_path, slow=True)
     proc = subprocess.Popen(_argv(tmp_path, cases), stdout=subprocess.PIPE,
@@ -1504,6 +1534,8 @@ def test_a_stopped_session_records_its_run_and_removes_its_temporaries(tmp_path,
         sent = time.monotonic()
         if how == "a SIGTERM":
             proc.send_signal(signal.SIGTERM)
+        elif how == "a SIGHUP":
+            proc.send_signal(signal.SIGHUP)
         else:
             os.killpg(proc.pid, signal.SIGINT)
         said = proc.communicate(timeout=120)[0].decode()

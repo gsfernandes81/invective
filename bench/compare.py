@@ -118,7 +118,8 @@ class BenchError(Exception):
 
 
 class Terminated(KeyboardInterrupt):
-    """A SIGTERM, unwound as a ^C is, so the temporaries are removed."""
+    """A SIGTERM or a SIGHUP, unwound as a ^C is, so the temporaries are
+    removed; the run in progress is passed a SIGTERM."""
 
 
 # --------------------------------------------------------------------------
@@ -1018,7 +1019,9 @@ def check(argv: list[str], what: str, cwd: str | None = None,
 
 @contextlib.contextmanager
 def sigterm_unwinds():
-    """A SIGTERM raises `Terminated` once, so it unwinds as a ^C does."""
+    """A SIGTERM, or a SIGHUP (the ssh session of a run of hours dropping),
+    raises `Terminated` once, so it unwinds as a ^C does. A signal ignored
+    on entry (`nohup`) stays ignored."""
     fired = False
 
     def handler(signum, frame):
@@ -1027,23 +1030,26 @@ def sigterm_unwinds():
             fired = True
             raise Terminated()
 
-    try:
-        previous = signal.signal(signal.SIGTERM, handler)
-    except (ValueError, AttributeError):
-        yield
-        return
+    saved = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is None or signal.getsignal(signum) is signal.SIG_IGN:
+            continue
+        with contextlib.suppress(ValueError):
+            saved[signum] = signal.signal(signum, handler)
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        for signum, previous in saved.items():
+            signal.signal(signum, previous)
 
 
 @contextlib.contextmanager
 def signals_held():
-    """^C and SIGTERM ignored while the temporaries are removed, so that a
-    second one cannot leave half of them behind."""
+    """^C, SIGTERM and SIGHUP ignored while the temporaries are removed, so
+    that a second one cannot leave half of them behind."""
     saved = {}
-    for name in ("SIGINT", "SIGTERM"):
+    for name in ("SIGINT", "SIGTERM", "SIGHUP"):
         signum = getattr(signal, name, None)
         if signum is not None:
             with contextlib.suppress(ValueError):
