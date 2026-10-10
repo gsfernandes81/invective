@@ -642,6 +642,9 @@ def test_the_cases_are_the_measurement_harnesss():
     assert cases["M60"].command() == (
         "invective run --target more_itertools/more.py --tests tests/test_more.py "
         "--only CMP,RAISE,BOOL --limit 60")
+    assert cases["M300"].command() == (
+        "invective run --target more_itertools/more.py --tests tests/test_more.py "
+        "--only CMP,BOOL,NOT,CONST,RAISE --limit 300")
     assert cases["RALL"].limit is None
     assert cases["RALL"].command() == cases["R40"].command().removesuffix(" --limit 40")
     assert cases["I20"].command() == (
