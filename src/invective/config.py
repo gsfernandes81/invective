@@ -9,6 +9,7 @@
     confirm = false            # with workers, confirm each kill alone
     history = true             # try each mutant's last killer alone first
     coverage = false           # run each mutant first against the tests that cover it
+    cache = false              # read the verdicts an earlier run kept
     unsafe-speedups = true     # false: only those safe for any suite
 
 An unknown key is a refusal, so that a misspelt one is not read as absent.
@@ -18,7 +19,9 @@ verdict on a suite outside the contract invective takes a suite to keep:
 tests that are independent of their order and safe to run in parallel.
 `SPEEDUPS` says which side each speedup is on, and `settle` turns every
 unsafe one off for `unsafe-speedups = false`, or `--no-unsafe-speedups` on
-the command line.
+the command line. The verdict cache is safe only restricted: with the unsafe
+speedups off it stays on, and reads only the verdicts a run with them off
+kept (`store.Cache`).
 
 The project they belong to is found here too: `project_root` walks up from
 where a command is started to the nearest directory pytest would take for a
@@ -55,6 +58,7 @@ class Config(NamedTuple):
     confirm: bool = False
     history: bool = True
     coverage: bool = False
+    cache: bool = False
     unsafe_speedups: bool = True
 
 
@@ -62,7 +66,7 @@ class Config(NamedTuple):
 #: own (`workers`).
 _KEYS = {"fail-on-survivors": bool, "max-accepted": int, "exclude": list,
          "workers": (int, str), "confirm": bool, "history": bool,
-         "coverage": bool, "unsafe-speedups": bool}
+         "coverage": bool, "cache": bool, "unsafe-speedups": bool}
 
 
 class Speedup(NamedTuple):
@@ -106,6 +110,12 @@ SPEEDUPS = (
     # where the whole selection, in its order, passes.
     Speedup("runs each mutant first against the tests that cover it",
             "coverage", True, False),
+    # A verdict kept by an earlier run of the same campaign, read instead of
+    # run. Safe only restricted, and the engine restricts it, not `settle`:
+    # with the unsafe speedups off, only a verdict decided with them off is
+    # read (`store.Cache`'s *safe_only*), so a verdict an unsafe speedup
+    # decided is never read by a run that turned them off.
+    Speedup("reads the verdicts an earlier run kept", "cache", False),
 )
 
 
@@ -413,6 +423,15 @@ def _read_above(top: str, fallback: bool) -> str | None:
     return loaded
 
 
+def tree_top(root: str, where: str, ref: bool = False) -> str:
+    """The directory of *where*, the tree the mutants of the project at
+    *root* are run in, that stands for the top pytest's search for settings
+    may reach: *where* itself, or with *ref* the top of the ref's worktree,
+    which stands for the top of the repository *root* is in."""
+    top = (repository_top(root) if ref else None) or root
+    return os.path.normpath(os.path.join(where, os.path.relpath(top, root)))
+
+
 def check_pytest_settings(root: str, where: str, args: Sequence[str] = (),
                           ref: bool = False) -> None:
     """Refuse, naming the file, a campaign whose runs would go by other
@@ -430,7 +449,7 @@ def check_pytest_settings(root: str, where: str, args: Sequence[str] = (),
     `conftest.py` pytest loads because its rootdir is there, refuses.
     """
     top = (repository_top(root) if ref else None) or root
-    tree = os.path.normpath(os.path.join(where, os.path.relpath(top, root)))
+    tree = tree_top(root, where, ref)
     fallback = False
     for here in _up(_start(where, args), tree):
         if _stop(here) is not None:
@@ -483,4 +502,5 @@ def load(root: str) -> Config:
                   confirm=table.get("confirm", False),
                   history=table.get("history", True),
                   coverage=table.get("coverage", False),
+                  cache=table.get("cache", False),
                   unsafe_speedups=table.get("unsafe-speedups", True))

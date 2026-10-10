@@ -305,6 +305,7 @@ workers = 1                # mutants run at once; "auto" for one per CPU
 confirm = false            # with workers, confirm each kill alone
 history = true             # try each mutant's last killer alone first
 coverage = false           # run each mutant first against the tests that cover it
+cache = false              # read the verdicts an earlier run kept
 unsafe-speedups = true     # false: only those safe for any suite
 ```
 
