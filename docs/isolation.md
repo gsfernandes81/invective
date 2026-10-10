@@ -166,20 +166,23 @@ a path holding a `,` or `$` (coverage's settings split at the one and expand
 the other), or a map coverage cannot read.
 
 > **Finding:** (2026-10-10, more-itertools at `81c21a8`, its `test_recipes.py`
-> (148 tests) and `recipes.py`, this code at `def7f04`, coverage 7.16.2, pytest
+> (148 tests) and `recipes.py`, this code at `4487020`, coverage 7.16.2, pytest
 > 9.1.1, a 4-vCPU VM with nothing else running; wall time of `mutate.run_tests`
 > in the checkout, a plain run and a coverage run in turn, four of each; medians)
 >
 > | Python | recorder | plain run | coverage run | ratio | lines mapped |
 > |---|---|---|---|---|---|
-> | 3.11.17 | C tracer | 13.0 s | 72.8 s | 5.6x | 456 |
-> | 3.14.6 | `sys.monitoring` | 8.3 s | 9.0 s | 1.09x | 500 |
+> | 3.11.17 | C tracer | 13.0 s | 71.3 s | 5.5x | 456 |
+> | 3.12.3 | `sys.monitoring` | 13.8 s | 14.9 s | 1.08x | 454 |
+> | 3.13.16 | `sys.monitoring` | 9.1 s | 10.1 s | 1.11x | 450 |
+> | 3.14.6 | `sys.monitoring` | 8.6 s | 9.1 s | 1.06x | 500 |
 >
-> The runs took 12.7 to 13.1 s plain and 70.2 to 75.6 s with coverage on 3.11, and
-> 7.8 to 8.5 s and 8.8 to 9.2 s on 3.14. Every coverage run on one Python mapped
-> as many lines, credited to as many tests. On 3.11, a suite that runs the target
-> hot pays over five times its plain run for the map, inside the coverage run's
-> limit of ten times; on 3.14 it pays about a tenth more.
+> The coverage runs took 69.9 to 77.5 s on 3.11 and at most 15 s on the others;
+> every coverage run on one Python mapped as many lines, credited to as many
+> tests. On 3.11, a suite that runs the target hot pays over five times its plain
+> run for the map, inside the coverage run's limit of ten times; from 3.12 on, with
+> `sys.monitoring` and its events restarted at each test, it pays about a tenth
+> more.
 
 ## The import-from-outside refusal
 
