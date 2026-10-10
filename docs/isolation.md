@@ -123,6 +123,63 @@ alone (a kill by time, by a module, or under `--tests` holding an option) that
 the whole selection lets through is named too, as `mutate.NO_KILLER`, and its
 survivor carries `confirmed` as a kill does. A survivor is not run again.
 
+## Coverage-guided selection
+
+With `coverage = true` in `[tool.invective]`, one run of the whole selection on
+the first copy's original, before the first mutant, records which tests ran
+each line of the target (`invective.covers`): in the run, and in every child
+interpreter its tests start, which coverage 7.13 and later is started in by its
+`.pth` file. It records with invective's own coverage settings, never the
+project's, and with none of the user's coverage variables. The tests that ran a
+mutant's lines are its narrower selection, unless no line of the mutant ran, a
+line ran outside any test (a module's top level, run as it is imported), or
+they are more than half the selection.
+
+Each narrower selection is run once on the original, at the mutants' budget,
+and is used only when it passes with no test missing. A mutant with one is run
+against it first, its run cut at three times what the narrower selection took
+on the original (at least 5 s). It is a kill only when a test failed (exit 1),
+the first to fail is one of the narrower selection's, and none is missing; the
+kill carries `"via": "coverage"`. Anything else (a pass, a run cut at its time,
+a module that would not import) leaves the mutant to the whole selection, run
+next in its order, so a survivor is always the whole selection's verdict
+(`mutate._SURVIVOR_VIA`).
+
+This relies on the tests being independent of their order, at any count of
+workers: a kill by fewer tests than the selection is then a kill by the whole
+selection. In a suite whose tests depend on their order, it can be one the
+whole selection's order hides; it is marked either way. With `--confirm` and
+more than one worker, such a kill is confirmed as any other kill is.
+
+A map can be short, and never in the silent direction. A line a test ran but
+the map does not credit to it (a child of another interpreter, one started
+without the environment, or one ended by `os._exit`) gives fewer tests:
+a narrower selection that must still fail on the mutant to kill it, or none.
+
+When the map cannot be made or read, the `coverage:` line and the closing lines
+say why, and every mutant runs the whole selection: coverage not installed or
+older than 7.13, the coverage run red or over ten times the baseline's time (at
+least 30 s), `--tests` holding an option a run of fewer tests would leave out,
+a path holding a `,` or `$` (coverage's settings split at the one and expand
+the other), or a map coverage cannot read.
+
+> **Finding:** (2026-10-08, more-itertools at `81c21a8`, its `test_recipes.py`,
+> Python 3.13, coverage 7.13.0, 4 cores; a prototype of the coverage run's
+> recorder, taken while the design was reviewed; wall time of one run of the file)
+>
+> | recorder | time | tests kept for each line of `recipes.py` |
+> |---|---|---|
+> | none (a plain run) | 13.5 s | |
+> | C tracer | 94 to 104 s | every one |
+> | `sys.monitoring` | 16.7 s | the first only |
+> | `sys.monitoring`, restarted at each test | 16.5 s | the C tracer's, line for line |
+>
+> The two maps agreed on all 450 lines; with coverage 7.16.2 the last run took
+> 13.6 s. The C tracer, the only one before 3.12, costs 7 to 8 times the plain run
+> on a suite that runs the target hot, near the coverage run's limit of ten times.
+> `sys.monitoring` costs little, and keeps every test of a line only when its
+> events are restarted at each test.
+
 ## The import-from-outside refusal
 
 At the end of each run, the plugin checks that the tests loaded the target

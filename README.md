@@ -23,13 +23,13 @@ uv add --dev git+https://github.com/gsfernandes81/invective
 To pin a release by tag:
 
 ```console
-uv add --dev git+https://github.com/gsfernandes81/invective@v0.3.0
+uv add --dev git+https://github.com/gsfernandes81/invective@v0.5.0
 ```
 
 Or install the release's wheel, which needs no build backend:
 
 ```console
-uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.3.0/invective-0.3.0-py3-none-any.whl
+uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.5.0/invective-0.5.0-py3-none-any.whl
 ```
 
 It needs pytest 8.2 or later in the same environment, and supports every
@@ -145,6 +145,39 @@ A child interpreter started by a test imports the mutant only when it starts
 from the copy's working directory (or when the test puts the copy on
 `sys.path`). In a `src` layout, starting the child from elsewhere imports the
 installed package, not the copy. Issue #2 tracks the known limits.
+
+## Running only the tests that cover a line
+
+With `coverage = true` in `[tool.invective]`, each mutant is run first against
+only the tests that ran its lines, found by one coverage run of the selection
+before the first mutant. It needs the `coverage` extra:
+
+```console
+uv add --dev --extra coverage git+https://github.com/gsfernandes81/invective@v0.5.0
+```
+
+Each of those narrower selections must pass on the unmutated files before it is
+used. A mutant counts as killed by one only when one of its own tests fails; the
+kill carries `"via": "coverage"`, and the closing lines count these kills on a
+line of their own. Every other mutant (every survivor among them) is run against
+the whole selection. A mutant has no narrower selection when no test ran its
+lines, when more than half the selection did, or when a line of it runs as its
+module is imported; the `coverage:` line says how many mutants had one.
+
+This relies on the tests being independent of their order, with one worker as
+with several: a kill by some of the tests is then a kill by the whole selection.
+In a suite whose tests depend on their order, it can be one the whole
+selection's order hides; it is marked either way, and with `--confirm` and more
+than one worker it is confirmed as any other kill is.
+
+The report carries `"coverage": {"narrowed": n, "unused": reason}`: how many
+mutants had a narrower selection, and why coverage was not used (`""` when it
+was). When it cannot be used (not installed, older than 7.13, the coverage run
+red or over ten times the baseline's time, and at least 30 seconds, `--tests`
+holding an option, or a path holding a `,` or `$`), the `coverage:` line and the
+closing lines say why, and every mutant runs the whole selection. On Python 3.11
+the coverage run is slower and reaches that limit more often (the Finding in
+`docs/isolation.md`).
 
 ## A whole source tree
 
