@@ -12,6 +12,7 @@ The engine, the plugin, and how one mutant is run; settled.
 | `invective.tree` | The copy (or git worktree) a campaign's mutants are written in |
 | `invective.process` | The processes invective starts: their groups, how they are stopped, and SIGTERM |
 | `invective.store` | What a run keeps in the project between runs: `.invective/` and its killer history |
+| `invective.covers` | Which tests run which lines of the target: the coverage run's map |
 | `invective.accept` | Survivors accepted in the source, beside the code they are about |
 | `invective.config` | The `[tool.invective]` table, the project's top, and the pytest settings check |
 | `invective.errors` | `Refusal`: the one way invective declines to run |
@@ -30,7 +31,8 @@ survive. The plugin imports nothing from `invective` at the top level.
 ## The handshake
 
 The engine and the plugin communicate through environment variables, each
-popped so a pytest the suite starts does not inherit them:
+popped so a pytest the suite starts does not inherit them, except where a
+bullet says otherwise:
 
 - `INVECTIVE_SELECTION`: a file of node ids, one a line, that the plugin
   keeps and no others.
@@ -48,6 +50,12 @@ popped so a pytest the suite starts does not inherit them:
   their order, after every deselection. The first baseline asks for it when
   the history is on, so that a remembered killer is tried only when the
   selection holds it.
+- `INVECTIVE_COVERAGE`: a directory the plugin records the coverage run in:
+  which test ran each line of the target, and the selected tests in order.
+- `INVECTIVE_COVERAGE_TEST`: set by the plugin, not the engine, during the
+  coverage run: the place of the test running, empty between tests. It is
+  not popped: every child interpreter a test starts inherits it, so the lines
+  the child runs are credited to that test.
 
 ## The copy
 

@@ -47,9 +47,12 @@ jobs:
           # parallel, as `-n auto` runs it; even so, the campaign takes
           # about an hour.
           - module: src/invective/mutate.py
-            tests: tests/test_mutate.py tests/test_workers.py tests/test_probe.py tests/test_speedups.py tests/test_accept.py tests/test_tree.py
+            tests: tests/test_mutate.py tests/test_workers.py tests/test_probe.py tests/test_speedups.py tests/test_accept.py tests/test_tree.py tests/test_coverage_selection.py
             options: --mutate-workers auto
             timeout: 120
+          # The map's reading, and the engine's use of it.
+          - module: src/invective/covers.py
+            tests: tests/test_covers.py tests/test_coverage_selection.py
           - module: src/invective/sweep.py
             tests: tests/test_sweep.py
           - module: src/invective/__main__.py
@@ -68,9 +71,10 @@ jobs:
           - module: src/invective/process.py
             tests: tests/test_mutate.py tests/test_tree.py tests/test_sweep.py
           # Its tests start pytest rather than import it, so no sweep of
-          # imports would pair them.
+          # imports would pair them. The coverage run's recorder is the
+          # plugin's, and its map's tests are the coverage tests.
           - module: src/pytest_invective/__init__.py
-            tests: tests/test_plugin.py
+            tests: tests/test_plugin.py tests/test_covers.py
     steps:
       - uses: actions/checkout@v4
 

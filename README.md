@@ -23,13 +23,13 @@ uv add --dev git+https://github.com/gsfernandes81/invective
 To pin a release by tag:
 
 ```console
-uv add --dev git+https://github.com/gsfernandes81/invective@v0.4.0
+uv add --dev git+https://github.com/gsfernandes81/invective@v0.5.0
 ```
 
 Or install the release's wheel, which needs no build backend:
 
 ```console
-uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.4.0/invective-0.4.0-py3-none-any.whl
+uv add --dev https://github.com/gsfernandes81/invective/releases/download/v0.5.0/invective-0.5.0-py3-none-any.whl
 ```
 
 It needs pytest 8.2 or later in the same environment, and supports every
@@ -77,25 +77,26 @@ test to look at; so is a kill with no killer to run alone (a kill by time, by a
 module, or under `--tests` holding an option) that the whole selection lets
 through. With one worker there is nothing to confirm.
 
-`--no-unsafe-speedups` (`unsafe-speedups = false` in `[tool.invective]`) is for a
-suite outside that bar. It turns off every speedup that can give a wrong verdict
-there, so that each mutant is run against the whole selection, in its order, one
-at a time: workers, and the remembered killer. A speedup that cannot (each
-mutant made from one parse of the module) stays on; `config.SPEEDUPS` says
-which side each one is on. A value in `[tool.invective]` that would turn an
-unsafe speedup back on gives way to it, and a flag that would (`--workers 4`) is
-refused. Set in `[tool.invective]`, the switch is undone there only: no flag
-turns it off. The `speedups:` line says which unsafe speedups a run uses
-(`unsafe ones on: workers, history`), that it uses none (`no unsafe ones on`),
-or that they are off (`safe ones only`).
+`--no-unsafe-speedups` (`unsafe-speedups = false` in `[tool.invective]`) is for
+a suite outside that bar. It turns off every speedup that can give a wrong
+verdict there, so that each mutant is run against the whole selection, in its
+order, one at a time: workers, the remembered killer, and the tests that cover a
+line. A speedup that cannot (each mutant made from one parse of the module)
+stays on; `config.SPEEDUPS` says which side each one is on. A value in
+`[tool.invective]` that would turn an unsafe speedup back on gives way to it,
+and a flag that would (`--workers 4`) is refused. Set in `[tool.invective]`, the
+switch is undone there only: no flag turns it off. The `speedups:` line says
+which unsafe speedups a run uses (`unsafe ones on: workers, history`), that it
+uses none (`no unsafe ones on`), or that they are off (`safe ones only`).
 
 The test that killed each mutant is remembered in `.invective/history.json` at
 the project's top (a kill by time, by a module that would not import, or with no
 test named is not), and the next run tries it alone on the same mutant before
 the whole selection. When it fails there, as itself, the mutant is killed for
 the price of one test's run: the entry carries `"via": "probe"` in the report,
-and the closing lines count such kills. Anything else (it passes, another test fails, it
-runs out of time) leaves the mutant to the whole selection, so a survivor is
+and the closing lines count such kills. Anything else (it passes, another test
+fails, it runs out of time) leaves the mutant to the tests that cover its lines
+when coverage is on (below), and then to the whole selection, so a survivor is
 always the whole selection's verdict. A killer is tried only when the selection
 holds it and it is green run alone on the original; the `apart:` line counts
 those not green there and names up to three, each likely a test that depends on
@@ -179,6 +180,48 @@ from the copy's working directory (or when the test puts the copy on
 `sys.path`). In a `src` layout, starting the child from elsewhere imports the
 installed package, not the copy. Issue #2 tracks the known limits.
 
+## Running only the tests that cover a line
+
+With `coverage = true` in `[tool.invective]`, each mutant is run first against
+only the tests that ran its lines, found by one coverage run of the selection
+before the first mutant. It needs the `coverage` extra:
+
+```console
+uv add --dev --extra coverage git+https://github.com/gsfernandes81/invective@v0.5.0
+```
+
+A mutant is run against its narrower selection at the mutants' whole budget
+(three times the baseline, and at least 30 seconds). It counts as killed when one
+of those tests fails, or when the run runs out the budget, which the whole
+selection, holding those tests, would run out too; the kill carries `"via":
+"coverage"`, and the closing lines count these kills on a line of their own.
+Every other mutant (every survivor among them) is run against the whole
+selection. A mutant has no narrower selection when no test ran its lines, when
+more than half the selection did, or when a line of it runs as its module is
+imported; the `coverage:` line says how many mutants had one. When a mutant has
+a remembered killer too, the killer is tried first.
+
+This relies on the tests being independent of their order, with one worker as
+with several: some of the tests of a green selection are then green apart, and a
+kill by some of them is a kill by the whole selection. In a suite whose tests
+depend on their order, a narrowed kill can be one the whole selection would not
+make; it is marked either way. Such a suite is run with `--no-unsafe-speedups`,
+which turns coverage off, or with `coverage` left off. With `--confirm` and more
+than one worker, a narrowed kill is confirmed as any other kill is.
+
+The report carries `"coverage": {"narrowed": n, "unused": reason}`: how many
+mutants had a narrower selection, and why coverage was not used (`""` when it
+was). When it cannot be used (not installed, older than 7.13, the coverage run
+red or over ten times the baseline's time, and at least 30 seconds, `--tests`
+holding an option, a path holding a `,` or `$`, or a map coverage cannot read),
+the `coverage:` line and the closing lines say why, and every mutant runs the
+whole selection.
+
+The coverage run is much slower on Python 3.11, which has no `sys.monitoring`:
+there it costs several times a plain run of the selection, nearer its limit of
+ten times the baseline; from 3.12 on it costs little more than a plain run (the
+Finding in `docs/isolation.md`).
+
 ## A whole source tree
 
 ```console
@@ -261,6 +304,7 @@ exclude = ["var/*"]        # left out of the copy
 workers = 1                # mutants run at once; "auto" for one per CPU
 confirm = false            # with workers, confirm each kill alone
 history = true             # try each mutant's last killer alone first
+coverage = false           # run each mutant first against the tests that cover it
 unsafe-speedups = true     # false: only those safe for any suite
 ```
 

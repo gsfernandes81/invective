@@ -129,7 +129,8 @@ With the history on (`history` in `[tool.invective]`, on unless set false), each
 mutant whose last killer is remembered (`store.History`) is first run against
 that test alone. It counts as a kill only when pytest says a test failed
 (`ExitCode.TESTS_FAILED`), the test that failed is the one remembered, and
-nothing it was given is missing. Anything else leaves the mutant to the whole
+nothing it was given is missing. Anything else leaves the mutant to its
+narrower selection when coverage is on (below), and then to the whole
 selection, run as if nothing had been tried.
 
 Before the first mutant, each such test is run alone on the original, at the
@@ -151,16 +152,118 @@ test, and the header's `apart:` line names it (`mutate.NOT_GREEN_APART`).
 With `--confirm` and more than one worker, a probe's kill is confirmed like
 any other.
 
+## Coverage-guided selection
+
+With `coverage = true` in `[tool.invective]`, one run of the whole selection on
+the first copy's original, before the first mutant, records which tests ran
+each line of the target (`invective.covers`): in the run, and in every child
+interpreter its tests start, which coverage 7.13 and later is started in by its
+`.pth` file. It records with invective's own coverage settings, never the
+project's, and with none of the user's coverage variables. The tests that ran a
+mutant's lines are its narrower selection, unless no line of the mutant ran, a
+line ran outside any test (a module's top level, run as it is imported), or
+they are more than half the selection.
+
+A mutant with a narrower selection is run against it first, at the mutants'
+whole budget (three times the baseline, and at least 30 s), and after its
+remembered killer when it has one. No narrower selection is run on the original:
+some of the tests of a green selection are green apart, for tests independent of
+their order. It is a kill when a test failed (exit 1), the first to fail is one
+of the narrower selection's, and none is missing; or when the run is cut at the
+budget, since the whole selection holds those tests and would not end inside it
+either, while a mutant that only slows them ends inside it here as it would
+there. The kill carries `"via": "coverage"`. Anything else (a pass, a module
+that would not import, a run that collected nothing) leaves the mutant to the
+whole selection, run next in its order, so a survivor is always the whole
+selection's verdict (`mutate._SURVIVOR_VIA`).
+
+This relies on the tests being independent of their order, at any count of
+workers: a kill by fewer tests than the selection is then a kill by the whole
+selection. In a suite whose tests depend on their order, a narrowed kill can be
+one the whole selection would not make, by a test that fails apart from the
+tests before it; it is marked either way. Such a suite is run with
+`--no-unsafe-speedups`, which turns coverage off, or with `coverage` off.
+With `--confirm` and more than one worker, a narrowed kill is confirmed as any
+other kill is.
+
+A map can be short (a child of another interpreter, one started without the
+environment, or one ended by `os._exit`), or credit a line to the wrong test (a
+child or a thread that outlives the test that started it). Either costs time,
+never a verdict: a narrowed kill still needs one of the narrower selection's
+tests to fail on the mutant, or its run to run out the whole budget, and a
+mutant they let through goes to the whole selection.
+
+When the map cannot be made or read, the `coverage:` line and the closing lines
+say why, and every mutant runs the whole selection: coverage not installed or
+older than 7.13, the coverage run red or over ten times the baseline's time (at
+least 30 s), `--tests` holding an option a run of fewer tests would leave out,
+a path holding a `,` or `$` (coverage's settings split at the one and expand
+the other), or a map coverage cannot read.
+
+> **Finding:** (2026-10-10, more-itertools at `81c21a8`, its `test_recipes.py`
+> (148 tests) and `recipes.py`, this code at `4487020`, coverage 7.16.2, pytest
+> 9.1.1, a 4-vCPU VM with nothing else running; wall time of `mutate.run_tests`
+> in the checkout, a plain run and a coverage run in turn, four of each; medians)
+>
+> | Python | recorder | plain run | coverage run | ratio | lines mapped |
+> |---|---|---|---|---|---|
+> | 3.11.17 | C tracer | 13.0 s | 71.3 s | 5.5x | 456 |
+> | 3.12.3 | `sys.monitoring` | 13.8 s | 14.9 s | 1.08x | 454 |
+> | 3.13.16 | `sys.monitoring` | 9.1 s | 10.1 s | 1.11x | 450 |
+> | 3.14.6 | `sys.monitoring` | 8.6 s | 9.1 s | 1.06x | 500 |
+>
+> The coverage runs took 69.9 to 77.5 s on 3.11 and at most 15 s on the others;
+> every coverage run on one Python mapped as many lines, credited to as many
+> tests. On 3.11, a suite that runs the target hot pays over five times its plain
+> run for the map, inside the coverage run's limit of ten times; from 3.12 on, with
+> `sys.monitoring` and its events restarted at each test, it pays about a tenth
+> more.
+
+> **Finding:** (2026-10-10, the owner's machine: AMD Ryzen AI 9 HX 370, 12 cores, 24
+> logical CPUs, on AC, WSL2 with Linux 6.18, Python 3.14.7; more-itertools at
+> `81c21a8`, `TestConcurrentTee::test_concurrent_consumers` deselected; R40 is 40
+> mutants of `recipes.py` against `test_recipes.py`, RALL all 288; cold runs, wall
+> time, a calibration of `pytest -q tests/test_recipes.py` (median of three) around
+> every run, a pair discarded past 1.15x. Against `main`: this branch at `fdbc19c`
+> with `coverage = true`, `main` at `dcd47a5` at one worker and `7d1dac3` at four,
+> one pair per row, `f` 2.0% from no neighbour. The re-fit after the remembered
+> killer: `a5d9f60` against `fdbc19c`, both with `coverage = true`, three ABBA pairs
+> per row, the median of the ratios within them, `f` 2.0% from two neighbours)
+>
+> | against | case | N | before | after | speedup | touchable | processes | verdicts |
+> |---|---|---|---|---|---|---|---|---|
+> | `main` | R40 | 1 | 214.4 s | 203.1 s | 1.06x | 1.15x | 41 / 46 | equal |
+> | `main` | RALL | 1 | 1377.6 s | 1260.4 s | 1.09x | 1.16x | 289 / 338 | equal |
+> | `main` | R40 | 4 | 66.1 s | 65.1 s | 1.01x | none | 45 / 50 | equal |
+> | `main` | RALL | 4 | 369.9 s | 334.9 s | 1.10x | none | 293 / 342 | equal |
+> | re-fit | R40 | 1 | 199.5 s | 198.8 s | 1.00x | 1.01x | 46 / 46 | equal |
+> | re-fit | R40 | 4 | 65.0 s | 65.5 s | 0.99x | none | 50 / 50 | equal |
+>
+> | against | case | N | U (touchable) | touchable | its floor needs |
+> |---|---|---|---|---|---|
+> | `main` | R40 | 1 | 89.7 s | 1.15x | 1.11x |
+> | `main` | RALL | 1 | 832.1 s | 1.16x | 1.07x |
+>
+> At one worker, coverage runs a cold campaign of the recipes suite 6% (R40) to 9%
+> (RALL) faster, its touchable part 1.15x and 1.16x, beyond what its floor needs; at
+> four workers, 1% and 10%. It starts more pytest processes (the coverage run, and a
+> narrowed run before each whole run it does not spare), and every verdict is the
+> same. After the remembered killer, it runs as fast as on its own: 1.00x at one
+> worker (1.00x to 1.01x across the pairs) and 0.99x at four, with the same
+> processes. Not measured: attrs, whose run is refused at its first mutant (issue
+> #35), and the 300 mutants of `more.py`.
+
 ## The unsafe speedups
 
 A speedup is unsafe when it can give a wrong verdict on a suite whose tests
-depend on their order or are not safe to run in parallel: workers, and the
-remembered killer. `--no-unsafe-speedups` (`unsafe-speedups = false`) turns
-every one of them off (`config.settle`), so that each mutant is run against the
-whole selection in its order, one at a time, and keeps each speedup that cannot
-change a verdict on any suite. `config.SPEEDUPS` puts every speedup on its side.
-A value in `[tool.invective]` that would turn an unsafe one on gives way to the
-switch; a flag that would is refused.
+depend on their order or are not safe to run in parallel: workers, the
+remembered killer, and coverage-guided selection. `--no-unsafe-speedups`
+(`unsafe-speedups = false`) turns every one of them off (`config.settle`), so
+that each mutant is run against the whole selection in its order, one at a time,
+and keeps each speedup that cannot change a verdict on any suite.
+`config.SPEEDUPS` puts every speedup on its side. A value in `[tool.invective]`
+that would turn an unsafe one on gives way to the switch; a flag that would is
+refused.
 
 ## The import-from-outside refusal
 

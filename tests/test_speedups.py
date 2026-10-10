@@ -87,7 +87,7 @@ def test_every_setting_is_a_speedup_on_its_side_or_none(tmp_path):
                                 "exclude", "confirm", "unsafe_speedups"}
     assert speedups <= named
     assert {s.field: s.unsafe for s in config.SPEEDUPS} == {
-        None: False, "workers": True, "history": True}
+        None: False, "workers": True, "history": True, "coverage": True}
 
 
 def test_settle_turns_off_each_unsafe_speedup_and_keeps_the_rest():

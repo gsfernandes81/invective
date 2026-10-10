@@ -8,6 +8,7 @@
     workers = 1                # mutants run at once; "auto" for one per CPU
     confirm = false            # with workers, confirm each kill alone
     history = true             # try each mutant's last killer alone first
+    coverage = false           # run each mutant first against the tests that cover it
     unsafe-speedups = true     # false: only those safe for any suite
 
 An unknown key is a refusal, so that a misspelt one is not read as absent.
@@ -53,6 +54,7 @@ class Config(NamedTuple):
     workers: int | str = 1
     confirm: bool = False
     history: bool = True
+    coverage: bool = False
     unsafe_speedups: bool = True
 
 
@@ -60,7 +62,7 @@ class Config(NamedTuple):
 #: own (`workers`).
 _KEYS = {"fail-on-survivors": bool, "max-accepted": int, "exclude": list,
          "workers": (int, str), "confirm": bool, "history": bool,
-         "unsafe-speedups": bool}
+         "coverage": bool, "unsafe-speedups": bool}
 
 
 class Speedup(NamedTuple):
@@ -100,6 +102,10 @@ SPEEDUPS = (
     # in its order, passes.
     Speedup("runs each mutant's last killer alone first", "history", True,
             False),
+    # The tests that ran a mutant's lines, run apart from the rest, can fail
+    # where the whole selection, in its order, passes.
+    Speedup("runs each mutant first against the tests that cover it",
+            "coverage", True, False),
 )
 
 
@@ -476,4 +482,5 @@ def load(root: str) -> Config:
                   exclude=tuple(exclude), workers=table.get("workers", 1),
                   confirm=table.get("confirm", False),
                   history=table.get("history", True),
+                  coverage=table.get("coverage", False),
                   unsafe_speedups=table.get("unsafe-speedups", True))
