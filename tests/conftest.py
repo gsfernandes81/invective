@@ -191,6 +191,32 @@ def write_tree(root, files):
             fh.write(text)
 
 
+#: A `sitecustomize` that makes the path of the conftest pytest stopped at
+#: raise when invective's plugin reads it, and only then: pytest itself
+#: still reads it to say which conftest would not import.
+PATH_FAILS_IN_THE_PLUGIN = (
+    "import sys\n"
+    "from _pytest import config\n"
+    "\n"
+    "def _get(self):\n"
+    "    if sys._getframe(1).f_globals.get('__name__') == 'pytest_invective':\n"
+    "        raise RuntimeError('the plugin cannot read the path')\n"
+    "    return self._path\n"
+    "\n"
+    "def _set(self, value):\n"
+    "    self._path = value\n"
+    "\n"
+    "config.ConftestImportFailure.path = property(_get, _set)\n")
+
+
+def path_fails_in_the_plugin(where):
+    """A `PYTHONPATH` under which a run's plugin is this checkout's and its
+    handler of a conftest that will not import cannot read the conftest's
+    path (`PATH_FAILS_IN_THE_PLUGIN`, written in *where*)."""
+    write_tree(where, {"sitecustomize.py": PATH_FAILS_IN_THE_PLUGIN})
+    return os.pathsep.join([str(where), SRC])
+
+
 def git(root, *args):
     done = subprocess.run(["git", "-C", root, *args], capture_output=True,
                           text=True)

@@ -464,6 +464,37 @@ def test_the_instruments_mark_is_the_reports():
     assert marks[0] != marks[1]
 
 
+def test_the_original_run_again_mid_campaign_does_not_start_confirmation(
+        tmp_path, monkeypatch):
+    """`Copy.original` restores the copy mid-campaign, at its first mutant
+    that stops pytest at a conftest: that is no start of confirmation, which
+    the first restore of a copy outside it is."""
+    from invective import mutate
+    # Each attribute the instrument replaces, put back after the test.
+    for owner, name in [(mutate, "mutate"), (mutate._Pool, "close"),
+                        (mutate.Copy, "original"), (mutate.Copy, "restore"),
+                        (mutate.Copy, "run")]:
+        monkeypatch.setattr(owner, name, getattr(owner, name))
+    instrument = importlib.util.spec_from_file_location(
+        "bench_instrument", os.path.join(BENCH, "instrument.py"))
+    module = importlib.util.module_from_spec(instrument)
+    instrument.loader.exec_module(module)
+    module.install(str(tmp_path / "calls.jsonl"))
+    monkeypatch.setattr(mutate, "run_tests", lambda *a, **k: mutate.Verdict(
+        True, 0, "1 passed", ""))
+    (tmp_path / "t.py").write_text("X = 1\n", encoding="utf-8")
+    copy = mutate.Copy(str(tmp_path), "t.py", "X = 1\n", ["test_t.py"], None,
+                       (), None, 1)
+    copy.clock = int(time.time())
+    copy.run(mutate.Mutant(mutate.Job(1, 0, "CONST", "1 -> 2", 1), "X = 2\n",
+                           True), 30)
+
+    copy.original(30)
+    assert "confirm_start" not in module._marks
+    copy.restore()
+    assert "confirm_start" in module._marks
+
+
 def test_a_real_campaigns_twins_and_its_instrument_rows_agree(tmp_path):
     """invective itself, through the instrument, on a line holding the same
     edit twice: the report has both twins with their own verdicts, and each

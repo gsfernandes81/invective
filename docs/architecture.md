@@ -41,7 +41,9 @@ bullet says otherwise:
   whether the target was loaded from outside the copy, and when
   `INVECTIVE_INVENTORY` asks for it, the node ids the run kept (`selected`)
   and the files it imported outside the interpreter's library and site
-  directories (`imported`).
+  directories (`imported`). A conftest that will not import stops pytest
+  before any session; the plugin then writes the verdict as it stops, naming
+  that conftest (`conftest`).
 - `INVECTIVE_TARGET`: the mutated module's path from the copy's top, `/`
   separators. The plugin checks the tests loaded it from inside the copy.
 - `INVECTIVE_TYPED`: how many trailing arguments are paths for pytest's

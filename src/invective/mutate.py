@@ -78,7 +78,9 @@ from invective.tree import git_ref, head as commit_of, working_tree
 # run that could not be assembled -- a usage error, a selection that
 # collected nothing -- is a broken harness, and scoring it as a kill is the
 # same vacuous arithmetic the red-baseline refusal exists to prevent,
-# arriving one layer down: the score reads high because nothing ran.
+# arriving one layer down: the score reads high because nothing ran. The
+# exception is the usage error of a conftest that would not import the
+# mutant, while the original passes (`_final`).
 
 #: Not pytest's: a run this module stopped. Any value pytest cannot exit with.
 TIMED_OUT = -1  # invective: accept[equivalent: 1 -> 2] any code pytest cannot exit with serves
@@ -122,6 +124,9 @@ class Verdict(NamedTuple):
     #: The node ids the run kept, in their order, when it was asked for them
     #: (`run_tests`'s *inventory*); empty otherwise.
     selected: tuple[str, ...] = ()
+    #: The conftest pytest stopped at because it would not import, from the
+    #: top of the copy with `/` separators; `""` when it stopped at none.
+    conftest: str = ""
     #: The files the run imported outside the interpreter's library and site
     #: directories, when it was asked for them (`run_tests`'s *inventory*),
     #: each from the top of the copy with `/` or whole; None when the run
@@ -656,19 +661,20 @@ def run_tests(where: str, tests: list[str], timeout: float,
             # short, and the inventory is there only when it was asked for.
             elsewhere = said.get("elsewhere", "")
             selected = tuple(said.get("selected", ()))
+            conftest = said.get("conftest", "")
             imported = said.get("imported")
             if imported is not None:
                 imported = tuple(imported)
         except (OSError, ValueError, KeyError):
             # A run that ended before its session did -- pytest could not
             # start, or a mutant broke the plugin itself -- names no test.
-            killer, missing, elsewhere, selected = "", (), "", ()
+            killer, missing, elsewhere, selected, conftest = "", (), "", (), ""
             imported = None
     # Both streams: pytest says why it could not start on stderr.
     out = _ANSI.sub("", stdout + stderr)
     # invective: accept[equivalent: 400 -> 401] any length that holds pytest's last words serves
     return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer,
-                   missing, elsewhere, selected, imported)
+                   missing, elsewhere, selected, conftest, imported)
 
 
 def _no_cov(options: tuple[str, ...]) -> list[str]:
@@ -777,6 +783,8 @@ class Copy:
         self._held: Mutant | None = None
         # The next stamp once restored; None while in the pool.
         self._next: int | None = None
+        # The run of the original `original` made, once it has made one.
+        self._again: Verdict | None = None
 
     def run(self, mutant: Mutant | None, timeout: float,
             selection: str | None = None, **handshake) -> Verdict:
@@ -833,6 +841,21 @@ class Copy:
                 "is ahead of such a plugin.")
                 % (self.rel, got.elsewhere, self.where))
         return got
+
+    def original(self, timeout: float) -> Verdict:
+        """The selection run on the original once more, restored first if
+        the copy holds a mutant, within *timeout*.
+
+        **Run at the first call only, and given back from then on.** The
+        original is the same text all campaign, and every kill made in this
+        copy already rests on its being green here; a run that is not ends
+        the campaign (`_final`).
+        """
+        if self._again is None:
+            if self._held is not None:
+                self.restore()
+            self._again = self.run(None, timeout)
+        return self._again
 
     def restore(self) -> None:
         """Write the original back, so the copy can run it again."""
@@ -1257,24 +1280,52 @@ def _measure(mutant: Mutant, copy: Copy, attempts: list[Attempt],
             raise ValueError("a survivor reached by %r, which runs fewer "
                              "tests than the selection" % got.via)
         return got
-    return Outcome(_final(copy.run(mutant, budget), mutant, copy.rel))
+    return Outcome(_final(copy.run(mutant, budget), mutant, copy, budget))
 
 
-def _final(verdict: Verdict, mutant: Mutant, target: str) -> Verdict:
-    """*verdict*, a run of the whole selection on *mutant*, unless it is the
-    harness's and not the mutant's: then a `Refusal`."""
-    if (verdict.code in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED)
-            and not verdict.killer):
-        # The baseline proved this selection collects, and no module
-        # failed to, so this is the harness and not the mutant. Scoring it
-        # as a kill would be arithmetic over a run that executed no test.
+def _final(verdict: Verdict, mutant: Mutant, copy: Copy,
+           timeout: float) -> Verdict:
+    """*verdict*, a run of the whole selection on *mutant* in *copy*,
+    unless it is the harness's and not the mutant's: then a `Refusal`.
+
+    A run that stopped at a conftest that would not import is a kill, named
+    by that conftest, when the original passes in *copy*
+    (`Copy.original`, within *timeout*), and a `Refusal` when it does not.
+    Called on the worker that owns *copy*, as that run is made there.
+    """
+    if (verdict.code not in (ExitCode.USAGE_ERROR, ExitCode.NO_TESTS_COLLECTED)
+            or verdict.killer):
+        return verdict
+    if verdict.conftest:
+        # **A conftest that imports the target, and a mutant that breaks
+        # code run at import**: pytest stops at the conftest with a usage
+        # error, and no test can import the code. That is a kill, as a test
+        # module that would not import is, but only if the original still
+        # passes whole in this copy: if not, the copy or the runner broke,
+        # and every mutant would be scored for it.
+        again = copy.original(timeout)
+        if again.ok and not again.missing:
+            return verdict._replace(killer=verdict.conftest)
         raise Refusal(
-            "%s:%d %s made pytest exit %d -- it collected nothing, so "
-            "this is the runner and not the mutation. Counting it as "
-            "a kill would score a run that never ran a test.\n%s"
-            % (target, mutant.job.line, mutant.job.what, verdict.code,
-               verdict.tail))
-    return verdict
+            "%s:%d %s made pytest stop at %s, which would not import, and "
+            "the original does not pass in the same copy either (pytest "
+            "exited %d, %d selected test(s) not found), so this is the runner "
+            "and not the mutation.\n%s"
+            % (copy.rel, mutant.job.line, mutant.job.what, verdict.conftest,
+               again.code, len(again.missing), again.tail))
+    # The baseline proved this selection collects, and no module or
+    # conftest failed to import, so no test failed: this is the harness (an
+    # option pytest does not know, a test it cannot find), or a mutant that
+    # left the selection nothing to run: its tests renamed (a parameter's
+    # id), or none collected by a conftest that decides from the target
+    # what to collect. Scoring either as a kill would be arithmetic over a
+    # run that executed no test.
+    raise Refusal(
+        "%s:%d %s made pytest exit %d -- it collected nothing, so "
+        "this is the runner and not the mutation. Counting it as "
+        "a kill would score a run that never ran a test.\n%s"
+        % (copy.rel, mutant.job.line, mutant.job.what, verdict.code,
+           verdict.tail))
 
 
 def _gate(copy: Copy, path: str, timeout: float) -> tuple[Verdict, float]:
@@ -2039,7 +2090,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     # A module that would not import, under the mutant:
                     # pytest exits 2 for that when the selection names
                     # files, and 4 -- "found no collectors" -- when it names
-                    # node ids. The killer is the module that failed.
+                    # node ids, or when the module is a conftest that
+                    # imports the target (`_final`). The killer is the
+                    # module that failed.
                     if got.code in (ExitCode.INTERRUPTED, ExitCode.INTERNAL_ERROR,
                                     ExitCode.USAGE_ERROR,
                                     ExitCode.NO_TESTS_COLLECTED):
@@ -2133,7 +2186,11 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
 
             def again(copy: Copy, mutant: Mutant,
                       path: str | None = None) -> Verdict:
-                return copy.run(mutant, alone_budget, path)
+                got = copy.run(mutant, alone_budget, path)
+                # The whole selection's run is judged on the worker, as the
+                # original may be run again to judge it (`_final`).
+                return (got if path is not None
+                        else _final(got, mutant, copy, alone_budget))
 
             guard = pool.on(0, restored)
             if not guard.ok or guard.missing:
@@ -2176,9 +2233,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     # The whole selection again decides it, a survivor
                     # included: this run is the only one with nothing else
                     # running.
-                    confirmed = Outcome(
-                        _final(pool.on(0, again, mutant), mutant, src_rel),
-                        confirmed="full")
+                    confirmed = Outcome(pool.on(0, again, mutant),
+                                        confirmed="full")
                     if not alone_said and confirmed.verdict.ok:
                         # A kill that did not come back, though no killer
                         # could say so alone: named all the same, since

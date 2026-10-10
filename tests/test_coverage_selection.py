@@ -520,6 +520,29 @@ def test_a_failing_test_of_the_narrower_selection_or_time_is_its_kill(got):
         mutate.Outcome(got, via="coverage"))
 
 
+def test_a_narrowed_stop_at_a_conftest_is_the_selection_s_to_decide():
+    """A narrowed run that stops at a conftest that will not import is no
+    outcome; the whole selection then stops there too, and the original,
+    run again, passes: a kill named by the conftest, and not a narrowed
+    one."""
+    stopped = mutate.Verdict(False, ExitCode.USAGE_ERROR, "", "",
+                             conftest="pkg/tests/conftest.py")
+
+    class Stops(_Copy):
+        rel = GATE
+
+        def original(self, timeout):
+            self.runs.append((timeout, "original"))
+            return GREEN
+
+    copy = Stops(stopped)
+    got = mutate._measure(_mutant(), copy, [mutate.coverage_attempt(PLAN, 30)],
+                          30)
+    assert got == mutate.Outcome(stopped._replace(
+        killer="pkg/tests/conftest.py"))
+    assert copy.runs == [(30, "narrowed-0.txt"), (30, None), (30, "original")]
+
+
 def test_a_mutant_with_no_narrower_selection_is_not_run_by_the_attempt():
     copy = _Copy(killed_by(MINOR))
     assert mutate.coverage_attempt(PLAN, 30)(_mutant(1), copy) is None

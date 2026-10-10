@@ -235,20 +235,22 @@ the other), or a map coverage cannot read.
 > more.
 
 > **Finding:** (2026-10-10, the owner's machine: AMD Ryzen AI 9 HX 370, 12 cores, 24
-> logical CPUs, on AC, WSL2 with Linux 6.18, Python 3.14.7; more-itertools at
-> `81c21a8`, `TestConcurrentTee::test_concurrent_consumers` deselected; R40 is 40
-> mutants of `recipes.py` against `test_recipes.py`, RALL all 288; cold runs, wall
-> time, a calibration of `pytest -q tests/test_recipes.py` (median of three) around
-> every run, a pair discarded past 1.15x. Against `main`: this branch at `fdbc19c`
-> with `coverage = true`, `main` at `dcd47a5` at one worker and `7d1dac3` at four,
-> one pair per row, `f` 2.0% from no neighbour. The re-fit after the remembered
-> killer: `a5d9f60` against `fdbc19c`, both with `coverage = true`, three ABBA pairs
-> per row, the median of the ratios within them, `f` 2.0% from two neighbours)
+> logical CPUs, on AC, WSL2 with Linux 6.18, Python 3.14.7; more-itertools at `81c21a8`,
+> `TestConcurrentTee::test_concurrent_consumers` deselected; R40 is 40 mutants of
+> `recipes.py` against `test_recipes.py`, RALL all 288, M300 300 mutants of `more.py`
+> against `test_more.py`; cold runs, wall time, a calibration of `pytest -q
+> tests/test_recipes.py` (median of three) around every run, a pair discarded past
+> 1.15x. Against `main`: this branch at `fdbc19c` with `coverage = true`, `main` at
+> `dcd47a5` for R40 and RALL at one worker and `7d1dac3` at four and for M300, one pair
+> per row, `f` 2.0% from no neighbour. The re-fit after the remembered killer: `a5d9f60`
+> against `fdbc19c`, both with `coverage = true`, three ABBA pairs per row, the median
+> of the ratios within them, `f` 2.0% from two neighbours)
 >
 > | against | case | N | before | after | speedup | touchable | processes | verdicts |
 > |---|---|---|---|---|---|---|---|---|
 > | `main` | R40 | 1 | 214.4 s | 203.1 s | 1.06x | 1.15x | 41 / 46 | equal |
 > | `main` | RALL | 1 | 1377.6 s | 1260.4 s | 1.09x | 1.16x | 289 / 338 | equal |
+> | `main` | M300 | 1 | 839.3 s | 736.0 s | 1.14x | 1.30x | 301 / 341 | equal |
 > | `main` | R40 | 4 | 66.1 s | 65.1 s | 1.01x | none | 45 / 50 | equal |
 > | `main` | RALL | 4 | 369.9 s | 334.9 s | 1.10x | none | 293 / 342 | equal |
 > | re-fit | R40 | 1 | 199.5 s | 198.8 s | 1.00x | 1.01x | 46 / 46 | equal |
@@ -258,15 +260,16 @@ the other), or a map coverage cannot read.
 > |---|---|---|---|---|---|
 > | `main` | R40 | 1 | 89.7 s | 1.15x | 1.11x |
 > | `main` | RALL | 1 | 832.1 s | 1.16x | 1.07x |
+> | `main` | M300 | 1 | 443.8 s | 1.30x | 1.08x |
 >
 > At one worker, coverage runs a cold campaign of the recipes suite 6% (R40) to 9%
-> (RALL) faster, its touchable part 1.15x and 1.16x, beyond what its floor needs; at
-> four workers, 1% and 10%. It starts more pytest processes (the coverage run, and a
-> narrowed run before each whole run it does not spare), and every verdict is the
-> same. After the remembered killer, it runs as fast as on its own: 1.00x at one
-> worker (1.00x to 1.01x across the pairs) and 0.99x at four, with the same
-> processes. Not measured: attrs, whose run is refused at its first mutant (issue
-> #35), and the 300 mutants of `more.py`.
+> (RALL) faster, its touchable part 1.15x and 1.16x, and the 300 mutants of `more.py`
+> 14% faster, its touchable part 1.30x, each beyond what its floor needs; at four
+> workers, the recipes suite 1% and 10%. It starts more pytest processes (the coverage
+> run, and a narrowed run before each whole run it does not spare), and every verdict is
+> the same. After the remembered killer, it runs as fast as on its own: 1.00x at one
+> worker (1.00x to 1.01x across the pairs) and 0.99x at four, with the same processes.
+> Not measured: attrs, whose run is refused at its first mutant (issue #35).
 
 ## The verdict cache
 
@@ -330,6 +333,35 @@ every one survives silently. The usual cause is an editable install whose
 `.pth` line puts the project's own `src` on `sys.path`. The fix: pytest's
 `pythonpath` setting naming `src`, or a `conftest.py` that puts the copy's
 own `src` first on `sys.path` from its own `__file__`.
+
+## A run that tests nothing
+
+A mutant's run of the whole selection that pytest ends with a usage error (exit 4) or
+with nothing collected (exit 5), and that names no module as failing, ran no test. It
+says nothing of the mutant, and the campaign is refused (`mutate._final`): the baseline
+proved this selection collects, so the runner is what broke.
+
+The one exception is a conftest that will not import, which stops pytest with a usage
+error before any test, and which the plugin names in the verdict. A conftest that
+imports the target fails so whenever a mutant breaks code run at import, and no test can
+import the code then: the suite noticed, as it does when a test module will not import.
+To tell that mutant from a broken runner, the original is run again on the same selection
+in the same copy (`mutate.Copy.original`), on the worker that owns the copy. Green, the
+mutant is killed, the conftest is its killer, and the closing lines count it among the
+collection or internal errors. Not green, the campaign is refused. Each copy runs the
+original again once, at its first such mutant: the original is the same text all
+campaign, and every kill made in a copy already rests on its being green there. With
+`--confirm`, such a kill has no test to run alone, so the whole selection decides it
+again in the first copy, and one that then passes is named as `mutate.NO_KILLER`.
+
+A conftest beside a selection of node ids is loaded as their directory is collected, so
+one that will not import there is that directory's collection error, a kill named by the
+directory with no run of the original.
+
+An empty selection (exit 5) is a refusal even when the original passes. A mutant that
+renames the selected tests (a parameter's id), or that a conftest deciding what to
+collect from the target collects nothing for, leaves nothing to run, and no test failed
+on it.
 
 ## Pytest settings
 
