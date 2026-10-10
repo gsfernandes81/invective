@@ -45,6 +45,7 @@ the user's reference.
   signals, or the import-from-outside refusal.
 - Read `docs/development.md` for the environment, CI, and how to judge a
   check.
+- Read `docs/benchmarking.md` before measuring a speedup.
 
 ### Who writes it
 
