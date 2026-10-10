@@ -14,7 +14,9 @@ test not found, are written there as the session ends. That is how the
 engine learns which test killed a mutant. When `INVECTIVE_TARGET` names the
 mutated module, the verdict also says whether the tests loaded that module
 from somewhere other than the copy they ran in. When `INVECTIVE_INVENTORY`
-is set, it also lists the tests the run kept.
+is set, it also lists the tests the run kept. A conftest that will not
+import ends the run before any session: the verdict then names it, written
+as pytest stops.
 
 **Nothing from `invective` is imported unless `--mutate` is given.** pytest
 before 8.4 loads plugins before a repository's own `pythonpath` setting takes
@@ -32,6 +34,7 @@ import sys
 import sysconfig
 
 import pytest
+from _pytest.config import ConftestImportFailure
 
 #: The environment variable that names the file a run's verdict goes to.
 VERDICT = "INVECTIVE_VERDICT"
@@ -111,11 +114,37 @@ def pytest_addoption(parser):
              "the contract, as `invective run --no-unsafe-speedups` does")
 
 
+@pytest.hookimpl(wrapper=True)
 def pytest_load_initial_conftests(early_config, parser, args):
     # Popped, not read, as the verdict's variable is below.
     path = os.environ.pop(SELECTION, None)
-    if path is None:
-        return
+    if path is not None:
+        _select(early_config, args, path)
+    try:
+        return (yield)
+    except ConftestImportFailure as exc:
+        # **A conftest that will not import stops pytest with the code of a
+        # usage error** (an option it does not know), before any session,
+        # so no `_Verdict` is there to say which it was. Said here, so that
+        # the engine can tell a mutant that breaks the conftest's imports
+        # from a runner that could not start.
+        verdict = os.environ.get(VERDICT)
+        if verdict:
+            where = str(exc.path)
+            try:
+                where = os.path.relpath(where, early_config.invocation_params.dir)
+            except ValueError:
+                # On another drive (Windows): its whole path, which names it.
+                pass
+            with open(verdict, "w", encoding="utf-8") as fh:
+                json.dump({"killer": "", "missing": [], "elsewhere": "",
+                           "conftest": where.replace(os.sep, "/")}, fh)
+        raise
+
+
+def _select(early_config, args, path):
+    """The run keeps the tests the file *path* names, one a line, and only
+    those."""
     with open(path, encoding="utf-8") as fh:
         wanted = fh.read().splitlines()
     early_config.stash[_WANTED] = wanted

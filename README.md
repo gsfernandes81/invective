@@ -281,7 +281,14 @@ read as absent.
 
 - **It refuses a failing selection.** If the chosen tests do not pass before
   any edit, every mutant would count as killed and the score would be 100%
-  for nothing. The same goes for a selection that collects no tests.
+  for nothing. The same goes for a selection that collects no tests, and for
+  a mutant's run that pytest ends with a usage error or with nothing
+  collected: it ran no test, so it says nothing of the mutant. The exception
+  is a conftest that will not import. A mutant that breaks code a conftest
+  imports stops pytest there, before any test, and the selection is then run
+  once more on the original in the same copy (once per copy). Green, the
+  mutant is killed, the conftest is its killer, and the closing lines count
+  it among the collection or internal errors; not green, the run is refused.
 - **It runs pytest only**, in a fresh process for each mutant.
 
 ## Developing invective

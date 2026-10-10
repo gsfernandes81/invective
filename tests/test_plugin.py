@@ -522,6 +522,37 @@ def test_the_verdict_lists_the_tests_kept_when_asked(tmp_path):
         "selected": ["test_two.py::test_first", "test_two.py::test_third"]}
 
 
+@pytest.mark.parametrize("conftest, option, said", [
+    ("raise ImportError('broken')\n", [],
+     {"killer": "", "missing": [], "elsewhere": "",
+      "conftest": "tests/conftest.py"}),
+    ("", ["--no-such-option"], None),
+], ids=["conftest", "option"])
+def test_a_conftest_that_will_not_import_is_named_in_the_verdict(
+        tmp_path, conftest, option, said):
+    """pytest stops at a conftest that will not import with the code of a
+    usage error, as it does at an option it does not know, and before any
+    session: the verdict names the conftest, from the top of the run, and
+    says nothing for the option, so that the engine can tell the two
+    apart."""
+    write_tree(tmp_path, {"tests/conftest.py": conftest,
+                          "tests/test_one.py": "def test_one():\n    pass\n"})
+    verdict = tmp_path / "verdict.json"
+
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n", "0",
+         "-p", "pytest_invective", *option, "tests"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={**os.environ, "PYTHONPATH": SRC,
+             "INVECTIVE_VERDICT": str(verdict)})
+
+    assert done.returncode == 4, done.stdout + done.stderr
+    if said is None:
+        assert not verdict.exists()
+    else:
+        assert json.loads(verdict.read_text(encoding="utf-8")) == said
+
+
 def test_the_plugin_remembers_each_killer_and_runs_it_alone_next_time(
         repo, tmp_path):
     """The history is on unless the project says otherwise: the first run

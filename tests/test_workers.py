@@ -1656,6 +1656,96 @@ def test_a_run_of_the_whole_selection_that_collects_nothing_is_refused(code):
     assert mutate._measure(_mutant(), _Copy(named), [], 30).verdict == named
 
 
+CONFTEST = "pkg/tests/conftest.py"
+
+#: A run pytest stopped at a conftest that would not import.
+STOPPED = mutate.Verdict(False, ExitCode.USAGE_ERROR,
+                         "ImportError while loading conftest", "",
+                         conftest=CONFTEST)
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_a_stop_at_a_conftest_runs_the_original_again_once_a_copy(
+        tree, monkeypatch, workers):
+    """Every mutant stops at the conftest, and the original passes: each is
+    a kill named by the conftest. Each copy runs the original once more,
+    right after its first such mutant and never again, since the original
+    is the same text all campaign."""
+    run = Campaign(tree, monkeypatch, said=lambda r: (
+        GREEN if r.text is None else STOPPED))
+    report = run(workers, only=["CMP", "BOOL", "RAISE"])
+
+    assert report["mutants"] == report["killed"] == report["broken"] == 4
+    assert {k["killer"] for k in report["kills"]} == {CONFTEST}
+    for k in range(workers):
+        # The baselines: the first copy alone, then every copy at once.
+        baselines = 2 if workers > 1 and k == 0 else 1
+        originals = [r.text is None for r in run.runs if r.copy == k]
+        assert originals[:baselines + 2] == [True] * baselines + [False, True]
+        assert not any(originals[baselines + 2:])
+
+
+@pytest.mark.parametrize("original, said", [
+    (STOPPED, "pytest exited 4, 0 selected test(s) not found"),
+    (GREEN._replace(missing=(MINOR,)),
+     "pytest exited 0, 1 selected test(s) not found")])
+def test_a_stop_at_a_conftest_the_original_makes_too_is_refused(
+        tree, monkeypatch, landed, original, said):
+    """The original does not pass whole once the baseline was green: the
+    copy or the runner broke, and neither this mutant nor any after it is
+    scored for that."""
+    def says(r):
+        if r.text is None:
+            return GREEN if len(run.runs) == 1 else original
+        return STOPPED
+
+    run = Campaign(tree, monkeypatch, said=says)
+    with pytest.raises(mutate.Refusal) as caught:
+        run(1, only=["CMP", "BOOL", "RAISE"])
+    assert ("pkg%sgate.py:2 Lt -> LtE made pytest stop at %s, which would not "
+            "import, and the original does not pass in the same copy either "
+            "(%s), so this is the runner and not the mutation"
+            % (os.sep, CONFTEST, said)) in str(caught.value)
+    assert [r.text is None for r in run.runs] == [True, False, True]
+    assert landed == []
+
+
+def test_a_kill_at_a_conftest_is_confirmed_by_the_whole_selection(
+        tree, monkeypatch):
+    """Asked to confirm, a kill named by a conftest has no test to run
+    alone, so the whole selection decides it again in the first copy, the
+    original's run there standing for the rest. One that passes then is a
+    survivor, named as a kill with no killer to run alone that did not come
+    back."""
+    seen, lock = collections.Counter(), threading.Lock()
+
+    def said(r):
+        if r.text is None:
+            return GREEN
+        with lock:
+            seen[r.text] += 1
+            again = seen[r.text] > 1
+        return GREEN if again and "member or age" in r.text else STOPPED
+
+    run = Campaign(tree, monkeypatch, said=said)
+    report = run(2, only=["CMP", "BOOL", "RAISE"], confirm=True)
+
+    assert report["killed"] == report["broken"] == 3
+    assert {(k["killer"], k["confirmed"]) for k in report["kills"]} == {
+        (CONFTEST, "full")}
+    (survivor,) = report["survivors"]
+    assert (survivor["change"], survivor["confirmed"]) == ("And -> Or", "full")
+    assert report["unreproduced"] == [{
+        "kind": "BOOL", "line": 4, "change": "And -> Or", "killer": CONFTEST,
+        "alone": mutate.NO_KILLER, "again": "survived"}]
+    assert ("%s:4 And -> Or  %s (%s); the whole selection again: survived"
+            % (GATE, mutate.NO_KILLER, CONFTEST)) in [
+                line.strip() for line in mutate.summary(report)]
+    # The two baselines, the original once more after the first copy's
+    # first mutant, and the run before any kill is confirmed: no more.
+    assert [r.copy for r in run.runs if r.text is None].count(0) == 4
+
+
 def test_a_gate_runs_the_file_s_tests_on_the_original(tmp_path, monkeypatch):
     runs = []
     monkeypatch.setattr(mutate, "run_tests", lambda *a: runs.append(a) or GREEN)

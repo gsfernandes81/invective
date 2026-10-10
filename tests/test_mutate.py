@@ -1467,6 +1467,128 @@ def test_a_mutant_that_breaks_the_import_is_a_blunter_kill(repo, selection,
     assert {k["killer"] for k in report["kills"]} == {"pkg/tests/test_ready.py"}
 
 
+#: The fixture's conftest of its tests, with *text* after it.
+def _conftest(text):
+    return {"pkg/tests/conftest.py": FILES["pkg/tests/conftest.py"] + text}
+
+
+#: A module that does its work at import, and a test of it. Each `CONST` and
+#: `NOT` mutant raises as the module is imported.
+AT_IMPORT = {
+    "pkg/ready.py": ("READY = True\n"
+                     "if not READY:\n"
+                     "    raise RuntimeError('not ready')\n"),
+    "pkg/tests/test_ready.py": ("from pkg import ready\n"
+                                "\n"
+                                "def test_ready():\n"
+                                "    assert ready.READY\n"),
+}
+
+READY_ID = ["pkg/tests/test_ready.py::test_ready"]
+
+
+@pytest.mark.parametrize("workers, confirm", [(1, False), (2, False),
+                                              (2, True)])
+@pytest.mark.parametrize("conftest, selection, killer", [
+    # The conftests pytest loads before collecting, from the paths it was
+    # given and the top: it stops at one that will not import with the code
+    # of a usage error, before any test.
+    ("pkg/tests/conftest.py", None, "pkg/tests/conftest.py"),
+    ("conftest.py", READY_ID, "conftest.py"),
+    # The plugin collects a selection of node ids from their files, so the
+    # conftest beside them is loaded as their directory is collected, and
+    # one that will not import is that directory's collection error.
+    ("pkg/tests/conftest.py", READY_ID, "pkg/tests"),
+], ids=["given", "top", "collected"])
+def test_a_mutant_that_breaks_a_conftest_s_import_is_a_blunter_kill(
+        repo, workers, confirm, conftest, selection, killer):
+    """A conftest that imports the target is common, and a mutant that
+    breaks code run at import makes it fail: no test can import the code, so
+    the suite noticed, as it does a test module that would not import. The
+    original passes in the same copy, so it was the mutant. The conftest (or
+    the directory that failed with it) is the killer, and the kill is
+    counted apart."""
+    commit(repo, {**AT_IMPORT, conftest: (FILES.get(conftest, "")
+                                          + "from pkg import ready\n")})
+
+    report = mutate.mutate(repo, os.path.join(repo, "pkg", "ready.py"),
+                           ["pkg/tests/test_ready.py"], ["CONST", "NOT"], None,
+                           selection=selection, workers=workers,
+                           confirm=confirm)
+
+    assert report["killed"] == report["broken"] == report["mutants"] == 2
+    assert {(k["code"], k["killer"]) for k in report["kills"]} == {
+        (ExitCode.USAGE_ERROR, killer)}
+    assert ("           2 of the kills were collection or internal errors, "
+            "not a test failing") in mutate.summary(report)
+    if confirm:
+        # No killer to run alone: the whole selection again, with nothing
+        # else running, stops at the conftest again.
+        assert {k["confirmed"] for k in report["kills"]} == {"full"}
+        assert report["unreproduced"] == []
+
+
+#: A conftest whose `_again` is false the first time a copy's runs call it
+#: and true from then on, and *then*, which uses it to break every run but
+#: the first: a runner that broke once the baseline was green, whatever the
+#: mutant.
+def _breaks_after_one(then):
+    return _conftest("import pathlib\n"
+                     "import pytest\n"
+                     "RAN = pathlib.Path(__file__).with_name('ran')\n"
+                     "def _again():\n"
+                     "    if RAN.exists():\n"
+                     "        return True\n"
+                     "    RAN.write_text('')\n"
+                     "    return False\n" + then)
+
+
+@pytest.mark.parametrize("then, said", [
+    # The conftest will not import, on the mutant and on the original.
+    ("if _again():\n    raise ImportError('the runner broke')\n",
+     "made pytest stop at pkg/tests/conftest.py, which would not import, and "
+     "the original does not pass in the same copy either (pytest exited 4, "
+     "0 selected test(s) not found)"),
+    # A usage error that is no conftest's import.
+    ("def pytest_configure(config):\n"
+     "    if _again():\n"
+     "        raise pytest.UsageError('the runner broke')\n",
+     "made pytest exit 4 -- it collected nothing, so this is the runner"),
+    # Nothing to run: every test deselected.
+    ("def pytest_collection_modifyitems(items):\n"
+     "    if _again():\n"
+     "        items[:] = []\n",
+     "made pytest exit 5 -- it collected nothing, so this is the runner"),
+], ids=["conftest", "usage", "nothing"])
+def test_a_runner_that_breaks_after_the_baseline_is_refused(repo, then,
+                                                            said):
+    """pytest's usage error, or a selection that runs nothing, once the
+    baseline was green: when the original fails the same way in the same
+    copy, or no conftest would not import, it is the runner and not the
+    mutation, and every mutant would be scored for it."""
+    commit(repo, _breaks_after_one(then))
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(repo, os.path.join(repo, GATE), GATE_TESTS, ["RAISE"],
+                      None)
+    assert said in str(caught.value)
+
+
+def test_a_mutant_that_leaves_nothing_to_run_is_refused(repo):
+    """No test failed and no module failed to import: the mutant left the
+    selection nothing to run. That is no kill, whatever the original does,
+    since the tests it took away did not fail on it."""
+    commit(repo, {
+        "pkg/flags.py": "COLLECT = True\n",
+        **_conftest("from pkg import flags\n"
+                    "collect_ignore_glob = ([] if flags.COLLECT\n"
+                    "                       else ['test_*.py'])\n"),
+    })
+    with pytest.raises(mutate.Refusal) as caught:
+        mutate.mutate(repo, os.path.join(repo, "pkg", "flags.py"),
+                      ["pkg/tests"], ["CONST"], None)
+    assert "flags.py:1 True -> False made pytest exit 5" in str(caught.value)
+
+
 def test_workers_in_the_repository_s_own_options_are_turned_off(repo):
     """`-n` in addopts reaches every mutant's run, and each is run with
     `-n 0`, which wins over it; a run with xdist turned off altogether would
