@@ -1,0 +1,81 @@
+# The benchmark's projects and cases, read by `bench/compare.py`.
+#
+# A project is fetched once, by full commit, into the cache, and copied for
+# each side, so the two sides never share a tree; `self` is invective's own
+# worktree of that side. A case is one invective command on one project.
+# Adding a case is one `[cases.NAME]` table; docs/benchmarking.md says what
+# each key does.
+
+[projects.more-itertools]
+repo = "https://github.com/more-itertools/more-itertools"
+commit = "81c21a8db1c922260cd673841257fb9b112c1318"
+# One plain serial run of this file is the calibration (the median of three),
+# taken in the before venv just before and just after every run.
+calibrate = ["tests/test_recipes.py"]
+calibrate_runs = 3
+# Its threads took 1.4 to 96 s while the other CPUs were idle and a steady
+# 1.5 s while they were busy: kept, it times the scheduler, not invective.
+# Deselected through PYTEST_ADDOPTS, which reaches every pytest invective
+# starts, and not through the tests, which would make the selection not plain.
+deselect = ["tests/test_more.py::TestConcurrentTee::test_concurrent_consumers"]
+
+[projects.attrs]
+repo = "https://github.com/python-attrs/attrs"
+commit = "644b4e165bfbeee7e127de6fcbda08b64014316f"
+# attrs' own `tests` group, less pytest-xdist, which no case starts.
+requires = ["cloudpickle", "hypothesis", "pympler"]
+# The package is in `src` and is not installed: an installed attrs would be
+# the one the tests import, and invective refuses a run its mutants cannot
+# reach.
+pyproject = { "tool.pytest" = ['pythonpath = ["src"]'] }
+# "tests" is the case's own list; "auto" is one run when it takes over 20 s,
+# else the median of three.
+calibrate = "tests"
+calibrate_runs = "auto"
+
+[projects.invective]
+self = true
+# The suite's own `addopts` turns pytest-xdist on, so `-n 0` needs it there.
+requires = ["pytest-xdist"]
+# Its plain run is under 3 s, where a ratio is pytest's start-up jitter.
+calibrate = []
+
+[cases.R40]
+project = "more-itertools"
+target = "more_itertools/recipes.py"
+tests = ["tests/test_recipes.py"]
+only = "CMP,BOOL,NOT,CONST,RAISE"
+limit = 40
+
+[cases.M60]
+project = "more-itertools"
+target = "more_itertools/more.py"
+tests = ["tests/test_more.py"]
+only = "CMP,RAISE,BOOL"
+limit = 60
+
+# Uncapped by design: every site of `recipes.py`.
+[cases.RALL]
+project = "more-itertools"
+target = "more_itertools/recipes.py"
+tests = ["tests/test_recipes.py"]
+only = "CMP,BOOL,NOT,CONST,RAISE"
+
+# Its tests are every file pytest collects under `tests`, less the two that
+# fail here, as plain paths, so that the selection stays plain.
+[cases.T120]
+project = "attrs"
+target = "src/attr/_make.py"
+collect = ["tests"]
+collect_exclude = ["test_packaging", "test_pyright"]
+only = "CMP,RAISE"
+limit = 120
+
+# The plugin path, on invective's own code.
+[cases.I20]
+project = "invective"
+via = "pytest"
+options = ["-n", "0", "-p", "no:cacheprovider"]
+target = "src/invective/accept.py"
+tests = ["tests/test_accept.py"]
+only = "CMP,BOOL,NOT,CONST,RAISE"

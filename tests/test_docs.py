@@ -115,7 +115,7 @@ def _section(page, heading):
 # --------------------------------------------------------------------------
 # Paths
 
-_PATH_ROOTS = ("src/", "tests/", "docs/", ".github/")
+_PATH_ROOTS = ("src/", "tests/", "docs/", ".github/", "bench/")
 _TOP_FILES = {"README.md", "CLAUDE.md", "LICENSE", "pyproject.toml", "uv.lock"}
 
 

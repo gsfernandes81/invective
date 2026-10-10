@@ -49,6 +49,13 @@ A survivor in invective's own `src/` is accepted in the source with an
 `invective: accept[reason: change]` comment, as `accept.py`'s docstring
 describes. The acceptance says why the mutant may survive.
 
+## Benchmarking
+
+See `docs/benchmarking.md`: one command compares two refs on the benchmark's
+cases, and the page says what a pull request's measurement includes.
+`bench/` holds the tool and its cases, and is in neither the wheel nor the
+sdist.
+
 ## The docs test
 
 See "Checks" in `docs/documentation.md`.
