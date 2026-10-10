@@ -32,7 +32,7 @@ included (`tree.working_tree`). `--ref` checks out a commit instead
 
 What is skipped (`tree.SKIPPED`): `.git`, `.hg`, `.svn`, `.tox`, `.nox`,
 `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`,
-`node_modules`, and any directory holding `pyvenv.cfg`.
+`node_modules`, `.invective`, and any directory holding `pyvenv.cfg`.
 
 `__pycache__` and `.pytest_cache` matter for correctness: a copied `.pyc`
 whose mtime is in the future and whose size matches a mutant's would run
@@ -108,7 +108,7 @@ tests are independent of their order and safe to run in parallel, the bar
 pytest-xdist sets. A test that holds a port, a fixed path or a database another
 copy's run uses can fail and score a kill that is no mutant's, or pass and let
 a mutant survive. For a suite that breaks this, the verdicts are not
-guaranteed; with one worker, the runs are one at a time.
+guaranteed; with `--no-unsafe-speedups`, the runs are one at a time.
 
 Confirmation is the diagnosis, asked for with `--confirm` (`--mutate-confirm`,
 `confirm` in `[tool.invective]`). Every kill is then confirmed after the last
@@ -123,6 +123,34 @@ alone (a kill by time, by a module, or under `--tests` holding an option) that
 the whole selection lets through is named too, as `mutate.NO_KILLER`, and its
 survivor carries `confirmed` as a kill does. A survivor is not run again.
 
+## The remembered killer
+
+With the history on (`history` in `[tool.invective]`, on unless set false), each
+mutant whose last killer is remembered (`store.History`) is first run against
+that test alone. It counts as a kill only when pytest says a test failed
+(`ExitCode.TESTS_FAILED`), the test that failed is the one remembered, and
+nothing it was given is missing. Anything else leaves the mutant to the whole
+selection, run as if nothing had been tried.
+
+Before the first mutant, each such test is run alone on the original, at the
+mutants' time budget (`mutate._gate`), and only one that passes there, with
+nothing missing, is tried. With more than one worker these runs are made side
+by side, as the mutants' are. A test the selection does not hold is never
+tried: from pytest, the tests it collected; on the command line, the tests the
+first baseline kept (`INVECTIVE_INVENTORY`), and only when `--tests` holds
+paths and node ids alone, since an option among them (`-k`) would be left out
+of a run of one test.
+
+The probe relies on the suite's tests being independent of their order: such
+a test fails alone as it fails in the whole selection, so its kill is the whole
+selection's. In a suite whose tests depend on their order, it can be a kill the
+whole selection in its order would not make. Either way the entry is marked
+`"via": "probe"`, and the closing lines count those kills. A test not green
+alone on the original, where the whole selection passed, is likely such a
+test, and the header's `apart:` line names it (`mutate.NOT_GREEN_APART`).
+With `--confirm` and more than one worker, a probe's kill is confirmed like
+any other.
+
 ## Coverage-guided selection
 
 With `coverage = true` in `[tool.invective]`, one run of the whole selection on
@@ -136,22 +164,24 @@ line ran outside any test (a module's top level, run as it is imported), or
 they are more than half the selection.
 
 A mutant with a narrower selection is run against it first, at the mutants'
-whole budget. No narrower selection is run on the original: some of the tests
-of a green selection are green apart, for tests independent of their order. It
-is a kill when a test failed (exit 1), the first to fail is one of the narrower
-selection's, and none is missing; or when the run is cut at the budget, since
-the whole selection holds those tests and would not end inside it either, while
-a mutant that only slows them ends inside it here as it would there. The kill
-carries `"via": "coverage"`. Anything else (a pass, a module that would not
-import, a run that collected nothing) leaves the mutant to the whole selection,
-run next in its order, so a survivor is always the whole selection's verdict
-(`mutate._SURVIVOR_VIA`).
+whole budget (three times the baseline, and at least 30 s), and after its
+remembered killer when it has one. No narrower selection is run on the original:
+some of the tests of a green selection are green apart, for tests independent of
+their order. It is a kill when a test failed (exit 1), the first to fail is one
+of the narrower selection's, and none is missing; or when the run is cut at the
+budget, since the whole selection holds those tests and would not end inside it
+either, while a mutant that only slows them ends inside it here as it would
+there. The kill carries `"via": "coverage"`. Anything else (a pass, a module
+that would not import, a run that collected nothing) leaves the mutant to the
+whole selection, run next in its order, so a survivor is always the whole
+selection's verdict (`mutate._SURVIVOR_VIA`).
 
 This relies on the tests being independent of their order, at any count of
 workers: a kill by fewer tests than the selection is then a kill by the whole
 selection. In a suite whose tests depend on their order, a narrowed kill can be
 one the whole selection would not make, by a test that fails apart from the
-tests before it; it is marked either way, and such a suite keeps `coverage` off.
+tests before it; it is marked either way. Such a suite is run with
+`--no-unsafe-speedups`, which turns coverage off, or with `coverage` off.
 With `--confirm` and more than one worker, a narrowed kill is confirmed as any
 other kill is.
 
@@ -159,7 +189,7 @@ A map can be short (a child of another interpreter, one started without the
 environment, or one ended by `os._exit`), or credit a line to the wrong test (a
 child or a thread that outlives the test that started it). Either costs time,
 never a verdict: a narrowed kill still needs one of the narrower selection's
-tests to fail on the mutant, or all of them to run out the whole budget, and a
+tests to fail on the mutant, or its run to run out the whole budget, and a
 mutant they let through goes to the whole selection.
 
 When the map cannot be made or read, the `coverage:` line and the closing lines
@@ -187,6 +217,18 @@ the other), or a map coverage cannot read.
 > run for the map, inside the coverage run's limit of ten times; from 3.12 on, with
 > `sys.monitoring` and its events restarted at each test, it pays about a tenth
 > more.
+
+## The unsafe speedups
+
+A speedup is unsafe when it can give a wrong verdict on a suite whose tests
+depend on their order or are not safe to run in parallel: workers, the
+remembered killer, and coverage-guided selection. `--no-unsafe-speedups`
+(`unsafe-speedups = false`) turns every one of them off (`config.settle`), so
+that each mutant is run against the whole selection in its order, one at a time,
+and keeps each speedup that cannot change a verdict on any suite.
+`config.SPEEDUPS` puts every speedup on its side. A value in `[tool.invective]`
+that would turn an unsafe one on gives way to the switch; a flag that would is
+refused.
 
 ## The import-from-outside refusal
 
@@ -221,6 +263,10 @@ and fails in the silent direction invective exists to refuse.
   mutants, and do not work on Windows.
 - A lightweight runner that calls test functions directly.
 - Coverage selection without a confirmation re-run of survivors.
+- The last killer put first in the selection's order. A reordered selection
+  runs with no gate: a killer that needs an earlier test to have run scores a
+  kill that is no mutant's, which the remembered killer's run alone on the
+  original catches.
 - A cache keyed on the target and the tests only.
 
 > **Finding:** (2026-10-07, or3 benchmark, 4 cores, nothing else running)

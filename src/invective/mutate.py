@@ -15,7 +15,9 @@ is not load-bearing, or a line that does not matter.
 rewrites source files in place hands a mutant to whoever else is reading them,
 and leaves one behind if it is killed. The copy is of the files as they stand
 when the run starts, uncommitted edits included, and is removed at the end,
-including after a refusal. `--ref` runs on a commit instead.
+including after a refusal. `--ref` runs on a commit instead. The one thing a
+run writes in the project is `.invective/`, the killer each mutant was last
+killed by (`invective.store`), which the copy leaves out.
 
 **A red baseline is a refusal, not a starting point.** If the selection does not
 pass on the unmutated tree, every mutant is "killed" for a reason that has
@@ -39,6 +41,7 @@ import collections
 import contextlib
 import copy
 import difflib
+import functools
 import importlib.metadata
 import importlib.util
 import json
@@ -58,11 +61,12 @@ from typing import NamedTuple
 from pytest import ExitCode
 
 import pytest_invective
-from invective import covers, process
+from invective import covers, process, store
 from invective.accept import read as read_accepts
-from invective.config import (Config, check_pytest_settings,
+from invective.config import (SPEEDUPS, Config, check_pytest_settings,
                               load as load_config, project_root,
-                              relative_to_root, workers as workers_of)
+                              relative_to_root, settle,
+                              workers as workers_of)
 from invective.errors import Refusal
 from invective.tree import git_ref, head as commit_of, working_tree
 
@@ -114,6 +118,9 @@ class Verdict(NamedTuple):
     #: `""` otherwise. A mutant is written in the copy, so a run that says
     #: this is a run no mutant can reach, and its verdict counts for nothing.
     elsewhere: str = ""
+    #: The node ids the run kept, in their order, when it was asked for them
+    #: (`run_tests`'s *inventory*); empty otherwise.
+    selected: tuple[str, ...] = ()
 
 
 #: pytest can colour its output even when stdout is a pipe, and the tail is
@@ -550,6 +557,7 @@ def _wait(proc: subprocess.Popen, timeout: float,
 def run_tests(where: str, tests: list[str], timeout: float,
               selection: str | None = None, options: tuple[str, ...] = (),
               target: str = "", stop: threading.Event | None = None, *,
+              inventory: bool = False,
               coverage: str | None = None) -> Verdict:
     """The selection, in *where*: *tests* as pytest arguments, and when
     *selection* names a file of node ids, one a line, those tests and no
@@ -562,9 +570,10 @@ def run_tests(where: str, tests: list[str], timeout: float,
     plugin checks the tests loaded from the copy; none, and it checks
     nothing. Once *stop* is set, the run is stopped with everything it
     started and `Stopped` is raised: a signal reaches only the main thread,
-    and a run in a worker's thread learns of it this way. With *coverage*,
-    a directory, the run is the coverage run, and the plugin records in
-    that directory which test ran each line of *target*
+    and a run in a worker's thread learns of it this way. With *inventory*,
+    the verdict lists the tests the run kept (`Verdict.selected`). With
+    *coverage*, a directory, the run is the coverage run, and the plugin
+    records in that directory which test ran each line of *target*
     (`invective.covers`).
 
     **No `-q` here, and that is load-bearing.** The run's working directory is
@@ -588,6 +597,8 @@ def run_tests(where: str, tests: list[str], timeout: float,
             env[pytest_invective.TYPED] = str(len(tests))
         if target:
             env[pytest_invective.TARGET] = target
+        if inventory:
+            env[pytest_invective.INVENTORY] = "1"
         cov: list[str] = []
         if coverage is not None:
             # **The map is invective's, and nothing of the user's coverage
@@ -635,17 +646,19 @@ def run_tests(where: str, tests: list[str], timeout: float,
             with open(verdict, encoding="utf-8") as fh:
                 said = json.load(fh)
             killer, missing = said["killer"], tuple(said["missing"])
-            # `.get`: the field may be absent from the verdict of a run cut short.
+            # `.get`: the field may be absent from the verdict of a run cut
+            # short, and the inventory is there only when it was asked for.
             elsewhere = said.get("elsewhere", "")
+            selected = tuple(said.get("selected", ()))
         except (OSError, ValueError, KeyError):
             # A run that ended before its session did -- pytest could not
             # start, or a mutant broke the plugin itself -- names no test.
-            killer, missing, elsewhere = "", (), ""
+            killer, missing, elsewhere, selected = "", (), "", ()
     # Both streams: pytest says why it could not start on stderr.
     out = _ANSI.sub("", stdout + stderr)
     # invective: accept[equivalent: 400 -> 401] any length that holds pytest's last words serves
     return Verdict(proc.returncode == 0, proc.returncode, out[-400:], killer,
-                   missing, elsewhere)
+                   missing, elsewhere, selected)
 
 
 def _no_cov(options: tuple[str, ...]) -> list[str]:
@@ -1272,6 +1285,74 @@ def _plain_tests(tests: list[str], where: str) -> bool:
         os.path.join(where, test.partition("::")[0])) for test in tests)
 
 
+class Probe(NamedTuple):
+    """A mutant's last killer, which passed alone on the original: the node
+    id (*killer*), the file that names it alone (*path*), and how long that
+    run took (*took*)."""
+
+    killer: str
+    path: str
+    took: float
+
+
+def probe_attempt(probes: dict[int, Probe], budget: float) -> Attempt:
+    """The attempt that runs a mutant's last killer alone, for each mutant
+    whose site's index is among *probes*.
+
+    **A kill only when the killer fails, alone, as itself**: pytest's code
+    for a test that failed, the killer named the one remembered, and
+    nothing missing. Under the contract a test fails alone as it fails in
+    the whole selection, so that is a kill of the whole selection. Anything
+    else (a pass, another test failing, a run stopped at its time, a module
+    that would not import) says nothing, and the whole selection decides.
+    A run cut short by the campaign stopping is `Stopped`, let through, so
+    that it is never an outcome.
+    """
+    def attempt(mutant: Mutant, copy: Copy) -> Outcome | None:
+        probe = probes.get(mutant.job.idx)
+        if probe is None:
+            return None
+        # The killer alone takes a fraction of the selection's time, so a
+        # run far past its own falls to the whole selection early.
+        got = copy.run(mutant, min(budget, max(5.0, 3 * probe.took)),
+                       probe.path)
+        if (got.code == ExitCode.TESTS_FAILED and got.killer == probe.killer
+                and not got.missing):
+            return Outcome(got, via="probe")
+        return None
+
+    return attempt
+
+
+#: What the header says of a test, or a few, that the campaign ran apart
+#: from the rest of the selection on the original and that did not pass: the
+#: whole selection passed there, so such a test is likely one that depends on
+#: its order, or on another copy's run. Said, never refused: the test is only
+#: left out of the speedup it was run for.
+NOT_GREEN_APART = "not green on the original when run apart from the rest"
+
+
+def _apart_line(names: list[str]) -> str:
+    """The header's line for the runs apart from the rest, on the original,
+    that were not green: how many, and the first three of *names*."""
+    return ("apart:     %d %s: %s; --no-unsafe-speedups runs only the whole "
+            "selection" % (len(names), NOT_GREEN_APART, ", ".join(names[:3])))
+
+
+def _speedups_said(running: Config) -> str:
+    """What the header says of the speedups *running*, a campaign's settled
+    settings with the workers it runs, holds: with the unsafe ones off, that
+    only the safe ones are on; otherwise, which unsafe ones of
+    `config.SPEEDUPS` are on, by their settings' names, or that none is."""
+    if not running.unsafe_speedups:
+        return "safe ones only"
+    used = [speedup.field for speedup in SPEEDUPS if speedup.unsafe
+            and getattr(running, speedup.field) != speedup.off]
+    if used:
+        return "unsafe ones on: %s" % ", ".join(used)
+    return "no unsafe ones on"
+
+
 # --------------------------------------------------------------------------
 # **Coverage-guided selection.** One coverage run of the whole selection,
 # before the first mutant, says which tests ran each line of the target
@@ -1434,7 +1515,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
            limit: int | None, say=print, ref: str | None = None,
            exclude: tuple[str, ...] = (), selection: list[str] | None = None,
            options: tuple[str, ...] = (), workers: int | str = 1,
-           confirm: bool = False, coverage: bool = False) -> dict:
+           confirm: bool = False, history: bool = False,
+           coverage: bool = False, unsafe_speedups: bool = True) -> dict:
     """Run every mutant of *target* against *tests*, and report on each.
 
     The mutants are written in a copy of *root* as it stands, *exclude* left
@@ -1453,13 +1535,25 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     the last mutant has run, with nothing else running, and the report
     names each kill its killer did not make alone (`unreproduced`).
 
-    With *coverage*, each mutant is run first against the tests that ran
-    its lines, when they are at most half the selection, and a kill by one
-    of them, or by time, stands; every other mutant, every survivor among
-    them, is decided by the whole selection.
-    The report says how many mutants were narrowed, or why none was
-    (`coverage`).
+    With *history*, each mutant's last killer, kept in *root*'s
+    `.invective/` (`store.History`), is run alone before the whole
+    selection (`probe_attempt`), and each verdict is kept there for the next
+    run. With *coverage*, each mutant is run first against the tests that
+    ran its lines, when they are at most half the selection, and a kill by
+    one of them, or by time, stands; every other mutant, every survivor
+    among them, is decided by the whole selection, and the report says how
+    many mutants were narrowed, or why none was (`coverage`). Without
+    *unsafe_speedups*, none of these runs, nor more than one worker
+    (`config.settle`).
     """
+    # **The engine is held to the switch too, whoever called it.** Every
+    # speedup of `config.SPEEDUPS` is a keyword here, and is read below only
+    # from *speed*, as the switch leaves it: one registered there is held to
+    # the switch with no list here to keep.
+    given = locals()
+    speed = settle(Config(unsafe_speedups=unsafe_speedups, **{
+        speedup.field: given[speedup.field] for speedup in SPEEDUPS
+        if speedup.field is not None}))
     try:
         src_rel = relative_to_root(target, root)
     except ValueError:
@@ -1536,11 +1630,19 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             raise Refusal("no mutation sites in %s for %s"
                           % (src_rel, ",".join(only or sorted(OPERATORS))))
 
-        count = workers_of(workers, most=len(sites))
-        # Whether a run of other tests than the selection's leaves out
-        # nothing it chose: on the command line, an option among the tests
-        # would be left out with them.
+        count = workers_of(speed.workers, most=len(sites))
+        # Whether a run of other tests than the selection, given *tests* to
+        # start pytest's search for its settings, leaves out nothing they
+        # would have chosen: on the command line, an option among the tests
+        # (`-k`) would be left out with them.
         plain = selection is not None or _plain_tests(tests, first)
+        # The path with `/` on every platform, as git writes a diff and as
+        # the report's node ids are spelt: it is part of a text another tool
+        # reads (a diff's headers, the history's keys), unlike `target`,
+        # which is a path on this machine and keeps its native separators.
+        shown = src_rel.replace(os.sep, "/")
+        remembered = (store.History.load(root, shown, say) if speed.history
+                      else None)
         # **Every copy before the first run**, so that none holds what a
         # run left behind: a cache, a database, a file a test writes.
         places = [first]
@@ -1562,6 +1664,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         say("target:    %s" % src_rel)
         say("tests:     %s" % (" ".join(tests) if selection is None else
                                "%d collected by pytest" % len(selection)))
+        say("speedups:  %s" % _speedups_said(speed._replace(workers=count)))
 
         stop = threading.Event()
         copies = [Copy(where, src_rel, source, tests, listed, options, stop,
@@ -1578,11 +1681,11 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
 
         held_open.push(ended)
 
-        def baseline(copy: Copy) -> tuple[float, Verdict]:
+        def baseline(copy: Copy, **handshake) -> tuple[float, Verdict]:
             """How long the selection took on *copy*'s original, and what it
             said: refused here unless it ran, green or red, whole."""
             started = time.time()
-            got = copy.run(None, BASELINE_TIMEOUT)
+            got = copy.run(None, BASELINE_TIMEOUT, **handshake)
             took = time.time() - started
             if got.code == TIMED_OUT:
                 raise Refusal(
@@ -1610,7 +1713,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # running; at once, each copy must be green too, and the slowest
         # run is the load every mutant's runs will be under, which the
         # budget is measured from.
-        alone, got = pool.on(0, baseline)
+        # The tests the first run kept, for the history's killers to be
+        # found among: asked for only when there is a history to read.
+        alone, got = pool.on(0, functools.partial(baseline, inventory=True)
+                             if speed.history else baseline)
         if not got.ok:
             raise Refusal(
                 "the selection is RED on the unmutated tree, so every mutant "
@@ -1631,8 +1737,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                     "the selection is green alone and RED in %d of %d copies "
                     "running it at once (%s): its tests are not safe to run "
                     "in parallel, or depend on their order, and a mutant "
-                    "could be 'killed' by another copy's run. Run it with one "
-                    "worker.\n%s"
+                    "could be 'killed' by another copy's run. Run it with "
+                    "--no-unsafe-speedups, which runs one mutant at a time "
+                    "against the whole selection.\n%s"
                     % (len(red), count, ", ".join(red), next(
                         got.tail for _took, got in together if not got.ok)))
             base = max(took for took, _got in together)
@@ -1644,8 +1751,51 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # time than the loaded budget gave it.
         # invective: accept[equivalent: 3 -> 4] any budget well above the baseline serves, and a kill by time is counted apart
         alone_budget = max(budget, alone * 3)
+
+        # **Each mutant's last killer, run alone on the original first.**
+        # Only a killer that passes alone there can say anything alone on
+        # a mutant, and only one among the tests the selection holds, so
+        # that its kill is one the selection would make. The runs not green
+        # are said, a test that fails apart from the rest being likely one
+        # that depends on its order or on another copy's run.
+        probes: dict[int, Probe] = {}
+        apart: list[str] = []
+        if remembered is not None:
+            keys = store.mutant_keys(lines, module.sites)
+            # Kept on the way out, whatever ends the campaign: what landed
+            # by then is what this run measured.
+            held_open.callback(remembered.save, keys)
+            known = {idx: remembered.killers[keys[idx]]
+                     for idx, _kind, _node, _what in sites
+                     if keys[idx] in remembered.killers}
+            if plain and known:
+                kept = set(got.selected if selection is None else selection)
+                killers = list(dict.fromkeys(
+                    killer for killer in known.values() if killer in kept))
+                files = []
+                for i, killer in enumerate(killers):
+                    one = os.path.join(box, "probe-%d.txt" % i)
+                    with open(one, "w", encoding="utf-8") as fh:
+                        fh.write(killer + "\n")
+                    files.append(one)
+                gated = pool.map(functools.partial(_gate, timeout=budget),
+                                 files)
+                passed = {}
+                for killer, one, (verdict, took) in zip(killers, files, gated):
+                    if verdict.ok and not verdict.missing:
+                        passed[killer] = Probe(killer, one, took)
+                    elif not verdict.ok:
+                        apart.append(killer)
+                probes = {idx: passed[killer] for idx, killer in known.items()
+                          if killer in passed}
+                say("history:   %d remembered, %d usable"
+                    % (len(known), len(probes)))
+            elif not plain:
+                say("history:   not used: --tests has options")
+        if apart:
+            say(_apart_line(apart))
         narrowing = Narrowing({}, "")
-        if coverage:
+        if speed.coverage:
             narrowing = _narrowing(pool, box, sites, base, plain)
             say(_coverage_line(narrowing, len(sites)))
         say("mutants:   %d\n" % len(sites))
@@ -1674,6 +1824,8 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             Job(n, idx, kind, what, node.lineno)            # type: ignore[attr-defined]
             for n, (idx, kind, node, what) in enumerate(sites, 1))
         attempts: list[Attempt] = []
+        if probes:
+            attempts.append(probe_attempt(probes, budget))
         if narrowing.plan:
             attempts.append(coverage_attempt(narrowing.plan, budget))
 
@@ -1704,11 +1856,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         # report's `line` are, so the `@@` numbers are the report's lines,
         # no `\r` is left on a line, and a `\r\n` file's diff is the
         # edited lines alone, both sides having lost their endings alike.
-        # The headers spell the path with `/` on every platform, as git
-        # writes a diff and as the report's node ids are spelt: they are
-        # part of a text another tool reads, unlike `target`, which is a
-        # path on this machine and keeps its native separators.
-        shown = src_rel.replace(os.sep, "/")
+        # The headers spell the path with `/` (`shown`).
 
         def entry(mutant: Mutant, outcome: Outcome) -> dict:
             job = mutant.job
@@ -1774,8 +1922,15 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
                         stale.setdefault(a, "%s is killed by %s" % (
                             what, got.killer or "a run that failed"))
 
-        def lands(mutant: Mutant, outcome: Outcome) -> None:
+        def land(mutant: Mutant, outcome: Outcome) -> None:
+            # `_landed` is looked up as each lands, so a test can stand in.
             _landed(mutant, outcome)
+            if remembered is not None:
+                remembered.note(keys[mutant.job.idx], outcome.verdict.ok,
+                                outcome.verdict.killer)
+
+        def lands(mutant: Mutant, outcome: Outcome) -> None:
+            land(mutant, outcome)
             done[mutant.job.n] = (entry(mutant, outcome), outcome)
             report_done()
 
@@ -1826,7 +1981,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # run cut short, which is `Stopped`, never an outcome.
             for _k, n, got in pool.halt():
                 if isinstance(got, Outcome) and final(got):
-                    _landed(running[n], got)
+                    land(running[n], got)
             raise
 
         if unconfirmed:
@@ -1931,12 +2086,15 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # kill -- the suite did notice -- but a blunter one, and a
             # campaign that cannot see the split cannot tell a
             # well-guarded module from an unimportable one.
-            "broken": broken, "workers": count}
+            "broken": broken, "workers": count,
+            # Whether the run could use a speedup a suite outside the
+            # contract cannot trust, as its `speedups:` line says.
+            "unsafe_speedups": speed.unsafe_speedups}
         if confirm and count > 1:
             # There whenever the kills were confirmed, empty or not, so that
             # none named reads as none found and not as none looked for.
             report["unreproduced"] = unreproduced
-        if coverage:
+        if speed.coverage:
             report["coverage"] = {"narrowed": len(narrowing.plan),
                                   "unused": narrowing.unused}
         return report
@@ -1978,6 +2136,12 @@ def summary(report: dict) -> list[str]:
         # of this kind is not a well-tested file.
         lines.append("           %d of the kills were collection or internal "
                      "errors, not a test failing" % report["broken"])
+    probed = sum(k.get("via") == "probe" for k in report["kills"])
+    if probed:
+        # Said apart: a test run alone that fails is a kill of the whole
+        # selection only for tests independent of their order.
+        lines.append("           %d of the kills were a remembered killer run "
+                     "alone" % probed)
     narrowed = sum("coverage" in (k.get("via"), k.get("origin"))
                    for k in report["kills"])
     if narrowed:
@@ -2087,6 +2251,13 @@ def parser() -> argparse.ArgumentParser:
                     help="with workers, run each kill again with nothing else "
                          "running, and name those its killer does not make "
                          "alone. [tool.invective] confirm turns it on")
+    ap.add_argument("--no-unsafe-speedups", action="store_true",
+                    help="use no speedup that can give a wrong verdict on a "
+                         "suite whose tests depend on their order or are not "
+                         "safe to run in parallel, so that each mutant is run "
+                         "against the whole selection, one at a time. "
+                         "[tool.invective] unsafe-speedups = false turns it "
+                         "on")
     return ap
 
 
@@ -2106,15 +2277,19 @@ def main(argv: list[str] | None = None) -> int:
     root = project_root()
     tests = rewrite_tests(args.tests, os.getcwd(), root)
     try:
-        config = load_config(root)
+        flags = {}
         if args.workers is not None:
             workers_of(args.workers, "--workers")
+            flags["workers"] = ("--workers", args.workers)
+        config = settle(load_config(root), flags, "--no-unsafe-speedups"
+                        if args.no_unsafe_speedups else "")
         report = mutate(root, args.target, tests, only, args.limit,
                         ref=args.ref, exclude=config.exclude,
-                        workers=(config.workers if args.workers is None
-                                 else args.workers),
+                        workers=config.workers,
                         confirm=args.confirm or config.confirm,
-                        coverage=config.coverage)
+                        history=config.history,
+                        coverage=config.coverage,
+                        unsafe_speedups=config.unsafe_speedups)
     except Refusal as exc:
         print("\nrefused: %s" % exc, file=sys.stderr)
         return 2

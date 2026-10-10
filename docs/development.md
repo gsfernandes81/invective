@@ -32,6 +32,10 @@ on its own code, one module per job. To do that for one module locally:
 uv run pytest -n 0 --mutate src/invective/mutate.py tests/test_mutate.py
 ```
 
+A local run keeps each killer in `.invective/` at the checkout's top
+(`docs/memory.md`), and the next one tries it first. The workflow's runs start
+with none.
+
 ## Judging a check
 
 A new or changed test must be seen red before its green is trusted: run
@@ -44,6 +48,13 @@ silent failure it stands for.
 A survivor in invective's own `src/` is accepted in the source with an
 `invective: accept[reason: change]` comment, as `accept.py`'s docstring
 describes. The acceptance says why the mutant may survive.
+
+## Benchmarking
+
+See `docs/benchmarking.md`: one command compares two refs on the benchmark's
+cases, and the page says what a pull request's measurement includes.
+`bench/` holds the tool and its cases, and is in neither the wheel nor the
+sdist.
 
 ## The docs test
 

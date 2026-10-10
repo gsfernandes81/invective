@@ -39,8 +39,9 @@ class Run(NamedTuple):
     copy: int
     #: The target's text in the copy, None when it is the original.
     text: str | None
-    #: `selection`, `coverage`, `narrowed` (a file of `narrowed-`) or
-    #: `alone` (confirmation's file of one killer).
+    #: `selection`, `coverage`, `narrowed` (a file of `narrowed-`), `probe`
+    #: (a remembered killer's file) or `alone` (confirmation's file of one
+    #: killer).
     kind: str
     #: The tests a file named, `()` for the selection.
     tests: tuple[str, ...]
@@ -59,7 +60,7 @@ class Covered(Campaign):
         self.map, self.tests = lines or {}, tests
 
     def run_tests(self, where, tests, timeout, selection=None, options=(),
-                  target="", stop=None, *, coverage=None):
+                  target="", stop=None, *, inventory=False, coverage=None):
         self.stop = stop
         with open(os.path.join(where, GATE), encoding="utf-8",
                   newline="") as fh:
@@ -71,15 +72,17 @@ class Covered(Campaign):
                       self.map, self.tests)
         elif selection is not None and os.path.basename(selection) != (
                 "selection.txt"):
-            kind = ("narrowed" if os.path.basename(selection).startswith(
-                "narrowed-") else "alone")
+            kind = {"narrowed": "narrowed", "probe": "probe"}.get(
+                os.path.basename(selection).partition("-")[0], "alone")
             with open(selection, encoding="utf-8") as fh:
                 named = tuple(fh.read().splitlines())
         run = Run(self.places.index(where),
                   None if text == self.source else text, kind, named, timeout)
         with self.lock:
             self.runs.append(run)
-        return self.said(run)
+        got = self.said(run)
+        # The tests the run kept, which a remembered killer is looked for in.
+        return got._replace(selected=self.tests) if inventory else got
 
     def of(self, kind):
         return [run for run in self.runs if run.kind == kind]
@@ -200,6 +203,84 @@ def test_mutants_of_lines_the_same_tests_ran_share_one_selection(
         (MINOR,): 2, (ADULT,): 3}
 
 
+def _written(monkeypatch):
+    """Each text written as a copy's target, in order."""
+    texts = []
+    real = mutate._write
+    monkeypatch.setattr(mutate, "_write", lambda path, text, when: (
+        texts.append(text), real(path, text, when)))
+    return texts
+
+
+@pytest.mark.parametrize("narrowed, survives", [(killed_by(MINOR), False),
+                                                (GREEN, True)])
+def test_a_probe_that_says_nothing_leaves_the_mutant_to_the_narrowed_run(
+        tree, monkeypatch, narrowed, survives):
+    """The refusal's mutant has a remembered killer, the adult's test, which
+    passes alone on it; the covering test is run next, and kills it, marked
+    as the covering tests' kill, or lets it through to the whole selection,
+    which decides a survivor. The mutant is written once for all three."""
+    from test_probe import RAISE, SITES, remember
+
+    remember(tree, {RAISE: ADULT})
+    texts = _written(monkeypatch)
+
+    def said(run):
+        if run.text is None or "pass" not in run.text:
+            return GREEN
+        return narrowed if run.kind == "narrowed" else GREEN
+
+    run = Covered(tree, monkeypatch, REFUSAL, said=said)
+    report = run(1, only=["RAISE"], history=True, coverage=True)
+
+    on_mutant = [(r.kind, r.tests) for r in run.runs if r.text]
+    if survives:
+        assert report["kills"] == [] and len(report["survivors"]) == 1
+        assert on_mutant == [("probe", (ADULT,)), ("narrowed", (MINOR,)),
+                             ("selection", ())]
+    else:
+        assert [(k["killer"], k["via"]) for k in report["kills"]] == [
+            (MINOR, "coverage")]
+        assert on_mutant == [("probe", (ADULT,)), ("narrowed", (MINOR,))]
+    assert texts.count(SITES[RAISE].text) == 1
+    i = next(n for n, line in enumerate(run.lines)
+             if line.startswith("history:"))
+    assert run.lines[i + 1].startswith("coverage:")
+
+
+def test_no_unsafe_speedups_turns_coverage_off(tree, monkeypatch):
+    """Asked for coverage with the unsafe speedups off, a direct call runs
+    no coverage run and no narrowed run, and says only the safe ones run;
+    the command takes `coverage = true` in the settings as off with the
+    switch."""
+    run = Covered(tree, monkeypatch, REFUSAL, said=lambda r: (
+        killed_by(MINOR) if r.text and "pass" in r.text else GREEN))
+    report = run(1, coverage=True, unsafe_speedups=False)
+    assert {r.kind for r in run.runs} == {"selection"}
+    assert "coverage" not in report
+    assert "speedups:  safe ones only" in run.lines
+    assert not any(line.startswith("coverage:") for line in run.lines)
+
+    given = []
+    monkeypatch.setattr(mutate, "mutate", lambda *a, **k: given.append(
+        k["coverage"]) or {
+            "killed": 0, "mutants": 1, "survivors": [], "accepted": [],
+            "stale": [], "kills": [], "broken": 0})
+    write_tree(tree, {"pyproject.toml": (
+        "[tool.pytest.ini_options]\n[tool.invective]\ncoverage = true\n")})
+    monkeypatch.chdir(tree)
+    args = ["--target", GATE, "--tests", "pkg/tests/test_gate.py"]
+    mutate.main(args + ["--no-unsafe-speedups"])
+    mutate.main(args)
+    assert given == [False, True]
+
+
+def test_the_speedups_line_names_coverage_when_it_runs(tree, monkeypatch):
+    run = Covered(tree, monkeypatch, REFUSAL)
+    run(1, coverage=True)
+    assert "speedups:  unsafe ones on: coverage" in run.lines
+
+
 def test_with_coverage_off_no_run_is_added(tree, monkeypatch):
     run = Covered(tree, monkeypatch, REFUSAL)
     report = run(1)
@@ -304,7 +385,8 @@ def test_coverage_that_cannot_be_used_is_said_and_every_mutant_runs_whole(
 
     class Unmapped(Covered):
         def run_tests(self, where, tests, timeout, selection=None,
-                      options=(), target="", stop=None, *, coverage=None):
+                      options=(), target="", stop=None, *, inventory=False,
+                      coverage=None):
             if coverage is not None:
                 self.runs.append(Run(0, None, "coverage", (), timeout))
                 return said
@@ -659,7 +741,10 @@ def test_the_closing_lines_count_the_covering_tests_kills():
                                     "alone": "passes alone on the mutant",
                                     "again": "killed"}])
     lines = mutate.summary(report)
-    assert lines[1] == ("           2 of the kills were the covering tests "
+    # The probe's line, then coverage's, then the kills to look at.
+    assert lines[1] == ("           1 of the kills were a remembered killer "
                         "run alone")
-    assert lines[2].startswith("           1 kill(s) did not come back")
+    assert lines[2] == ("           2 of the kills were the covering tests "
+                        "run alone")
+    assert lines[3].startswith("           1 kill(s) did not come back")
     assert not any("not used" in line for line in lines)

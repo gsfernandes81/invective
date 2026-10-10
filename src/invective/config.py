@@ -7,9 +7,18 @@
     exclude = ["var/*"]        # left out of the copy the mutants are run in
     workers = 1                # mutants run at once; "auto" for one per CPU
     confirm = false            # with workers, confirm each kill alone
+    history = true             # try each mutant's last killer alone first
     coverage = false           # run each mutant first against the tests that cover it
+    unsafe-speedups = true     # false: only those safe for any suite
 
 An unknown key is a refusal, so that a misspelt one is not read as absent.
+
+**The unsafe speedups.** A speedup is unsafe when it can give a wrong
+verdict on a suite outside the contract invective takes a suite to keep:
+tests that are independent of their order and safe to run in parallel.
+`SPEEDUPS` says which side each speedup is on, and `settle` turns every
+unsafe one off for `unsafe-speedups = false`, or `--no-unsafe-speedups` on
+the command line.
 
 The project they belong to is found here too: `project_root` walks up from
 where a command is started to the nearest directory pytest would take for a
@@ -27,7 +36,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from itertools import islice
 from typing import NamedTuple
 
@@ -44,13 +53,95 @@ class Config(NamedTuple):
     exclude: tuple[str, ...] = ()
     workers: int | str = 1
     confirm: bool = False
+    history: bool = True
     coverage: bool = False
+    unsafe_speedups: bool = True
 
 
 #: Each key and its type; `workers`, a count or "auto", has a check of its
 #: own (`workers`).
 _KEYS = {"fail-on-survivors": bool, "max-accepted": int, "exclude": list,
-         "workers": (int, str), "confirm": bool, "coverage": bool}
+         "workers": (int, str), "confirm": bool, "history": bool,
+         "coverage": bool, "unsafe-speedups": bool}
+
+
+class Speedup(NamedTuple):
+    """A way invective runs faster than one mutant at a time against the
+    whole selection, and which side of `--no-unsafe-speedups` it is on."""
+
+    #: What it does, as a refusal names it.
+    what: str
+    #: The `Config` field that sets it, None for one nothing turns off.
+    field: str | None
+    #: Whether it can give a wrong verdict on a suite whose tests depend on
+    #: their order or are not safe to run in parallel.
+    unsafe: bool
+    #: The value *field* is given with the unsafe speedups off.
+    off: object = None
+    #: How a value given for *field* reads, to be compared with *off*; None
+    #: for as it is given.
+    read: Callable[[object], object] | None = None
+
+
+def _count(value: object) -> object:
+    """A count of workers given on the command line, as `workers` reads it,
+    so `01` is one; "auto" stays itself, a count of as many as the machine
+    has, whatever that is here."""
+    return value if value == "auto" else workers(value)  # type: ignore[arg-type]
+
+
+#: Every speedup, each on its side, once. With the unsafe speedups off, each
+#: unsafe one is set to its `off` value, and every safe one stays as it is.
+SPEEDUPS = (
+    # One parse of the module, each mutant made from it by copying the path
+    # to its site: the text is the same as from a parse of its own.
+    Speedup("makes each mutant from one parse of the module", None, False),
+    # A run beside other copies' runs is judged by what they hold too.
+    Speedup("runs mutants at once", "workers", True, 1, _count),
+    # A test run apart from the rest can fail where the whole selection,
+    # in its order, passes.
+    Speedup("runs each mutant's last killer alone first", "history", True,
+            False),
+    # The tests that ran a mutant's lines, run apart from the rest, can fail
+    # where the whole selection, in its order, passes.
+    Speedup("runs each mutant first against the tests that cover it",
+            "coverage", True, False),
+)
+
+
+def _as_given(value: object) -> object:
+    return value
+
+
+def settle(settings: Config, flags: dict[str, tuple[str, object]] | None = None,
+           switch: str = "") -> Config:
+    """*settings*, with the values given on the command line in their place
+    (*flags*: a `Config` field, to the flag and the value it was given), and
+    with every unsafe speedup off (`SPEEDUPS`) when *switch*, the flag that
+    turns them off, was given, or when the settings say
+    `unsafe-speedups = false`.
+
+    **A flag is never overridden.** A value set only in the settings file
+    gives way to the switch; one given on the command line that sets an
+    unsafe speedup on with them off is a refusal, naming both.
+    """
+    flags = flags or {}
+    settings = settings._replace(**{field: value for field, (_flag, value)
+                                    in flags.items()})
+    if switch:
+        settings = settings._replace(unsafe_speedups=False)
+    if settings.unsafe_speedups:
+        return settings
+    off = switch or "[tool.invective] unsafe-speedups = false"
+    for speedup in SPEEDUPS:
+        if not speedup.unsafe:
+            continue
+        flag, value = flags.get(speedup.field, ("", speedup.off))
+        if (speedup.read or _as_given)(value) != speedup.off:
+            raise Refusal("%s %s %s, and %s turns that off"
+                          % (flag, value, speedup.what, off))
+        settings = settings._replace(**{speedup.field: speedup.off})
+    return settings
 _SAID = {bool: "true or false", int: "a whole number", list: "a list"}
 
 #: The most copies "auto" makes: each is a whole copy of the project, and
@@ -390,4 +481,6 @@ def load(root: str) -> Config:
                   max_accepted=table.get("max-accepted"),
                   exclude=tuple(exclude), workers=table.get("workers", 1),
                   confirm=table.get("confirm", False),
-                  coverage=table.get("coverage", False))
+                  history=table.get("history", True),
+                  coverage=table.get("coverage", False),
+                  unsafe_speedups=table.get("unsafe-speedups", True))
