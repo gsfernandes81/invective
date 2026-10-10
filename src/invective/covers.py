@@ -12,11 +12,12 @@ under the number of the test that ran it, or under `""` outside any test.
 **A wrong map costs time, never a verdict.** A map can be short (a child
 coverage did not see) or credit a line to the wrong test (a child or a
 thread that outlives the test that started it). Neither reaches a verdict:
-a narrower selection kills a mutant only when one of its own tests, green
-on the original, fails on it, which for tests independent of their order
-the whole selection would see too; and a mutant it lets through goes to the
-whole selection. A line credited to no test, or to the time outside any
-test, gives no narrower selection at all.
+a narrower selection kills a mutant only when one of its own tests fails on
+it, which for tests independent of their order the whole selection would see
+too, or when they run out the whole selection's budget, which the whole
+selection, holding them, would run out too; and a mutant it lets through
+goes to the whole selection. A line credited to no test, or to the time
+outside any test, gives no narrower selection at all.
 """
 
 from __future__ import annotations
@@ -82,8 +83,8 @@ def narrowed(found: Map, node: ast.AST) -> tuple[str, ...] | None:
     (a module's top level, run as it is imported, reaches every test that
     imports it), when a context is no test's place, and when they are more
     than half the selection: a mutant they let through is run again
-    against the whole selection, so past half, their run and its check on
-    the original cost more than they can save.
+    against the whole selection, so past half, their run costs more than it
+    can save.
     """
     ran: set[str] = set()
     for line in range(node.lineno, node.end_lineno + 1):        # type: ignore[attr-defined]

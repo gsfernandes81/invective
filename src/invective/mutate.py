@@ -39,7 +39,6 @@ import collections
 import contextlib
 import copy
 import difflib
-import functools
 import importlib.metadata
 import importlib.util
 import json
@@ -1276,10 +1275,11 @@ def _plain_tests(tests: list[str], where: str) -> bool:
 # --------------------------------------------------------------------------
 # **Coverage-guided selection.** One coverage run of the whole selection,
 # before the first mutant, says which tests ran each line of the target
-# (`invective.covers`). A mutant whose lines fewer than half the tests ran is
-# run first against those tests alone, once they have passed together on the
-# original; it is a kill only when one of them fails on it. Anything else,
-# every survivor among it, is decided by the whole selection.
+# (`invective.covers`). A mutant whose lines at most half the tests ran is
+# run first against those tests alone, at the whole budget: it is a kill when
+# one of them fails on it, or when they run out the budget, which the whole
+# selection, holding them, would run out too. Anything else, every survivor
+# among it, is decided by the whole selection.
 
 #: The oldest coverage whose wheels start it in a child interpreter (its
 #: `.pth` file), without which a line only a child runs is no test's.
@@ -1288,25 +1288,19 @@ COVERAGE_LEAST = (7, 13)
 
 class Narrowed(NamedTuple):
     """The tests a mutant is run against first: the file that names them,
-    one a line (*path*), the node ids (*tests*), and how long they took
-    together on the original (*took*)."""
+    one a line (*path*), and the node ids (*tests*)."""
 
     path: str
     tests: frozenset[str]
-    took: float
 
 
 class Narrowing(NamedTuple):
     """What the coverage run came to: each mutant's narrower selection, by
     its site's index (*plan*), and why there is none when coverage was not
-    used (*unused*, `""` when it was). *reds* are the tests, each once, that
-    failed first in a narrower selection not green on the original, run
-    apart from the rest of the selection; each such selection is left out
-    of *plan*."""
+    used (*unused*, `""` when it was)."""
 
     plan: dict[int, Narrowed]
     unused: str
-    reds: tuple[str, ...] = ()
 
     @property
     def selections(self) -> int:
@@ -1316,20 +1310,25 @@ class Narrowing(NamedTuple):
 
 def coverage_attempt(plan: dict[int, Narrowed], budget: float) -> Attempt:
     """The attempt that runs a mutant against its narrower selection in
-    *plan*, if it has one: a kill when one of those tests failed on it, and
+    *plan*, if it has one, at the whole *budget*: a kill when one of those
+    tests failed on it, or a kill by time when they ran out *budget*, and
     nothing else, so that what it does not kill goes on to the whole
-    selection (`_SURVIVOR_VIA`). Its run is cut at three times what the
-    tests took on the original, at least 5 s and at most *budget*: a run cut
-    short there is no kill, and the whole selection runs with all of
-    *budget*."""
+    selection (`_SURVIVOR_VIA`).
+
+    **The budget is the whole selection's, not one scaled to the narrower
+    tests.** The whole selection holds them, so it cannot end inside the
+    budget they ran out; a mutant that only slows them down, and that the
+    whole selection would let through inside its budget, ends inside it
+    here too.
+    """
     def attempt(mutant: Mutant, copy: Copy) -> Outcome | None:
         narrowed = plan.get(mutant.job.idx)
         if narrowed is None:
             return None
-        cut = min(budget, max(5.0, 3 * narrowed.took))
-        got = copy.run(mutant, cut, narrowed.path)
-        if (got.code == ExitCode.TESTS_FAILED and got.killer in narrowed.tests
-                and not got.missing):
+        got = copy.run(mutant, budget, narrowed.path)
+        if got.code == TIMED_OUT or (
+                got.code == ExitCode.TESTS_FAILED
+                and got.killer in narrowed.tests and not got.missing):
             return Outcome(got, "coverage")
         # **A mutant the covering tests let through is not a survivor
         # yet**: only the whole selection, which `_measure` runs next, in
@@ -1351,22 +1350,16 @@ def _coverage_unavailable() -> str:
     return ""
 
 
-class Candidate(NamedTuple):
-    """A narrower selection before it is checked on the original: the file
-    that names its tests (*path*), the node ids (*tests*), and the sites
-    whose mutants it is for, by index (*idxs*)."""
+def _narrowing(pool: _Pool, box: str, sites: list, base: float,
+               plain: bool) -> Narrowing:
+    """Each mutant of *sites*' narrower selection, written to a file for
+    each distinct one, from one coverage run of the whole selection on the
+    first copy's original; or why there is none when coverage cannot be
+    used.
 
-    path: str
-    tests: tuple[str, ...]
-    idxs: tuple[int, ...]
-
-
-def _candidates(pool: _Pool, box: str, sites: list, base: float,
-                plain: bool) -> tuple[list[Candidate], str]:
-    """Each distinct narrower selection of the mutants of *sites*, written
-    to a file of its own, from one coverage run of the whole selection on
-    the first copy's original; and why there are none when coverage cannot
-    be used, `""` when it can.
+    No narrower selection is run on the original first: the tests are
+    taken to be independent of their order, so any of them pass apart as
+    they pass in the whole selection, whose baseline is green.
 
     The coverage run is cut at ten times *base*, and at least 30 s: past
     that its map costs more than it saves. Whatever stops the map being
@@ -1382,7 +1375,7 @@ def _candidates(pool: _Pool, box: str, sites: list, base: float,
         # Coverage splits a setting at a `,` and expands a `$`.
         unused = "the target's path holds a `,` or `$`"
     if unused:
-        return [], unused
+        return Narrowing({}, unused)
     where = os.path.join(box, "coverage")
     os.makedirs(where)
     # Ten times: well above the dearest recorder measured, the C tracer
@@ -1391,45 +1384,29 @@ def _candidates(pool: _Pool, box: str, sites: list, base: float,
     got, ran = pool.on(0, lambda copy: (copy.run(None, cap, coverage=where),
                                         copy.path))
     if got.code == TIMED_OUT:
-        return [], "the coverage run took longer than %d s" % cap
+        return Narrowing({}, "the coverage run took longer than %d s" % cap)
     if not got.ok:
-        return [], "the coverage run exited %d" % got.code
+        return Narrowing({}, "the coverage run exited %d" % got.code)
     try:
         found = covers.read(where, ran)
     except Exception as exc:
         # Any of them: a map that cannot be read is no map, whatever
         # coverage raises.
-        return [], "the coverage run's map could not be read: %s" % exc
-    groups: dict[tuple[str, ...], list[int]] = {}
+        return Narrowing({}, "the coverage run's map could not be read: %s"
+                         % exc)
+    files: dict[tuple[str, ...], Narrowed] = {}
+    plan = {}
     for idx, _kind, node, _what in sites:
         tests = covers.narrowed(found, node)
-        if tests is not None:
-            groups.setdefault(tests, []).append(idx)
-    candidates = []
-    for i, (tests, idxs) in enumerate(groups.items()):
-        path = os.path.join(box, "narrowed-%d.txt" % i)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("".join(test + "\n" for test in tests))
-        candidates.append(Candidate(path, tests, tuple(idxs)))
-    return candidates, ""
-
-
-def _narrowing(candidates: list[Candidate], gated: list, unused: str
-               ) -> Narrowing:
-    """The narrower selections of *candidates* that passed on the original,
-    each *gated* in their order by `_gate`, as the plan; and why there are
-    none, *unused*, when coverage could not be used."""
-    plan, reds = {}, []
-    for candidate, (verdict, took) in zip(candidates, gated, strict=True):
-        if not verdict.ok:
-            # Named by its test, once: a run cut at its time, or one that
-            # collected nothing or not a module, names no test.
-            if "::" in verdict.killer and verdict.killer not in reds:
-                reds.append(verdict.killer)
-        elif not verdict.missing:
-            plan.update(dict.fromkeys(candidate.idxs, Narrowed(
-                candidate.path, frozenset(candidate.tests), took)))
-    return Narrowing(plan, unused, tuple(reds))
+        if tests is None:
+            continue
+        if tests not in files:
+            path = os.path.join(box, "narrowed-%d.txt" % len(files))
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("".join(test + "\n" for test in tests))
+            files[tests] = Narrowed(path, frozenset(tests))
+        plan[idx] = files[tests]
+    return Narrowing(plan, "")
 
 
 def _coverage_line(narrowing: Narrowing, mutants: int) -> str:
@@ -1477,9 +1454,9 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
     names each kill its killer did not make alone (`unreproduced`).
 
     With *coverage*, each mutant is run first against the tests that ran
-    its lines, when they are fewer than half the selection and pass
-    together on the original, and a kill by one of them stands; every other
-    mutant, every survivor among them, is decided by the whole selection.
+    its lines, when they are at most half the selection, and a kill by one
+    of them, or by time, stands; every other mutant, every survivor among
+    them, is decided by the whole selection.
     The report says how many mutants were narrowed, or why none was
     (`coverage`).
     """
@@ -1669,11 +1646,7 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
         alone_budget = max(budget, alone * 3)
         narrowing = Narrowing({}, "")
         if coverage:
-            candidates, unused = _candidates(pool, box, sites, base, plain)
-            # Each checked once on the original, at the mutants' budget.
-            gated = pool.map(functools.partial(_gate, timeout=budget),
-                             [candidate.path for candidate in candidates])
-            narrowing = _narrowing(candidates, gated, unused)
+            narrowing = _narrowing(pool, box, sites, base, plain)
             say(_coverage_line(narrowing, len(sites)))
         say("mutants:   %d\n" % len(sites))
 

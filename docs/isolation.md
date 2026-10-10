@@ -135,28 +135,32 @@ mutant's lines are its narrower selection, unless no line of the mutant ran, a
 line ran outside any test (a module's top level, run as it is imported), or
 they are more than half the selection.
 
-Each narrower selection is run once on the original, at the mutants' budget,
-and is used only when it passes with no test missing. A mutant with one is run
-against it first, its run cut at three times what the narrower selection took
-on the original, at least 5 s and at most the mutants' budget. It is a kill
-only when a test failed (exit 1), the first to fail is one of the narrower
-selection's, and none is missing; the kill carries `"via": "coverage"`. Anything
-else (a pass, a run cut at its time, a module that would not import) leaves the
-mutant to the whole selection, run next in its order, so a survivor is always
-the whole selection's verdict (`mutate._SURVIVOR_VIA`).
+A mutant with a narrower selection is run against it first, at the mutants'
+whole budget. No narrower selection is run on the original: some of the tests
+of a green selection are green apart, for tests independent of their order. It
+is a kill when a test failed (exit 1), the first to fail is one of the narrower
+selection's, and none is missing; or when the run is cut at the budget, since
+the whole selection holds those tests and would not end inside it either, while
+a mutant that only slows them ends inside it here as it would there. The kill
+carries `"via": "coverage"`. Anything else (a pass, a module that would not
+import, a run that collected nothing) leaves the mutant to the whole selection,
+run next in its order, so a survivor is always the whole selection's verdict
+(`mutate._SURVIVOR_VIA`).
 
 This relies on the tests being independent of their order, at any count of
 workers: a kill by fewer tests than the selection is then a kill by the whole
-selection. In a suite whose tests depend on their order, it can be one the
-whole selection's order hides; it is marked either way. With `--confirm` and
-more than one worker, such a kill is confirmed as any other kill is.
+selection. In a suite whose tests depend on their order, a narrowed kill can be
+one the whole selection would not make, by a test that fails apart from the
+tests before it; it is marked either way, and such a suite keeps `coverage` off.
+With `--confirm` and more than one worker, a narrowed kill is confirmed as any
+other kill is.
 
 A map can be short (a child of another interpreter, one started without the
 environment, or one ended by `os._exit`), or credit a line to the wrong test (a
 child or a thread that outlives the test that started it). Either costs time,
 never a verdict: a narrowed kill still needs one of the narrower selection's
-tests, green on the original, to fail on the mutant, and a mutant it lets
-through goes to the whole selection.
+tests to fail on the mutant, or all of them to run out the whole budget, and a
+mutant they let through goes to the whole selection.
 
 When the map cannot be made or read, the `coverage:` line and the closing lines
 say why, and every mutant runs the whole selection: coverage not installed or

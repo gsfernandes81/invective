@@ -156,19 +156,22 @@ before the first mutant. It needs the `coverage` extra:
 uv add --dev --extra coverage git+https://github.com/gsfernandes81/invective@v0.5.0
 ```
 
-Each of those narrower selections must pass on the unmutated files before it is
-used. A mutant counts as killed by one only when one of its own tests fails; the
-kill carries `"via": "coverage"`, and the closing lines count these kills on a
-line of their own. Every other mutant (every survivor among them) is run against
-the whole selection. A mutant has no narrower selection when no test ran its
+A mutant is run against its narrower selection at the mutants' whole budget. It
+counts as killed when one of those tests fails, or when they run out the budget,
+which the whole selection, holding them, would run out too; the kill carries
+`"via": "coverage"`, and the closing lines count these kills on a line of their
+own. Every other mutant (every survivor among them) is run against the whole
+selection. A mutant has no narrower selection when no test ran its
 lines, when more than half the selection did, or when a line of it runs as its
 module is imported; the `coverage:` line says how many mutants had one.
 
 This relies on the tests being independent of their order, with one worker as
-with several: a kill by some of the tests is then a kill by the whole selection.
-In a suite whose tests depend on their order, it can be one the whole
-selection's order hides; it is marked either way, and with `--confirm` and more
-than one worker it is confirmed as any other kill is.
+with several: some of the tests of a green selection are then green apart, and a
+kill by some of them is a kill by the whole selection. In a suite whose tests
+depend on their order, a narrowed kill can be one the whole selection would not
+make; it is marked either way, and such a suite keeps `coverage` off. With
+`--confirm` and more than one worker, a narrowed kill is confirmed as any other
+kill is.
 
 The report carries `"coverage": {"narrowed": n, "unused": reason}`: how many
 mutants had a narrower selection, and why coverage was not used (`""` when it

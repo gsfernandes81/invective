@@ -91,8 +91,8 @@ REFUSAL = {2: ["0", "1"], 3: ["0"]}
 
 def test_a_mutant_the_covering_tests_kill_is_their_kill(tree, monkeypatch):
     """The refusal's mutant is run against the one test that ran its line,
-    once that test has passed alone on the original, and its kill stands,
-    marked as theirs."""
+    at the mutants' whole budget, and its kill stands, marked as theirs; no
+    narrower selection is run on the original first."""
     run = Covered(tree, monkeypatch, REFUSAL, said=lambda r: (
         killed_by(MINOR) if r.text and "pass" in r.text else GREEN))
     report = run(1, coverage=True)
@@ -101,14 +101,14 @@ def test_a_mutant_the_covering_tests_kill_is_their_kill(tree, monkeypatch):
     assert (kill["line"], kill["killer"], kill["via"]) == (3, MINOR,
                                                             "coverage")
     assert report["coverage"] == {"narrowed": 1, "unused": ""}
-    # The selection, the coverage run on the original, the narrower
-    # selection on the original, then each mutant once: the refusal's
-    # against its test alone.
-    assert [(r.kind, r.text is None, r.tests) for r in run.runs[:3]] == [
-        ("selection", True, ()), ("coverage", True, ()),
-        ("narrowed", True, (MINOR,))]
-    (narrowed,) = [r for r in run.runs if r.text and r.kind == "narrowed"]
+    # The selection and the coverage run on the original, then each mutant
+    # once: the refusal's against its test alone.
+    assert [(r.kind, r.text is None) for r in run.runs[:3]] == [
+        ("selection", True), ("coverage", True), ("selection", False)]
+    (narrowed,) = run.of("narrowed")
     assert "pass" in narrowed.text and narrowed.tests == (MINOR,)
+    assert narrowed.timeout == next(r.timeout for r in run.of("selection")
+                                    if r.text)
     assert len(run.of("selection")) == 1 + report["mutants"] - 1
     i = run.lines.index("coverage:  1/6 mutants narrowed (1 selection(s))")
     assert run.lines[i - 1].startswith("baseline:")
@@ -135,67 +135,69 @@ def test_a_mutant_the_covering_tests_let_through_is_the_selection_s(
     assert [o.via for _n, o in landed] == [""]
 
 
-def test_a_narrower_selection_red_on_the_original_is_not_used(
+def test_a_mutant_that_hangs_the_covering_tests_is_a_kill_by_time_at_once(
+        tree, monkeypatch, landed):
+    """The covering tests run out the mutants' whole budget, which the
+    whole selection, holding them, would run out too: a kill by time,
+    marked, for one budget and not two."""
+    timed_out = mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT")
+    run = Covered(tree, monkeypatch, REFUSAL, said=lambda r: (
+        timed_out if r.text and "pass" in r.text else GREEN))
+    report = run(1, only=["RAISE"], coverage=True)
+
+    (kill,) = report["kills"]
+    assert (kill["killer"], kill["code"], kill["via"]) == (
+        "TIMEOUT", mutate.TIMED_OUT, "coverage")
+    (narrowed,) = [r for r in run.runs if r.text]
+    assert narrowed.kind == "narrowed"
+    # The mutants' budget: three times a baseline that took no time, and at
+    # least 30 s.
+    assert narrowed.timeout == 30.0
+    assert ("           1 of the kills were runs stopped at their time "
+            "budget, not a test failing") in mutate.summary(report)
+    assert [o.via for _n, o in landed] == ["coverage"]
+
+
+def test_a_mutant_that_slows_the_covering_tests_inside_the_budget_is_not(
         tree, monkeypatch):
-    """Its test fails on the original once run apart from the rest, so a
-    failure on the mutant would say nothing of the mutant: every mutant
-    runs the whole selection, and its failing test is kept to be named."""
-    seen = []
-    real = mutate._narrowing
-    monkeypatch.setattr(mutate, "_narrowing", lambda *a: seen.append(
-        real(*a)) or seen[-1])
+    """Slower, but done inside the mutants' budget: their pass is no
+    verdict, and the whole selection decides the mutant, here a
+    survivor."""
+    run = Covered(tree, monkeypatch, REFUSAL, said=lambda r: GREEN._replace(
+        tail="slow") if r.text else GREEN)
+    report = run(1, only=["RAISE"], coverage=True)
+
+    assert report["kills"] == [] and len(report["survivors"]) == 1
+    assert [(r.kind, r.timeout) for r in run.runs if r.text] == [
+        ("narrowed", 30.0), ("selection", 30.0)]
+
+
+def test_no_narrower_selection_is_run_on_the_original(tree, monkeypatch):
+    """Under the contract any part of the green selection is green: a
+    narrower selection red on the original is not looked for, and a kill
+    by one of its tests stands."""
     run = Covered(tree, monkeypatch, REFUSAL, said=lambda r: (
         killed_by(MINOR) if r.kind == "narrowed" else GREEN))
     report = run(1, coverage=True)
 
-    assert report["kills"] == []
-    assert report["coverage"] == {"narrowed": 0, "unused": ""}
-    assert "coverage:  0/6 mutants narrowed (0 selection(s))" in run.lines
-    assert [r.text for r in run.of("narrowed")] == [None]
-    assert seen[0].reds == (MINOR,)
-
-
-def test_the_tests_red_on_the_original_are_named_once_and_only_tests():
-    """Two selections red by one test name it once; a run cut at its time,
-    a module that would not import and a run that collected nothing name no
-    test, and are left out of the plan all the same."""
-    candidates = [mutate.Candidate("narrowed-%d.txt" % i, (MINOR,), (i,))
-                  for i in range(6)]
-    gated = [(verdict, 1.0) for verdict in (
-        killed_by(MINOR), killed_by(MINOR),
-        mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT"),
-        killed_by("pkg/tests/test_gate.py", ExitCode.INTERRUPTED),
-        killed_by("", ExitCode.NO_TESTS_COLLECTED), GREEN)]
-    narrowing = mutate._narrowing(candidates, gated, "")
-    assert narrowing.reds == (MINOR,)
-    assert narrowing.plan == {5: mutate.Narrowed("narrowed-5.txt",
-                                                 frozenset({MINOR}), 1.0)}
-
-
-def test_a_narrower_selection_short_of_a_test_is_not_used_and_not_red(
-        tree, monkeypatch):
-    seen = []
-    real = mutate._narrowing
-    monkeypatch.setattr(mutate, "_narrowing", lambda *a: seen.append(
-        real(*a)) or seen[-1])
-    run = Covered(tree, monkeypatch, REFUSAL, said=lambda r: (
-        GREEN._replace(missing=(MINOR,)) if r.kind == "narrowed" else GREEN))
-    report = run(1, coverage=True)
-    assert report["coverage"]["narrowed"] == 0
-    assert seen[0].reds == ()
+    assert [r.text is None for r in run.of("narrowed")] == [False]
+    assert [(k["line"], k["via"]) for k in report["kills"]] == [
+        (3, "coverage")]
 
 
 def test_mutants_of_lines_the_same_tests_ran_share_one_selection(
         tree, monkeypatch):
     """Line 2's two mutants are each the refusal's test's, and line 4's three
-    the adult's: a file for each, run once on the original."""
+    the adult's: a file for each."""
     run = Covered(tree, monkeypatch, {2: ["0"], 4: ["1"]})
     report = run(1, only=["CMP", "CONST", "BOOL"], coverage=True)
     assert report["coverage"]["narrowed"] == 5
     assert "coverage:  5/5 mutants narrowed (2 selection(s))" in run.lines
-    gates = [r.tests for r in run.of("narrowed") if r.text is None]
-    assert sorted(gates) == [(MINOR,), (ADULT,)]
-    assert len({r.text for r in run.of("narrowed") if r.text}) == 5
+    files = {}
+    for r in run.of("narrowed"):
+        files.setdefault(r.tests, set()).add(r.text)
+    assert {tests: len(texts) for tests, texts in files.items()} == {
+        (MINOR,): 2, (ADULT,): 3}
 
 
 def test_with_coverage_off_no_run_is_added(tree, monkeypatch):
@@ -217,7 +219,10 @@ def test_the_report_is_the_same_with_coverage_on_but_for_how(
     them run, as tests whose order does not matter do."""
     def said(run):
         got = by_text(run)
-        if run.kind == "narrowed" and got.killer not in run.tests:
+        # A test not among the narrower ones does not fail there; a mutant
+        # that hangs, hangs there too.
+        if (run.kind == "narrowed" and got.killer not in run.tests
+                and got.code != mutate.TIMED_OUT):
             return GREEN
         return got
 
@@ -327,8 +332,9 @@ def test_coverage_that_cannot_be_used_is_said_and_every_mutant_runs_whole(
 
 def test_the_coverage_run_is_cut_at_ten_times_the_baseline(tree,
                                                            monkeypatch):
-    """Past that, its map would cost more than it saves; the narrower
-    selections are cut at the mutants' budget, three times the baseline."""
+    """Past that, its map would cost more than it saves; a narrower
+    selection's run is cut where the whole selection's is, at the mutants'
+    budget."""
     now = [1_000_000.0]
     monkeypatch.setattr(mutate, "time", SimpleNamespace(
         time=lambda: now[0], monotonic=time.monotonic))
@@ -344,9 +350,9 @@ def test_the_coverage_run_is_cut_at_ten_times_the_baseline(tree,
     assert coverage.timeout == 200
     # The mutants' budget, whatever multiple of the baseline it is: its
     # acceptance says any well above the baseline serves.
-    (gate,) = [r for r in run.of("narrowed") if r.text is None]
-    assert gate.timeout == next(r.timeout for r in run.of("selection")
-                                if r.text)
+    (narrowed,) = run.of("narrowed")
+    assert narrowed.timeout == next(r.timeout for r in run.of("selection")
+                                    if r.text)
 
 
 class _Copy:
@@ -366,11 +372,10 @@ def _mutant(idx=0):
                          "text", True)
 
 
-PLAN = {0: mutate.Narrowed("narrowed-0.txt", frozenset({MINOR}), 0.5)}
+PLAN = {0: mutate.Narrowed("narrowed-0.txt", frozenset({MINOR}))}
 
 
 @pytest.mark.parametrize("got", [
-    mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT"),
     killed_by("pkg/tests/test_gate.py", ExitCode.INTERRUPTED),
     killed_by("", ExitCode.USAGE_ERROR),
     killed_by("", ExitCode.NO_TESTS_COLLECTED),
@@ -379,34 +384,27 @@ PLAN = {0: mutate.Narrowed("narrowed-0.txt", frozenset({MINOR}), 0.5)}
     killed_by(MINOR)._replace(missing=(MINOR,)),
     GREEN])
 def test_only_its_own_failing_test_makes_a_narrowed_kill(got):
-    """A run cut at its time, a module that would not import, a run that
-    collected nothing, a test not among them, a test missing, or a pass:
-    the mutant is the whole selection's to decide."""
+    """A module that would not import, a run that collected nothing, a test
+    not among them, a test missing, or a pass: the mutant is the whole
+    selection's to decide. The run is at the whole budget."""
     copy = _Copy(got)
     assert mutate.coverage_attempt(PLAN, 30)(_mutant(), copy) is None
-    assert copy.runs == [(5.0, "narrowed-0.txt")]
+    assert copy.runs == [(30, "narrowed-0.txt")]
 
 
-def test_a_failing_test_of_the_narrower_selection_is_its_kill():
-    copy = _Copy(killed_by(MINOR))
+@pytest.mark.parametrize("got", [
+    killed_by(MINOR),
+    mutate.Verdict(False, mutate.TIMED_OUT, "TIMEOUT", "TIMEOUT")])
+def test_a_failing_test_of_the_narrower_selection_or_time_is_its_kill(got):
+    copy = _Copy(got)
     assert mutate.coverage_attempt(PLAN, 30)(_mutant(), copy) == (
-        mutate.Outcome(killed_by(MINOR), via="coverage"))
+        mutate.Outcome(got, via="coverage"))
 
 
 def test_a_mutant_with_no_narrower_selection_is_not_run_by_the_attempt():
     copy = _Copy(killed_by(MINOR))
     assert mutate.coverage_attempt(PLAN, 30)(_mutant(1), copy) is None
     assert copy.runs == []
-
-
-@pytest.mark.parametrize("took, budget, cut", [
-    (0.5, 30, 5.0), (4, 30, 12), (40, 30, 30)])
-def test_a_narrowed_run_is_cut_at_three_times_its_tests_on_the_original(
-        took, budget, cut):
-    copy = _Copy(GREEN)
-    plan = {0: PLAN[0]._replace(took=took)}
-    mutate.coverage_attempt(plan, budget)(_mutant(), copy)
-    assert copy.runs == [(cut, "narrowed-0.txt")]
 
 
 def test_a_stop_during_a_narrowed_run_lands_nothing(tree, monkeypatch,
