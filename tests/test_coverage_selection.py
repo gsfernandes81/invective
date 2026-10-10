@@ -325,8 +325,11 @@ def test_the_coverage_run_is_cut_at_ten_times_the_baseline(tree,
     run(1, only=["RAISE"], coverage=True)
     (coverage,) = run.of("coverage")
     assert coverage.timeout == 200
+    # The mutants' budget, whatever multiple of the baseline it is: its
+    # acceptance says any well above the baseline serves.
     (gate,) = [r for r in run.of("narrowed") if r.text is None]
-    assert gate.timeout == 60
+    assert gate.timeout == next(r.timeout for r in run.of("selection")
+                                if r.text)
 
 
 class _Copy:
