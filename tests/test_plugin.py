@@ -583,6 +583,30 @@ def test_a_conftest_the_plugin_cannot_name_is_still_a_usage_error(tmp_path,
     assert not verdict.exists()
 
 
+def test_a_moved_conftest_failure_leaves_the_plugin_loading_naming_none(
+        tmp_path, monkeypatch):
+    """`ConftestImportFailure` is pytest's private name. Moved, the plugin
+    still loads, so every pytest still starts, and a conftest that will not
+    import goes through it unnamed: a usage error naming no conftest, which
+    the engine refuses rather than kills."""
+    import _pytest.config
+    failure = _pytest.config.ConftestImportFailure
+    monkeypatch.delattr(_pytest.config, "ConftestImportFailure")
+    plugin = _plugin_here()
+    verdict = tmp_path / "verdict.json"
+    monkeypatch.setenv("INVECTIVE_VERDICT", str(verdict))
+    monkeypatch.delenv("INVECTIVE_SELECTION", raising=False)
+    early = SimpleNamespace(invocation_params=SimpleNamespace(dir=tmp_path))
+
+    hook = plugin.pytest_load_initial_conftests(early, None, [])
+    next(hook)
+    stopped = failure(tmp_path / "conftest.py", cause=ImportError("broken"))
+    with pytest.raises(failure) as caught:
+        hook.throw(stopped)
+    assert caught.value is stopped
+    assert not verdict.exists()
+
+
 def test_the_plugin_remembers_each_killer_and_runs_it_alone_next_time(
         repo, tmp_path):
     """The history is on unless the project says otherwise: the first run

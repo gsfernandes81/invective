@@ -34,7 +34,15 @@ import sys
 import sysconfig
 
 import pytest
-from _pytest.config import ConftestImportFailure
+
+try:
+    # pytest's own, and not exported by it.
+    from _pytest.config import ConftestImportFailure
+except ImportError:
+    # Moved: every pytest still starts, the handler catches nothing (an
+    # empty tuple of classes), and a stop at a conftest is then a usage
+    # error naming none, which the engine refuses rather than kills.
+    ConftestImportFailure = ()
 
 #: The environment variable that names the file a run's verdict goes to.
 VERDICT = "INVECTIVE_VERDICT"
