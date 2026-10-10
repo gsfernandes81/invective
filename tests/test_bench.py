@@ -1341,6 +1341,79 @@ def _bench_lines():
     return found
 
 
+PAGE = os.path.join(ROOT, "docs", "benchmarking.md")
+
+
+def _page():
+    with open(PAGE, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _table(heading):
+    """The rows of the first table after the line *heading* in the page,
+    each a list of its cells."""
+    lines = _page().splitlines()
+    rows = []
+    for line in lines[lines.index(heading) + 1:]:
+        if line.startswith("|"):
+            if not set(line) <= set("|-"):
+                rows.append([cell.strip() for cell in line.strip("|").split("|")])
+        elif rows:
+            break
+    return rows
+
+
+_RESTATED = re.compile(r"(\d+(?:\.\d+)?)(x|%| s)? \(`compare\.([A-Z_]+)`\)")
+
+
+def test_the_page_restates_the_tools_constants_as_they_are():
+    """Each number the page gives beside a constant's name is that
+    constant's value: a retuned threshold leaves no page saying the old."""
+    text = " ".join(_page().split())
+    found = _RESTATED.findall(text)
+    assert len(found) >= 7, found
+    for number, unit, name in found:
+        value = float(number) / (100 if unit == "%" else 1)
+        assert getattr(compare, name) == pytest.approx(value), name
+
+
+def test_the_flags_table_is_the_parsers():
+    """A flag added to the parser and missing from the page is one the
+    owner never hears of; one the page names and the parser lacks fails."""
+    rows = _table("| Flag | What it sets |")
+    said = {flag for row in rows for flag in re.findall(r"--[\w-]+", row[0])}
+    known = {option for action in compare.parser()._actions
+             for option in action.option_strings if option.startswith("--")}
+    assert said == known - {"--help"}
+    for row in rows:
+        default = re.search(r"; ([^;]+) when not given$", row[1])
+        if default and "--" in row[0]:
+            flag = re.findall(r"--[\w-]+", row[0])[0]
+            dest = flag[2:].replace("-", "_")
+            got = compare.parser().get_default(dest)
+            if got is None:
+                # Worked out at the start (the repository, a time), and said
+                # in words.
+                continue
+            if dest == "cases_file":
+                got = os.path.relpath(got, ROOT).replace(os.sep, "/")
+            assert default.group(1).strip("`") == str(got), flag
+
+
+def test_the_exit_table_is_EXIT_STATUSES():
+    rows = _table("| Exit status | Meaning |")
+    assert {int(code): meaning for code, meaning in rows} == compare.EXIT_STATUSES
+
+
+def test_the_key_tables_are_the_cases_files():
+    def keys(heading):
+        return {key for row in _table(heading)
+                for key in re.findall(r"`(\w+)`", row[0])}
+
+    assert keys("| Case key | What it is |") == compare._CASE_KEYS
+    assert keys("| Project key | What it is |") == compare._PROJECT_KEYS
+
+
 def test_the_docs_bench_commands_parse_and_name_cases_that_exist():
     """An example the owner copies must run as written: a flag renamed, or
     a case dropped from the file, leaves one that fails."""
