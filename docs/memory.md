@@ -48,9 +48,10 @@ The history is read once a run's mutants are known, and written on the way
 out, whatever ends the run after its baseline: a ^C or SIGTERM keeps what had
 come to a verdict by then. A run refused before its mutants (a red baseline)
 writes nothing. The write reads the file again and changes only the run's own
-target, so a run on another module meanwhile keeps its changes; two runs on
-the same module at once can lose one's changes, which costs time only. A run
-that changes nothing writes nothing. A file that is not a history (not JSON,
+target, so a run on another module that saved before it keeps its changes.
+Two runs that save at the same moment can lose one's changes, whichever
+modules they are on, which costs time only. A run that changes nothing writes
+nothing. A file that is not a history (not JSON,
 or not that shape) is said on a `warning:` line, read as empty, and written
 over by the next write.
 
