@@ -955,6 +955,41 @@ def test_the_before_sides_touchable_seconds_are_the_pairs_U(tmp_path, monkeypatc
     assert session.rows()[0].touchable_part == pytest.approx(0.5)
 
 
+def test_a_session_calibrates_discards_repeats_and_ends_as_one(tmp_path, monkeypatch):
+    """The schedule, the calibrations, the discard, its repeat, the floor
+    and the exit status together, at the threshold a session has. The
+    second pair's middle calibration reads 30 s against 8: it is discarded,
+    a repeat runs in its place, and the order goes on alternating."""
+    walls = [8.0, 8.0, 8.0, 30.0] + [8.0] * 10
+    session, engine, _case = _engine_session(tmp_path, monkeypatch, _same, pairs=3,
+                                             repeats=2, calibrations=walls)
+    session.run()
+    pairs = _rows(tmp_path / "out" / "pairs.tsv")
+    assert [(p["order"], p["status"]) for p in pairs] == [
+        ("B A", "kept"), ("A B", "discarded"), ("B A", "kept"), ("A B", "kept")]
+    assert pairs[1]["calibrations"] == "[8.0, 30.0, 8.0]"
+    # One before the first run, then one after each: back to back runs
+    # share the one between them.
+    assert len(_rows(tmp_path / "out" / "calibrations.tsv")) == 9
+    assert engine.calibrations == [8.0] * 5
+    row, = session.rows()
+    assert (row.kept, row.asked, row.discarded) == (3, 3, 1)
+    # A A across the last boundary is the one neighbour of kept pairs: the
+    # discarded pair breaks the other two.
+    assert (row.floor.count, row.floor.f) == (1, compare.FLOOR_LEAST)
+    assert compare.exit_status(session, session.rows()) == 0
+
+
+def test_a_session_that_drifts_past_its_repeats_is_inconclusive(tmp_path, monkeypatch):
+    walls = [8.0, 30.0] * 10
+    session, _engine, _case = _engine_session(tmp_path, monkeypatch, _same, pairs=3,
+                                              repeats=2, calibrations=walls)
+    session.run()
+    assert [p["status"] for p in _rows(tmp_path / "out" / "pairs.tsv")] == [
+        "discarded"] * 3
+    assert compare.exit_status(session, session.rows()) == 1
+
+
 def test_the_tools_own_pytests_run_in_a_third_copy(tmp_path, monkeypatch):
     """What a calibration leaves in its tree (a `.hypothesis` database) would
     be copied into one side's campaigns and not the other's."""
