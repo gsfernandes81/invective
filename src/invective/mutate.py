@@ -1896,7 +1896,10 @@ def mutate(root: str, target: str, tests: list[str], only: list[str] | None,
             # kill -- the suite did notice -- but a blunter one, and a
             # campaign that cannot see the split cannot tell a
             # well-guarded module from an unimportable one.
-            "broken": broken, "workers": count}
+            "broken": broken, "workers": count,
+            # Whether the run could use a speedup a suite outside the
+            # contract cannot trust, as its `speedups:` line says.
+            "unsafe_speedups": speed.unsafe_speedups}
         if confirm and count > 1:
             # There whenever the kills were confirmed, empty or not, so that
             # none named reads as none found and not as none looked for.

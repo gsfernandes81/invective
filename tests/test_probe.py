@@ -489,6 +489,7 @@ def test_without_unsafe_speedups_one_worker_runs_and_nothing_is_remembered(
     run = Probing(tree, monkeypatch, world({RAISE: [MINOR]}))
     report = run(3, unsafe_speedups=False)
     assert report["workers"] == 1 and len(run.places) == 1
+    assert report["unsafe_speedups"] is False
     assert run.gated() == [] and run.probed() == [] and not any(run.asked)
     assert remembered(tree) == before
     assert "speedups:  safe ones only" in run.lines
@@ -518,8 +519,10 @@ def test_a_selection_red_beside_its_copies_is_refused_naming_the_switch(
 def test_the_header_says_which_unsafe_speedups_are_on(tree, monkeypatch,
                                                       workers, history, said):
     run = Probing(tree, monkeypatch, world({}))
-    run(workers, only=["RAISE"] if workers == 4 else None, history=history)
+    report = run(workers, only=["RAISE"] if workers == 4 else None,
+                 history=history)
     assert "speedups:  %s" % said in run.lines
+    assert report["unsafe_speedups"] is True
 
 
 # --------------------------------------------------------------------------

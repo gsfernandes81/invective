@@ -125,7 +125,9 @@ killed run points at the file's own lines; an entry that carries
 The JSON report also names, for every killed mutant, the first test that
 failed on it. Each mutant's run reports that through invective's own pytest
 plugin. Every entry (survivor, kill or accepted) carries a `diff`: a unified
-diff of the source file against the mutant.
+diff of the source file against the mutant. At its top, `workers` says how many
+workers ran and `unsafe_speedups` whether the unsafe speedups were allowed
+(false with `--no-unsafe-speedups`).
 
 ## What is measured
 
