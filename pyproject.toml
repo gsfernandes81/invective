@@ -32,4 +32,7 @@ dev = ["pytest-xdist>=3.8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The fixture projects under tests/projects run through a pytest of their
+# own, started by the `project` fixture; collected here they would fail.
+norecursedirs = ["tests/projects"]
 addopts = "-n auto"
