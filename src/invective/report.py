@@ -20,9 +20,11 @@ def lines(report: Report, here: str) -> list[str]:
                                      _said(verdict)))
     counts = {name: sum(1 for v in report.verdicts if v.verdict == name)
               for name in VERDICTS}
-    measured = counts["killed"] + counts["survived"]
-    score = ("%.1f%% of %d measured" % (100.0 * counts["killed"] / measured, measured)
-             if measured else "nothing measured")
+    # An unreached mutant counts as a survivor; an unmeasured one is neither.
+    scored = counts["killed"] + counts["survived"] + counts["unreached"]
+    score = ("%.1f%%, %d killed of %d" % (100.0 * counts["killed"] / scored,
+                                          counts["killed"], scored)
+             if scored else "none, nothing to score")
     out.append("canary killed by %s" % report.canary)
     out.append("%d mutants in %d files: %s; score %s; %.1f s" % (
         len(report.verdicts), len(report.targets),

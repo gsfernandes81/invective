@@ -4,14 +4,15 @@ every refusal of stage 1."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 
 import pytest
 
-# The verdicts `tests/projects/basic/src/basic/gate.py` and `other.py` say
-# of themselves, in their docstrings; the mutants' ids are structural, so a
-# reformat of the files leaves this table true.
+# The verdicts the docstrings of the modules under `tests/projects/basic/src/basic/`
+# give; the mutants' ids are structural, so a reformat of the files leaves this table
+# true.
 BASIC = {
     "basic.gate:is_open:body:True": "killed",
     "basic.gate:is_open:body:False": "killed",
@@ -38,6 +39,12 @@ BASIC = {
     "basic.other:twice:body:-1": "killed",
     "basic.other:sign:body:True": "survived",
     "basic.other:sign:body:False": "killed",
+    "basic.short:one:body:0": "killed",
+    "basic.short:one:body:1": "killed",
+    "basic.short:one:body:-1": "killed",
+    "basic.short:Box.get:body:0": "killed",
+    "basic.short:Box.get:body:1": "killed",
+    "basic.short:Box.get:body:-1": "killed",
 }
 
 
@@ -50,6 +57,9 @@ def test_the_basic_projects_verdicts_are_the_ones_its_author_knows(project):
 def test_a_kill_names_the_first_failing_test_and_its_phase(project):
     run = project("basic")
     mutants = {m["id"]: m for m in run.report["mutants"]}
+    # Both tests that cover `is_open` fail with `True`; the cheaper one
+    # runs first and is the one named.
+    assert mutants["basic.gate:is_open:body:True"]["tests"] == 2
     assert mutants["basic.gate:is_open:body:True"]["killer"] == "tests/test_gate.py::test_open_hours"
     assert mutants["basic.gate:is_open:body:True"]["when"] == "call"
     # The fixture's line is credited to both tests that use its result, not
@@ -74,7 +84,8 @@ def test_the_console_report_lists_every_mutant_and_the_canary(project):
     assert "replace count -> int with 0  SURVIVED 2 tests" in run.out
     assert "replace value -> int with 0  SURVIVED 1 test" in run.out
     assert "canary killed by tests/test_gate.py::" in run.out
-    assert "25 mutants in 3 files: 13 killed, 8 survived, 2 unreached, 2 unmeasured" in run.out
+    assert ("31 mutants in 4 files: 19 killed, 8 survived, 2 unreached, 2 unmeasured; "
+            "score 65.5%, 19 killed of 29") in run.out
     assert run.report["canary"].startswith("tests/test_gate.py::")
 
 
@@ -82,15 +93,21 @@ def test_the_baselines_run_shows_as_pytests_own(project):
     """The parent replays child 0's reports, so the terminal shows the
     selection's run and its count, not `no tests ran`."""
     run = project("basic")
-    assert "9 passed" in run.out
+    assert "11 passed" in run.out
     assert "no tests ran" not in run.out
 
 
 def test_a_red_baseline_is_refused(project):
-    run = project("red")
+    """The refusal names the failing test and ends with the baseline's own
+    output (uncaptured here, with `-s`), and names no file of the run's
+    directory, which is gone by the time it is read."""
+    run = project("red", "-s")
     assert run.returncode == 2, run.out
-    assert "refused the run: the selection fails before any mutant" in run.out
-    assert "tests/test_light.py::test_wrong" in run.out
+    refusal = run.out[run.out.index("refused the run"):]
+    assert refusal.startswith("refused the run: the selection fails before any mutant: "
+                              "tests/test_light.py::test_wrong")
+    assert "the light is red" in refusal
+    assert "baseline.out" not in run.out
     assert run.report is None
 
 
@@ -118,9 +135,10 @@ def test_a_target_imported_before_instrumentation_is_refused(project):
     assert "basic.gate" in run.out
 
 
-def test_xdist_workers_are_a_usage_error(project):
+def test_xdist_workers_are_refused(project):
     run = project("basic", "-n", "2")
-    assert run.returncode == 4, run.out
+    assert run.returncode == 2, run.out
+    assert "refused the run" in run.out
     assert "turn pytest-xdist's workers off with -n 0" in run.out
 
 
@@ -134,7 +152,7 @@ def test_a_directory_target_takes_its_modules_but_not_its_tests(project):
     run = project("basic", targets=(".",))
     assert run.returncode == 0, run.out
     assert run.report["targets"] == ["src/basic/__init__.py", "src/basic/gate.py",
-                                     "src/basic/other.py"]
+                                     "src/basic/other.py", "src/basic/short.py"]
 
 
 def test_the_run_leaves_nothing_in_the_temporary_directory(project, tmp_path):
@@ -152,3 +170,145 @@ def test_the_run_leaves_nothing_in_the_temporary_directory(project, tmp_path):
     run = project("basic", env=env)
     assert run.returncode == 0, run.out
     assert glob.glob(str(tmp / "invective-*")) == []
+
+
+def test_code_a_fixture_runs_is_credited_to_the_tests_that_use_it(project):
+    """An overridden fixture's set-up, and a fixture a test asks for in its
+    body, both run code the test depends on: their mutants are covered by
+    that test and killed, not unreached."""
+    run = project("fixtures")
+    assert run.returncode == 0, run.out
+    assert run.verdicts() == {
+        "fixtures.calc:base:body:%s" % value:
+            ("killed", "tests/test_override.py::test_the_override_sees_the_base")
+        for value in ("0", "1", "-1")} | {
+        "fixtures.calc:dynamic:body:%s" % value:
+            ("killed", "tests/test_dynamic.py::test_a_fixture_asked_for_in_the_body")
+        for value in ("0", "1", "-1")}
+
+
+def test_a_canary_kill_that_is_not_the_canarys_is_refused(project):
+    """The only test that runs the target fails in the canary child for a
+    reason of its own (it depends on a test that does not run there), so
+    the failure is no proof that the selection runs the targets."""
+    run = project("ordered", "-k", "fill or read")
+    assert run.returncode == 2, run.out
+    assert "the failure was not the canary's" in run.out
+    assert "tests/test_order.py::test_read" in run.out
+    assert "(call)" in run.out
+
+
+def test_a_finalizer_that_raises_in_the_final_teardown_leaves_the_verdict(project, tmp_path):
+    """A session fixture's finalizer calls the target in the teardown a
+    child runs after its tests stop: with the canary it raises `Canary`,
+    with a mutant `pytest.fail`. Neither is an `Exception`; each child
+    still writes its verdict, and then an event naming what the teardown
+    raised."""
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    run = project("finalizer", env={"TMPDIR": str(tmp), "INVECTIVE_KEEP": "1"})
+    assert run.returncode == 0, run.out
+    assert run.report["canary"] == "tests/test_shop.py::test_closing"
+    assert run.verdicts() == {
+        "finalizer.shop:closing:body:%s" % value: ("killed", "tests/test_shop.py::test_closing")
+        for value in ("''", "'xyzzy'")}
+    (rundir,) = tmp.glob("invective-*")
+    raised = {}
+    for events in rundir.glob("*.jsonl"):
+        lines = [json.loads(line) for line in events.read_text().splitlines()]
+        raised[events.name] = [line["type"] for line in lines
+                               if line.get("event") == "teardown-raised"]
+    assert raised == {"baseline.jsonl": [], "canary.jsonl": ["Canary"],
+                      "0.jsonl": ["Failed"], "1.jsonl": ["Failed"]}
+
+
+def test_the_parent_imports_no_target(project):
+    """A directory target holds a module that exits when imported and one
+    that only a test imports. The parent takes both modules' mutants from
+    their source: the first is unreached, and the second's function, which
+    runs at its import inside the test, is measured in the child."""
+    run = project("lazy")
+    assert run.returncode == 0, run.out
+    assert run.verdicts() == {
+        "lazy.script:main:body:1": ("unreached", None),
+        "lazy.script:main:body:-1": ("unreached", None),
+        "lazy.late:compute:body:0": ("killed", "tests/test_late.py::test_late"),
+        "lazy.late:compute:body:1": ("killed", "tests/test_late.py::test_late"),
+        "lazy.late:compute:body:-1": ("killed", "tests/test_late.py::test_late"),
+    }
+
+
+@pytest.mark.parametrize(("when", "baseline"), [("conftest", "no tests ran"),
+                                                 ("report", "1 passed")])
+def test_threads_alive_in_the_parent_before_a_fork_are_refused(project, when, baseline):
+    """A thread a conftest starts at import is refused before child 0 is
+    forked, so no test runs; one a hook starts when the parent replays the
+    baseline's reports is refused before the canary is forked."""
+    run = project("threads", env={"START_THREAD": when})
+    assert run.returncode == 2, run.out
+    assert "threads are alive in the parent, so a forked child could deadlock: sleeper" in run.out
+    assert baseline in run.out
+
+
+def test_the_map_holds_each_tests_wall_and_cpu_time_by_phase(project, tmp_path):
+    """Per phase, for ordering and budgets: every basic test takes a
+    fraction of a millisecond of CPU, which a clock with 10 ms ticks reads
+    as nothing."""
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    run = project("basic", env={"TMPDIR": str(tmp), "INVECTIVE_KEEP": "1"})
+    assert run.returncode == 0, run.out
+    (rundir,) = tmp.glob("invective-*")
+    tests = json.loads((rundir / "map.json").read_text())["tests"]
+    assert len(tests) == 11
+    for nodeid, test in tests.items():
+        assert set(test["wall"]) == set(test["cpu"]) == {"setup", "call", "teardown"}, nodeid
+        assert all(seconds > 0 for seconds in test["wall"].values()), nodeid
+        assert sum(test["cpu"].values()) > 0, nodeid
+
+
+def test_a_child_that_ends_without_a_verdict_is_unmeasured(project):
+    """The note gives how the child ended and the end of its output."""
+    run = project("early", "-s")
+    assert run.returncode == 0, run.out
+    mutants = {m["id"]: m for m in run.report["mutants"]}
+    for value in ("0", "1", "-1"):
+        mutant = mutants["early.exits:code:body:%s" % value]
+        assert mutant["verdict"] == "unmeasured", mutant
+        assert mutant["note"].startswith("the child exited 5 without a verdict"), mutant
+        assert "leaving without a verdict" in mutant["note"], mutant
+
+
+def test_a_child_stops_at_the_first_failure(project, tmp_path):
+    """Each of `triple`'s mutants fails all three of its tests; the child
+    that runs one reports on a single test, the one that killed it."""
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    run = project("early", env={"TMPDIR": str(tmp), "INVECTIVE_KEEP": "1"})
+    assert run.returncode == 0, run.out
+    triples = [m for m in run.report["mutants"] if m["function"] == "triple"]
+    assert [(m["verdict"], m["tests"]) for m in triples] == [("killed", 3)] * 3
+    (rundir,) = tmp.glob("invective-*")
+    reported = {}
+    for events in rundir.glob("[0-9]*.jsonl"):
+        lines = [json.loads(line) for line in events.read_text().splitlines()]
+        killer = next((line["killer"] for line in lines if "verdict" in line), None)
+        if killer is not None and killer.startswith("tests/test_triple.py"):
+            reported[events.name] = (killer, {line["nodeid"] for line in lines
+                                              if line.get("event") == "report"})
+    assert len(reported) == 3
+    assert all(nodeids == {killer} for killer, nodeids in reported.values()), reported
+
+
+def test_an_empty_selection_is_refused(project):
+    run = project("basic", "-k", "nothing_matches")
+    assert run.returncode == 2, run.out
+    assert "refused the run: pytest collected no tests" in run.out
+
+
+def test_a_collection_error_is_refused(project):
+    # Written at run time, so that no file in the tree fails to parse.
+    run = project("basic", "broken/test_syntax.py",
+                  files={"broken/test_syntax.py": "def test_broken(:\n    pass\n"})
+    assert run.returncode == 2, run.out
+    assert "refused the run: 1 error(s) during collection" in run.out

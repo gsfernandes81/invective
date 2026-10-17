@@ -54,8 +54,8 @@ def pytest_configure(config):
     if config.stash.get(_REFUSAL, None):
         _refuse(config, config.stash[_REFUSAL])
     if config.getoption("numprocesses", None):
-        raise pytest.UsageError("--mutate runs the collected tests itself, one mutant "
-                                "at a time; turn pytest-xdist's workers off with -n 0")
+        _refuse(config, "--mutate runs the collected tests itself, one mutant at a time; "
+                        "turn pytest-xdist's workers off with -n 0")
 
 
 def _refuse(config, why: str) -> None:

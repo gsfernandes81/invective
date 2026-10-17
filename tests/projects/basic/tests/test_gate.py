@@ -1,3 +1,5 @@
+import time
+
 import basic.gate as gate
 from basic import gate as g
 
@@ -5,6 +7,13 @@ from basic import gate as g
 def test_open_hours():
     assert gate.is_open(10)
     assert not gate.is_open(3)
+
+
+def test_closed_at_night():
+    """Fails with `is_open` replaced by `True`, as `test_open_hours` does,
+    but costs more in the baseline, so it runs second and is not named."""
+    time.sleep(0.05)
+    assert not gate.is_open(22)
 
 
 def test_count_is_not_one():

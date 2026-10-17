@@ -48,7 +48,7 @@ if __name__ == "__main__":
 @pytest.fixture
 def module():
     code, info = instrument.instrument(SOURCE, "/nowhere/mod.py", "mod")
-    namespace = {"__name__": "mod"}
+    namespace = {"__name__": "mod", "__file__": "/nowhere/mod.py"}
     exec(code, namespace)
     return code, info, namespace
 
@@ -155,6 +155,6 @@ def test_the_prologue_follows_the_docstring_and_future_imports():
     # A `from __future__` after any other statement is a SyntaxError, so
     # compiling at all shows the order held; the docstring check shows the
     # prologue did not become the module's docstring.
-    ns = {"__name__": "mod"}
+    ns = {"__name__": "mod", "__file__": "/nowhere/mod.py"}
     exec(code, ns)
     assert ns["__doc__"] == tree.body[0].value.value

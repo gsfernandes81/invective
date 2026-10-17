@@ -6,7 +6,7 @@ from collections.abc import Iterator
 
 
 def is_open(hour: int) -> bool:
-    """Killed by both values: tests check an open hour and a closed one."""
+    """Killed by both values: tests check an open hour and closed ones."""
     return 9 <= hour < 17
 
 

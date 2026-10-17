@@ -10,6 +10,11 @@ traceback through it reads as it would without invective.
 A target already in `sys.modules` when the finder is installed was imported
 by an earlier plugin and cannot be instrumented: `install` refuses, naming
 the module, rather than let its mutants never switch.
+
+A target's mutant table depends on its path and source only: `table` builds
+it without running the module, and the loader builds the same one when the
+module is imported, under whatever name, since both take the module part of
+each id from `module_name`.
 """
 
 from __future__ import annotations
@@ -39,9 +44,8 @@ class Loader(importlib.machinery.SourceFileLoader):
     def get_code(self, fullname: str) -> CodeType:
         # Never the bytecode cache: a `.pyc` would be the original module.
         source = self.get_data(self.path)
-        code, info = instrument(source, self.path, fullname)
+        code, info = instrument(source, self.path, module_name(self.path))
         self.finder.instrumented[real(self.path)] = info
-        self.finder.names.setdefault(real(self.path), []).append(fullname)
         return code
 
     def exec_module(self, module: ModuleType) -> None:
@@ -56,8 +60,9 @@ class Finder(MetaPathFinder):
         self.targets = targets
         self.stems = {os.path.splitext(os.path.basename(path))[0] for path in targets}
         self.stems.discard("__init__")
+        #: A target's real path to the table its loader built.
         self.instrumented: dict[str, Instrumented] = {}
-        self.names: dict[str, list[str]] = {}
+        #: A target's real path to every module object imported from it.
         self.modules: dict[str, list[ModuleType]] = {}
 
     def find_spec(self, fullname, path=None, target=None):
@@ -96,12 +101,21 @@ def install(targets: set[str]) -> Finder:
     return finder
 
 
+def table(path: str) -> Instrumented:
+    """The mutant table of the target at the real *path*, from its source,
+    without running it: the table the loader builds when it is imported.
+    Raises `SyntaxError` or `OSError` as `compile` and `open` do."""
+    with open(path, "rb") as fh:
+        source = fh.read()
+    return instrument(source, path, module_name(path))[1]
+
+
 def module_name(path: str) -> str:
     """The dotted name *path* imports as: the directories above it that hold
     an `__init__.py`, up to the first that does not.
 
-    The name is only a guess until `find_spec` resolves it to *path*; the
-    caller checks.
+    The name is the module part of every mutant id of *path*, whatever
+    name the module is imported under.
     """
     path = real(path)
     parts = [os.path.splitext(os.path.basename(path))[0]]

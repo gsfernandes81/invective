@@ -304,6 +304,23 @@ stage 1 and reviews the benchmark harness before its numbers are believed; stage
    tests, a hanging mutant, a mutant reached at import, a test that prints and one that
    closes its stdout, a conftest that imports a target, a test that starts a thread, a
    test that starts an interpreter.
+
+   Carried from stage 1's review:
+
+   - `--basetemp` with more than one worker makes sibling children delete each other's
+     directories; each child needs a basetemp of its own, as xdist gives each worker.
+   - Each child's pytest temporary directory and its `.lock` are left behind, since
+     `os._exit` skips the atexit handlers that remove them.
+   - A child's wall budget leaves out the setup of a shared fixture that a non-covering
+     test paid for in the baseline (budgets are this stage's).
+   - The `fn_value` replacements name `iter`, `set` and `frozenset` as globals, which a
+     target that defines a module-level `set` would shadow.
+   - pytest's `--import-mode=importlib` imports a package `__init__.py` past the finder.
+   - Files the parent opened (`--log-file`, `--report-log`, faulthandler's descriptor)
+     are inherited by every child.
+   - A kill caused by a test's own order dependence on a non-covering test is counted
+     as a kill; the verdict-equality harness is where it shows.
+
 3. **Operators and scope.** The binary tables above, structural ids, trivial
    equivalence if it stays trivial, accept comments with stale detection,
    `--changed-since`, the JSON report, exit codes, `--fail-fast`, kill-history ordering,

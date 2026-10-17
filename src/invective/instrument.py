@@ -2,8 +2,10 @@
 module-global compare.
 
 The instrumented module gets a prologue, `__invective__ = <the ordinal live
-in this module, or None>`, read from `invective.switch` when the module is
-first executed. Every function body gets a guard after its docstring:
+in this module, or None>`, which calls `invective.switch.active` with the
+module's `__file__` when the module is first executed, so the module needs
+`__file__` set before it runs. Every function body gets a guard after its
+docstring:
 
     if __invective__ is not None:
         if __invective__ == 3: return 0
@@ -34,7 +36,7 @@ from invective.switch import CANARY
 GLOBAL = "__invective__"
 
 _PROLOGUE = (f"{GLOBAL} = __import__('invective.switch', fromlist=('active',))"
-             f".active(__name__)")
+             f".active(__file__)")
 _CANARY = ("raise __import__('invective.switch', fromlist=('Canary',))"
            ".Canary({name!r})")
 

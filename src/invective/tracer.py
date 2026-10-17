@@ -31,6 +31,8 @@ class Tracer:
         self.context: object = IMPORT
         #: Context to file to the lines run under it.
         self.lines: dict[object, dict[str, set[int]]] = {}
+        #: Context to the code objects of the targets that ran a line under it.
+        self.codes: dict[object, set[CodeType]] = {}
         #: Every file a code object that ran belongs to, targets or not.
         self.files: set[str] = set()
         self.traced: list[CodeType] = []
@@ -56,10 +58,12 @@ class Tracer:
     def _on_line(self, code: CodeType, line: int):
         path = self._member[code.co_filename]
         self.lines.setdefault(self.context, {}).setdefault(path, set()).add(line)
+        self.codes.setdefault(self.context, set()).add(code)
 
     def start(self) -> None:
-        """Begin tracing, with a free tool id."""
-        for tool in (sys.monitoring.COVERAGE_ID, *range(6)):
+        """Begin tracing, with the highest free tool id: the lower ids,
+        `COVERAGE_ID` among them, stay free for a coverage.py started later."""
+        for tool in range(5, -1, -1):
             if sys.monitoring.get_tool(tool) is None:
                 break
         else:
@@ -84,3 +88,13 @@ class Tracer:
     def lines_of(self, context: object) -> dict[str, list[int]]:
         return {path: sorted(lines)
                 for path, lines in self.lines.get(context, {}).items()}
+
+    def functions_of(self, context: object) -> dict[str, set[str]]:
+        """Per target, the `co_qualname` of every code object of it that ran
+        a line under *context*: the qualnames `instrument` gives mutants,
+        `<module>` for module-level code and the class's name for a class
+        body."""
+        found: dict[str, set[str]] = {}
+        for code in self.codes.get(context, ()):
+            found.setdefault(self._member[code.co_filename], set()).add(code.co_qualname)
+        return found

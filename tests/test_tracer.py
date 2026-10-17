@@ -79,3 +79,66 @@ def test_the_start_event_fires_once_per_code_object(traced):
     ns["helper"]()
     ns["helper"]()
     assert calls == []
+
+
+NESTED = '''\
+def one() -> int: return 3
+
+
+class C:
+    def m(self) -> str:
+        def inner() -> int:
+            return 1
+        return str(inner())
+
+
+def outer() -> bool:
+    class Local:
+        def get(self) -> bool:
+            return True
+    return Local().get()
+'''
+
+
+def test_the_functions_that_ran_are_named_as_instrument_names_their_mutants(tmp_path):
+    """Module-level code runs every `def` line, a one-line function's body
+    line among them, but only a function called in a context is named in
+    it; and the names are the qualnames of the mutants' table."""
+    from invective import instrument
+    path = tmp_path / "nested.py"
+    path.write_text(NESTED)
+    target = str(path.resolve())
+    code, info = instrument.instrument(NESTED, target, "nested")
+    t = tracer.Tracer({target})
+    t.start()
+    try:
+        t.context = "import"
+        namespace = {"__name__": "nested", "__file__": target}
+        exec(code, namespace)
+        t.context = "call"
+        namespace["one"]()
+        namespace["C"]().m()
+        namespace["outer"]()
+    finally:
+        sys.monitoring.set_events(t.tool, 0)
+        for each in t.traced:
+            sys.monitoring.set_local_events(t.tool, each, 0)
+        sys.monitoring.free_tool_id(t.tool)
+    assert t.functions_of("import") == {target: {"<module>", "C"}}
+    qualnames = {m.qualname for m in info.mutants}
+    assert qualnames == {"one", "C.m", "C.m.<locals>.inner", "outer",
+                         "outer.<locals>.Local.get"}
+    assert qualnames <= t.functions_of("call")[target]
+
+
+def test_the_tracer_takes_the_highest_free_tool_id():
+    """`COVERAGE_ID` and the low ids stay free for a coverage.py started
+    later in the session."""
+    free = [tool for tool in range(6) if sys.monitoring.get_tool(tool) is None]
+    t = tracer.Tracer(set())
+    t.start()
+    try:
+        assert t.tool == max(free)
+    finally:
+        sys.monitoring.set_events(t.tool, 0)
+        sys.monitoring.free_tool_id(t.tool)

@@ -6,4 +6,5 @@ def test_stop():
 
 
 def test_wrong():
+    print("the light is red")
     assert light.stop() is False

@@ -32,11 +32,12 @@ class Run(NamedTuple):
 
 @pytest.fixture
 def project(tmp_path):
-    """A function: copy the named project and run pytest --mutate in it.
-    Each call gets a copy of its own."""
+    """A function: copy the named project, write *files* (a relative path
+    to its text) into the copy, and run pytest --mutate in it. Each call
+    gets a copy of its own."""
 
     def run(name: str, *args: str, env: dict[str, str] | None = None,
-            targets: tuple[str, ...] = ()) -> Run:
+            targets: tuple[str, ...] = (), files: dict[str, str] | None = None) -> Run:
         root = str(tmp_path / name)
         for n in itertools.count(2):
             if not os.path.exists(root):
@@ -44,6 +45,10 @@ def project(tmp_path):
             root = str(tmp_path / f"{name}-{n}")
         shutil.copytree(os.path.join(PROJECTS, name), root,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        for relative, text in (files or {}).items():
+            os.makedirs(os.path.dirname(os.path.join(root, relative)), exist_ok=True)
+            with open(os.path.join(root, relative), "w", encoding="utf-8") as fh:
+                fh.write(text)
         argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
                 "--mutate-json", "report.json"]
         for target in targets or _default_targets(name):
