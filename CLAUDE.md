@@ -38,8 +38,8 @@ bump the version releases nothing.
 the user's reference.
 
 - Read `docs/documentation.md` before writing a doc, a comment or a
-  docstring: it holds the shape, the maxims, the pipeline, and the mechanical
-  checks.
+  docstring: it holds the reader a doc serves, the faults to cut, the shape,
+  and the mechanical checks.
 - Read `docs/architecture.md` for the module table, the plugin separation,
   and the handshake.
 - Read `docs/isolation.md` before changing the copy, the reaper, the
@@ -50,8 +50,9 @@ the user's reference.
 
 ### Who writes it
 
-`docs/` is written only through the pipeline in `docs/documentation.md`
-(`.claude/workflows/docs-pipeline.js`). `docs/plans/` is the exception, and
+What a session learns goes into `docs/` through the `write-doc` skill
+(`.claude/skills/write-doc/SKILL.md`, with `docs/documentation.md` behind
+it), scaled to the size of the learning. `docs/plans/` is the exception, and
 a plan is written directly. Any model may make a correction directly: fixing
 a fact that is wrong, a broken reference, a typo, without rewording the
 surrounding prose.
