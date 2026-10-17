@@ -1,9 +1,11 @@
-"""The instrumented module: the switch, the guard and what it leaves alone."""
+"""The instrumented module: the switch, the guard, and what it leaves alone."""
 
 from __future__ import annotations
 
 import ast
 import dis
+import types
+from collections.abc import Callable
 
 import pytest
 
@@ -46,7 +48,8 @@ if __name__ == "__main__":
 
 
 @pytest.fixture
-def module():
+def module() -> tuple[types.CodeType, instrument.Instrumented, dict]:
+    """Return `SOURCE` instrumented and run: its code, its table and its namespace."""
     code, info = instrument.instrument(SOURCE, "/nowhere/mod.py", "mod")
     namespace = {"__name__": "mod", "__file__": "/nowhere/mod.py"}
     exec(code, namespace)
@@ -54,24 +57,35 @@ def module():
 
 
 def test_ids_are_structural_and_in_table_order(module):
+    """A mutant's id names its module, function and value; ordinals count from 1."""
     _code, info, _ns = module
     assert [m.id for m in info.mutants] == [
-        "mod:plain:body:0", "mod:plain:body:1", "mod:plain:body:-1",
-        "mod:Thing.flag.<locals>.inner:body:''", "mod:Thing.flag.<locals>.inner:body:'xyzzy'",
-        "mod:Thing.flag:body:True", "mod:Thing.flag:body:False",
-        "mod:gen:body:iter([])", "mod:gen:body:iter([0])", "mod:gen:body:iter([1])",
-        "mod:gen:body:iter([-1])"]
+        "mod:plain:body:0",
+        "mod:plain:body:1",
+        "mod:plain:body:-1",
+        "mod:Thing.flag.<locals>.inner:body:''",
+        "mod:Thing.flag.<locals>.inner:body:'xyzzy'",
+        "mod:Thing.flag:body:True",
+        "mod:Thing.flag:body:False",
+        "mod:gen:body:iter([])",
+        "mod:gen:body:iter([0])",
+        "mod:gen:body:iter([1])",
+        "mod:gen:body:iter([-1])",
+    ]
     assert [m.ordinal for m in info.mutants] == list(range(1, 12))
 
 
 def test_a_constructor_an_empty_body_and_the_main_guard_have_no_mutant(module):
+    """A constructor, an empty body and the code under the main guard get no mutant."""
     _code, info, ns = module
-    assert not any("__init__" in m.id or "nothing" in m.id or "main" in m.id
-                   for m in info.mutants)
+    assert not any(
+        "__init__" in m.id or "nothing" in m.id or "main" in m.id for m in info.mutants
+    )
     assert "main" not in ns
 
 
 def test_the_module_runs_its_original_code_with_no_mutant_live(module):
+    """With no mutant live, every function and docstring is the source's own."""
     _code, _info, ns = module
     assert ns["__invective__"] is None
     assert ns["plain"](1) == 2
@@ -82,6 +96,7 @@ def test_the_module_runs_its_original_code_with_no_mutant_live(module):
 
 
 def test_each_ordinal_switches_its_own_function_only(module):
+    """Setting the global to a mutant's ordinal changes that function and no other."""
     _code, info, ns = module
     by_id = {m.id: m.ordinal for m in info.mutants}
     ns["__invective__"] = by_id["mod:plain:body:-1"]
@@ -95,38 +110,52 @@ def test_each_ordinal_switches_its_own_function_only(module):
 
 
 def test_the_canary_raises_in_every_function_with_a_body(module):
+    """With the canary live, every function raises `Canary`, `__init__` and `pass` too."""
     _code, _info, ns = module
     ns["__invective__"] = switch.CANARY
-    for call in (lambda: ns["plain"](1), lambda: ns["Thing"](), lambda: ns["nothing"](),
-                 lambda: list(ns["gen"]())):
+    for call in (
+        lambda: ns["plain"](1),
+        ns["Thing"],
+        ns["nothing"],
+        lambda: list(ns["gen"]()),
+    ):
         with pytest.raises(switch.Canary):
             call()
 
 
 def test_the_canary_is_not_an_exception_a_test_can_swallow():
+    """`Canary` is outside `Exception`, so a test's `except Exception` cannot catch it."""
     assert not issubclass(switch.Canary, Exception)
 
 
-def _instructions(function):
-    """The instructions that do something, in order: the no-ops a compiler
-    adds (`RESUME`, 3.14's `NOT_TAKEN`) left out."""
-    return [i for i in dis.get_instructions(function)
-            if i.opname not in ("RESUME", "NOT_TAKEN", "NOP")]
+def _instructions(function: Callable[..., object]) -> list[dis.Instruction]:
+    """Return the instructions of *function* that do something, in order.
+
+    The no-ops a compiler adds (`RESUME`, 3.14's `NOT_TAKEN`) are left out.
+    """
+    return [
+        i
+        for i in dis.get_instructions(function)
+        if i.opname not in ("RESUME", "NOT_TAKEN", "NOP")
+    ]
 
 
 def test_the_guard_is_one_global_read_and_one_compare(module):
-    """With nothing live, a function does two things before its own body:
-    load the global and jump on None, straight to the body. Anything more is
-    paid on every call of every function of every mutant's run."""
+    """With nothing live, a function reads the global and jumps on None to its body.
+
+    Anything more is paid on every call of every function of every mutant's run.
+    """
     _code, _info, ns = module
     ops = _instructions(ns["plain"])
     assert (ops[0].opname, ops[0].argval) == ("LOAD_GLOBAL", "__invective__"), ops[:4]
     assert ops[1].opname == "POP_JUMP_IF_NONE", ops[:4]
     landing = next(i for i in ops if i.offset == ops[1].argval)
-    assert landing.opname.startswith("LOAD_FAST") and landing.argval == "x", landing
+    assert landing.opname.startswith("LOAD_FAST"), landing
+    assert landing.argval == "x", landing
 
 
 def test_line_numbers_and_the_path_are_the_files_own(module):
+    """The compiled code keeps the file's path and lines; the guard takes the body's."""
     code, _info, ns = module
     assert code.co_filename == "/nowhere/mod.py"
     assert ns["plain"].__code__.co_firstlineno == 7
@@ -142,6 +171,7 @@ def test_line_numbers_and_the_path_are_the_files_own(module):
 
 
 def test_a_mutants_line_and_span_are_the_bodys(module):
+    """A mutant's line is its body's first statement, and its span the whole body."""
     _code, info, _ns = module
     plain = info.mutants[0]
     assert (plain.line, plain.span) == (10, (10, 10))
@@ -150,6 +180,7 @@ def test_a_mutants_line_and_span_are_the_bodys(module):
 
 
 def test_the_prologue_follows_the_docstring_and_future_imports():
+    """The prologue goes after the module docstring and the `from __future__` imports."""
     tree = ast.parse(SOURCE)
     code, _info = instrument.instrument(SOURCE, "/nowhere/mod.py", "mod")
     # A `from __future__` after any other statement is a SyntaxError, so
@@ -157,4 +188,7 @@ def test_the_prologue_follows_the_docstring_and_future_imports():
     # prologue did not become the module's docstring.
     ns = {"__name__": "mod", "__file__": "/nowhere/mod.py"}
     exec(code, ns)
-    assert ns["__doc__"] == tree.body[0].value.value
+    docstring = tree.body[0]
+    assert isinstance(docstring, ast.Expr)
+    assert isinstance(docstring.value, ast.Constant)
+    assert ns["__doc__"] == docstring.value.value

@@ -1,7 +1,6 @@
-"""The genres of mutant, each a module naming what it does to a function.
+"""The genres of mutant, one module each, named for what it does to a function.
 
-A genre takes a function node and returns its mutants: each a replacement
-(the statements that stand in for the body, or the node that stands in for
-one of its nodes), the path of what it replaces within the function, and a
-description for the report.
+A genre takes a function node and returns its replacements: each the code that
+stands in for the function's body, with the value the report names it by, and a
+description of it for the report. `fn_value` is the one genre.
 """

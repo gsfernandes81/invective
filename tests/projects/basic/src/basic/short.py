@@ -1,12 +1,16 @@
-"""One-line functions, whose `def` line is also their body's line: the
-module runs that line at import, but the functions run only in a test,
-so every mutant is measured and killed."""
+"""One-line functions, whose `def` line is also their body's line.
+
+The module runs that line at import, but the functions run only in a test, so every
+mutant is measured and killed.
+"""
 
 from __future__ import annotations
 
 
-def one() -> int: return 3
+def one() -> int: """Killed by every value."""; return 3  # fmt: skip
 
 
 class Box:
-    def get(self) -> int: return 4
+    """A class with a one-line method."""
+
+    def get(self) -> int: """Killed by every value."""; return 4  # fmt: skip

@@ -23,9 +23,10 @@ dependencies = ["pytest>=8.2"]
 invective = "invective.plugin"
 
 # For invective's own suite: pytest-xdist runs it on workers. The engine's
-# children never do.
+# children never do. ruff and ty are pinned because the findings they report
+# change between releases, and `checks` must agree with a local run.
 [dependency-groups]
-dev = ["pytest-xdist>=3.8.0"]
+dev = ["pytest-xdist>=3.8.0", "ruff==0.17.1", "ty==0.0.89"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -33,3 +34,32 @@ testpaths = ["tests"]
 # own, started by the `project` fixture; collected here they would fail.
 norecursedirs = ["tests/projects"]
 addopts = "-n auto"
+
+# `ty check src tests`, the fixture projects under tests/projects included.
+[tool.ty.environment]
+# Each fixture project's tests import its package from its own `src`, which pytest
+# puts on the path from the project's `pythonpath`.
+extra-paths = [
+    "tests/projects/basic/src",
+    "tests/projects/early/src",
+    "tests/projects/finalizer/src",
+    "tests/projects/fixtures/src",
+    "tests/projects/lazy/src",
+    "tests/projects/ordered/src",
+    "tests/projects/red/src",
+    "tests/projects/threads/src",
+    "tests/projects/untouched/src",
+]
+
+[tool.ty.terminal]
+# A warning fails the check as an error does.
+error-on-warning = true
+
+# Rules ty leaves off by default, turned on. Each finds a fault in code that runs.
+[tool.ty.rules]
+possibly-missing-attribute = "error"
+possibly-missing-import = "error"
+possibly-unresolved-reference = "error"
+division-by-zero = "error"
+# A suppression names the rule it suppresses, so it cannot hide a second fault.
+blanket-ignore-comment = "error"

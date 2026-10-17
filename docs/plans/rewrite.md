@@ -320,6 +320,9 @@ stage 1 and reviews the benchmark harness before its numbers are believed; stage
      are inherited by every child.
    - A kill caused by a test's own order dependence on a non-covering test is counted
      as a kill; the verdict-equality harness is where it shows.
+   - The plugin imports `resource` and names `signal.SIGHUP` at import, both Unix
+     only, so on Windows it may fail to load even without `--mutate`; the slow path
+     has to make the import clean there.
 
 3. **Operators and scope.** The binary tables above, structural ids, trivial
    equivalence if it stays trivial, accept comments with stale detection,

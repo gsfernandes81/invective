@@ -1,9 +1,12 @@
-"""Imported only inside `test_late`, so it is first imported in a child,
-where the mutant is already live: `compute`, called at the module's
-import, is measured, and every value is killed."""
+"""A module imported only inside `test_late`, so first imported in a child.
+
+The mutant is live there before the import, so `compute`, called at the module's
+import, is measured, and every value is killed.
+"""
 
 
 def compute() -> int:
+    """Return 7; the module calls it at import."""
     return 7
 
 

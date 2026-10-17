@@ -1,0 +1,55 @@
+# Lint and format configuration for the whole tree, the fixture projects under
+# tests/projects included: they are code the suite runs, and a fault in one is a
+# fault in a test.
+#
+#     uv run ruff check .
+#     uv run ruff format --check .     (`ruff format .` applies the layout)
+#
+# `checks` runs both, with ty, on one leg (.github/workflows/checks.yml).
+
+line-length = 90
+target-version = "py312"
+
+[lint]
+select = [
+    "F",     # pyflakes: undefined names, unused imports
+    "E4",    # pycodestyle: imports
+    "E501",  # line length, for the comments and docstrings the formatter leaves alone
+    "E7",    # pycodestyle: statements
+    "E9",    # pycodestyle: syntax and runtime errors
+    "B",     # flake8-bugbear
+    "UP",    # pyupgrade, to the target version
+    "SIM",   # flake8-simplify
+    "I",     # isort: import order
+    "N",     # pep8-naming
+    "RUF",   # ruff's own rules
+    "PL",    # pylint
+    "ARG",   # unused arguments
+    "PT",    # pytest style
+    "C4",    # comprehensions
+    "PIE",   # flake8-pie
+    "RET",   # return statements
+    "PERF",  # performance anti-patterns
+    "D",     # docstrings, under the google convention below
+]
+
+[lint.pydocstyle]
+# Google, not pep257: pep257 adds D401, which wants every summary in the
+# imperative, and this tree's docstrings state a contract, often as a noun phrase
+# ("The ordinal live in..."). Google keeps the summary-line rules (D205, D212,
+# D415) and drops D401.
+convention = "google"
+
+[lint.per-file-ignores]
+# A test's expected value is its specification. Named, it would sit away from the
+# assertion that states it, and the reader would look it up to read the test.
+"tests/**" = ["PLR2004"]
+# The module must be first imported inside the test, in the child where the mutant
+# is already live: that import is what the fixture project exists to exercise.
+"tests/projects/lazy/tests/test_late.py" = ["PLC0415"]
+# The lambda is the point of the fixture: a module line a test runs that is not one
+# of the module's functions, so the canary has no guard to fire.
+"tests/projects/untouched/src/untouched/thing.py" = ["E731"]
+# A function whose body sits on its `def` line is what the fixture exercises, so its
+# docstring shares that line with the body, after a semicolon.
+"tests/projects/basic/src/basic/short.py" = ["E702"]

@@ -46,5 +46,18 @@ jobs:
         if: matrix.resolution == 'lowest-direct'
         run: uv sync --resolution lowest-direct --python ${{ matrix.python }}
 
+      # ruff and ty check the source once, on one leg.
+      - name: Lint
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14' && matrix.resolution == 'locked'
+        run: uv run --no-sync ruff check .
+
+      - name: Format
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14' && matrix.resolution == 'locked'
+        run: uv run --no-sync ruff format --check .
+
+      - name: Types
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14' && matrix.resolution == 'locked'
+        run: uv run --no-sync ty check src tests
+
       - name: Test
         run: uv run --no-sync pytest

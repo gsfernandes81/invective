@@ -1,14 +1,19 @@
-"""The fixture projects under `tests/projects/`, each run by a real pytest
-with `--mutate`, in a copy of its own."""
+"""The `project` fixture: a fixture project under `tests/projects/`, run by a real pytest.
+
+Each run is `pytest --mutate` in a copy of its own, so a run cannot change the
+project's files or another run's.
+"""
 
 from __future__ import annotations
 
 import itertools
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from typing import NamedTuple
 
 import pytest
@@ -18,47 +23,78 @@ PROJECTS = os.path.join(HERE, "projects")
 
 
 class Run(NamedTuple):
+    """One `pytest --mutate` run of a fixture project, after it ended."""
+
     returncode: int
-    out: str
-    report: dict | None      #: the JSON report, when the run wrote one
-    pid: int                 #: the pytest process, the parent of every child
-    root: str                #: the copy the run was made in
+    out: str  #: stdout and stderr together
+    report: dict | None  #: the JSON report, when the run wrote one
+    pid: int  #: the pytest process, the parent of every child
+    root: str  #: the copy the run was made in
 
     def verdicts(self) -> dict[str, tuple[str, str | None]]:
-        """Mutant id to (verdict, killer)."""
+        """Return each mutant id's verdict and killer; fails when there is no report."""
         assert self.report is not None, self.out
         return {m["id"]: (m["verdict"], m["killer"]) for m in self.report["mutants"]}
 
 
 @pytest.fixture
-def project(tmp_path):
-    """A function: copy the named project, write *files* (a relative path
-    to its text) into the copy, and run pytest --mutate in it. Each call
-    gets a copy of its own."""
+def project(tmp_path: pathlib.Path) -> Callable[..., Run]:
+    """Return a function that runs `pytest --mutate` on a copy of a fixture project.
 
-    def run(name: str, *args: str, env: dict[str, str] | None = None,
-            targets: tuple[str, ...] = (), files: dict[str, str] | None = None) -> Run:
+    The function takes the project's name and pytest's further arguments. With
+    *files*, a relative path to its text, it writes those files into the copy
+    first; with *targets*, it mutates those paths instead of the project's package;
+    *env* adds to the environment the run inherits. Each call gets a copy of its
+    own.
+    """
+
+    def run(
+        name: str,
+        *args: str,
+        env: dict[str, str] | None = None,
+        targets: tuple[str, ...] = (),
+        files: dict[str, str] | None = None,
+    ) -> Run:
+        """Copy the project *name*, run pytest in the copy, and return the run."""
         root = str(tmp_path / name)
         for n in itertools.count(2):
             if not os.path.exists(root):
                 break
             root = str(tmp_path / f"{name}-{n}")
-        shutil.copytree(os.path.join(PROJECTS, name), root,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copytree(
+            os.path.join(PROJECTS, name),
+            root,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
         for relative, text in (files or {}).items():
             os.makedirs(os.path.dirname(os.path.join(root, relative)), exist_ok=True)
             with open(os.path.join(root, relative), "w", encoding="utf-8") as fh:
                 fh.write(text)
-        argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
-                "--mutate-json", "report.json"]
+
+        argv = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "--mutate-json",
+            "report.json",
+        ]
         for target in targets or _default_targets(name):
             argv += ["--mutate", target]
         argv += list(args)
         environment = {**os.environ, "COLUMNS": "200", **(env or {})}
         environment.pop("PYTEST_ADDOPTS", None)
-        proc = subprocess.Popen(argv, cwd=root, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, env=environment)
+        proc = subprocess.Popen(
+            argv,
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=environment,
+        )
         out, _ = proc.communicate(timeout=120)
+
         report = None
         if os.path.exists(os.path.join(root, "report.json")):
             with open(os.path.join(root, "report.json"), encoding="utf-8") as fh:
@@ -69,4 +105,5 @@ def project(tmp_path):
 
 
 def _default_targets(name: str) -> tuple[str, ...]:
+    """Return what a run of the project *name* mutates by default: its package."""
     return (os.path.join("src", name),)
