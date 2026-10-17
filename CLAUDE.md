@@ -40,13 +40,8 @@ the user's reference.
 - Read `docs/documentation.md` before writing a doc, a comment or a
   docstring: it holds the reader a doc serves, the faults to cut, the shape,
   and the mechanical checks.
-- Read `docs/architecture.md` for the module table, the plugin separation,
-  and the handshake.
-- Read `docs/isolation.md` before changing the copy, the reaper, the
-  signals, or the import-from-outside refusal.
-- Read `docs/development.md` for the environment, CI, and how to judge a
-  check.
-- Read `docs/benchmarking.md` before measuring a speedup.
+- Read `docs/plans/rewrite.md` before changing the engine: it holds the
+  decisions of the 1.0 rewrite and what each stage must deliver.
 
 ### Who writes it
 

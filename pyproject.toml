@@ -7,48 +7,29 @@ build-backend = "uv_build"
 [project]
 name = "invective"
 version = "0.5.1"
-description = "Mutation testing for a pytest suite: break one line at a time and report every edit the tests let through"
+description = "Mutation testing for a pytest suite: break one function at a time and report every edit the tests let through"
 readme = "README.md"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
-# The engine runs `python -m pytest` with the interpreter it was started by,
-# so pytest has to be importable wherever invective is. 8.2 is the oldest
-# the checks are run against (the `lowest-direct` leg of `checks`).
-# iniconfig is pytest's own reader of `.ini` and `.cfg` files, and invective
-# reads them with it so that one reads as pytest reads it; pytest depends on
-# it, and invective imports it, so it is named here too.
-dependencies = ["pytest>=8.2", "iniconfig>=2"]
-
-# Coverage-guided selection (`coverage = true` in `[tool.invective]`). 7.13
-# is the first whose wheels carry the `.pth` file that starts coverage in a
-# child interpreter, so a line only a child runs is credited to its test.
-[project.optional-dependencies]
-coverage = ["coverage>=7.13"]
+# 3.12 is the first with `sys.monitoring`, which maps each test to the
+# lines it ran.
+requires-python = ">=3.12"
+# The engine lives inside the pytest session the user started, so pytest is
+# the one runtime dependency. 8.2 is the oldest the checks run against (the
+# `lowest-direct` leg of `checks`).
+dependencies = ["pytest>=8.2"]
 
 [project.scripts]
 invective = "invective.__main__:main"
 
-# Named as the module is, so that `-p pytest_invective` on a command line and
-# this entry point are one plugin to pytest, not two registrations of it.
 [project.entry-points.pytest11]
-pytest_invective = "pytest_invective"
+invective = "invective.plugin"
 
-# The plugin is a package of its own, beside `invective` rather than inside
-# it: see `pytest_invective`'s docstring for why it must not import it.
-[tool.uv.build-backend]
-module-name = ["invective", "pytest_invective"]
-
-# For invective's own suite: pytest-xdist runs it on workers, and the plugin
-# and the engine both have to cope with a repository that does; coverage is
-# the extra's, so that the coverage run is tested wherever the suite runs.
+# For invective's own suite: pytest-xdist runs it on workers. The engine's
+# children never do.
 [dependency-groups]
-dev = ["pytest-xdist>=3.8.0", "coverage>=7.13"]
+dev = ["pytest-xdist>=3.8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# `src` goes on the path in `tests/conftest.py`, not with `pythonpath` here.
-# Workers by default: nearly every check here starts a process, and they wait
-# side by side. invective's own runs of a mutant are `-n 0`, and `--mutate`
-# here has to be given `-n 0` too.
 addopts = "-n auto"

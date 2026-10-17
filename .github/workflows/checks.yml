@@ -20,18 +20,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every Python that has not reached its end of life. Windows is here
-        # because the engine writes and stamps source files and kills process
-        # trees, and those are where the two platforms differ.
+        # Every Python with `sys.monitoring` that has not reached its end of
+        # life. Windows runs the engine through its slow path only.
         os: [ubuntu-latest, windows-latest]
-        python: ['3.11', '3.12', '3.13', '3.14']
+        python: ['3.12', '3.13', '3.14']
         resolution: [locked]
         include:
-          # The oldest pytest and pytest-xdist the project allows. pytest
-          # before 8.4 loads plugins before a repository's `pythonpath`,
-          # which is why the plugin is a package of its own.
+          # The oldest pytest and pytest-xdist the project allows.
           - os: ubuntu-latest
-            python: '3.11'
+            python: '3.12'
             resolution: lowest-direct
     steps:
       - uses: actions/checkout@v4

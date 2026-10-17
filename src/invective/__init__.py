@@ -1,7 +1,3 @@
-"""Mutation testing for a pytest suite: break one line, see whether a test fails.
+"""Mutation testing for a pytest suite, one mutant per forked child."""
 
-`invective.mutate` is the engine, for one module against a chosen selection of
-tests. `invective.sweep` runs it over every module of a source tree against
-the test files that import each one. The pytest plugin, `pytest --mutate`, is
-the separate package `pytest_invective`.
-"""
+__version__ = "0.5.1"
