@@ -206,6 +206,13 @@ gremlins measured a fake 42.9% score from contention before adopting this rule.
   raises in every instrumented function and run the selection in a child; it must fail.
   This is the check whose absence let gremlins ship two executors that never ran
   mutated code.
+- **The harness is not mutated.** The modules the finder needs before it exists
+  (`finder`, `instrument`, the operators, `switch`, `errors`, `environment`) cannot be
+  served instrumented, and the child-side runtime that runs between the fork and the
+  verdict line cannot be mutated without breaking the verdict itself. A self-run skips
+  both, says so in the report, and they are measured by stage 2's ground-truth arm.
+  Everything else in invective is mutable in-process once the plugin imports the engine
+  after the finder is installed.
 - **Reached flag**: a child records whether the active mutant's code ever executed. A
   survivor whose site never executed is reported as `survived, site not reached`, not as
   a plain survivor: the map and the run disagreed, which points at order dependence or
@@ -245,8 +252,9 @@ xdist workers on. Each refusal names its cause and exits 2.
 ### 11. Platforms and dependencies
 
 Python 3.12 to 3.14. Linux and macOS first class. Windows runs through the slow path
-and is untested here: the `checks` leg for it stays only if it is green at stage 4,
-otherwise it is removed and the README says so. The only runtime dependency is pytest.
+and is untested here: the `checks` leg for it returns with the slow path in stage 2 and
+stays only if it is green at stage 4, otherwise it is removed and the README says so.
+The only runtime dependency is pytest.
 
 ### 12. The verdict cache (deferred, principle fixed)
 
@@ -268,7 +276,9 @@ needs no migration.
   child 0, records per site and per test which replacements would have changed the
   value; never-infected mutants are survivors without a run and infected ones run only
   the tests that infected them. Saves test bodies, so helps every suite. Deferred only
-  because it is not needed to clear the bar; it is the first thing after 1.0.
+  because it is not needed to clear the bar; it is the first thing after 1.0. Covering
+  sets are by line span, so a nested function's lines count for its enclosing
+  function's mutants: harmless now, and a thing the probe has to see past.
 - **Verdict cache**: decision 12.
 - **Arid-node suppression**: skipping code whose mutants are reliably dismissed
   (logging, `__repr__`); seed it from a project's accept comments once there are some.
@@ -278,9 +288,26 @@ needs no migration.
 - **Split-stream execution** (fork at the first mutation site inside a test): the
   largest prefix-sharing in the literature and the most fragile; its target cost
   measured small on or3. A spike at most, after 1.0 has numbers.
-- **Startup hook for interpreters a test starts** (gremlins' `sitecustomize` approach):
-  what makes self-mutation and or3's subprocess-heavy tests measurable. The old
-  `mutation.yml` workflow goes with 1.0 and returns with this.
+- **Startup hook for interpreters a test starts** (gremlins' `sitecustomize` approach),
+  in two modes. Switch mode: a `sitecustomize` directory put first on `PYTHONPATH`,
+  with environment variables naming the instrumented sources and the live mutant
+  (`environment.MUTANT` is set for it already), so an interpreter a test starts
+  installs the finder before anything else imports, and runs the mutant. Trace mode:
+  during the pre-scan the same hook traces lines in the started interpreter and
+  records them against the current test, which it learns from an environment variable
+  the parent sets per test. Without trace mode, code that only runs in a started
+  interpreter is unreached and its mutants never run; without switch mode, it runs the
+  original. This is what makes a subprocess-heavy project measurable, and invective's
+  own suite is one: the `project` fixture runs every test through a pytest subprocess,
+  so in-process coverage of the engine is zero and a self-run reports every mutant
+  unreached, truthfully. The hook is the one route to a real self-mutation score;
+  until it exists, invective runs on invective through stage 2's ground-truth arm. The
+  old `mutation.yml` workflow goes with 1.0 and returns with this.
+- **A fork server**, for test setups that are not fork-safe: a clean process that
+  imports and collects, and is restarted on demand. Not an ordering improvement: the
+  finder installed at `pytest_load_initial_conftests` already sits ahead of pytest's
+  assertion-rewrite hook, and a finder installed before `pytest.main` would land behind
+  it. Optional, after 1.0.
 - **Stryker report schema**: a second JSON shape for dashboards; add when wanted.
 
 ## Stages
@@ -299,7 +326,11 @@ stage 1 and reviews the benchmark harness before its numbers are believed; stage
 2. **Correctness envelope.** The slow path; the three-arm verdict-equality harness
    (fork path, subprocess path, and ground truth: the mutant applied textually to a copy
    of the file and plain pytest run on it, independent of all of invective's machinery);
-   budgets, timeouts and their confirmation; the reached flag; every refusal; fixture
+   budgets (`RLIMIT_CPU` and the wall budget), timeouts and their confirmation; the
+   reached flag; every refusal; the Windows leg of `checks` back, green on the slow
+   path; invective run on its own code through the ground-truth arm, over the modules
+   the branch changed (by hand until `--changed-since` lands in stage 3), which is how
+   the harness modules a self-run skips (decision 8) are measured; fixture
    projects that hold the known traps: fixtures of every scope, parametrisation, async
    tests, a hanging mutant, a mutant reached at import, a test that prints and one that
    closes its stdout, a conftest that imports a target, a test that starts a thread, a
@@ -327,7 +358,9 @@ stage 1 and reviews the benchmark harness before its numbers are believed; stage
 3. **Operators and scope.** The binary tables above, structural ids, trivial
    equivalence if it stays trivial, accept comments with stale detection,
    `--changed-since`, the JSON report, exit codes, `--fail-fast`, kill-history ordering,
-   `[tool.invective]`, the `invective run` wrapper.
+   `[tool.invective]`, the `invective run` wrapper. A file with no `__init__.py` chain
+   above it (a namespace package) gets its stem as the id's module component, so two
+   such files of one stem share ids; settle that here, where ids carry scope.
 4. **Measurement and release.** The benchmark harness and its run; the Finding; the
    README and docs through the write-doc skill (its examples must cite the new engine's
    symbols, not the old tree's); version 1.0.0 and `uv lock`; the `checks` workflow for
