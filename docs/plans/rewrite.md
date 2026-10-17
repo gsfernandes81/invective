@@ -236,9 +236,10 @@ xdist workers on. Each refusal names its cause and exits 2.
   detection stays.
 - Console report by default; `--json <path>` writes every mutant with its id, file,
   line, description, verdict, killer, budget and the acceptance it matched.
-- Exit codes: 0 every mutant killed or accepted; 1 an unaccepted survivor, a stale
-  acceptance or an unmeasured mutant under `fail-on-survivors`; 2 a refusal; 4 a usage
-  error. The gate needs nothing but the exit code and the console lines.
+- Exit codes: 0 by default, survivors included, since a survivor is a finding; with
+  `fail-on-survivors = true` in `[tool.invective]`, 1 for an unaccepted survivor, a
+  stale acceptance or an unmeasured mutant; 2 a refusal; 4 a usage error. The gate
+  needs nothing but the exit code and the console lines.
 - Workers default to the CPU count.
 
 ### 11. Platforms and dependencies
@@ -336,6 +337,10 @@ testing-performance page prescribes; a comparison that was not interleaved is no
 evidence. Report wall time, mutant counts (the operator sets differ, and a count beside a
 time keeps the claim honest), and verdict agreement on the operators whose tables are
 shared.
+
+A short benchmark runs before the full one: one project, the branch-sized case, one
+pass. Its numbers are read with the user, who decides whether performance is chased
+before the full run. The full run has no cap on an arm's time.
 
 **The bar for 1.0**: at least as fast as every other arm on every case all arms
 complete, the smallest case included, since that is where fixed cost shows. mutmut 3 is
