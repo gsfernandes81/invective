@@ -7,6 +7,10 @@ scheduler keeps up to N children alive, wakes on each exit through a pipe that
 Python's signal wakeup writes to on `SIGCHLD`, and kills a child's whole process
 group when its wall budget runs out. A parent sent SIGTERM or SIGHUP while the
 scheduler runs kills every running child's group before it stops.
+
+The code a child runs here, from the fork to `os._exit`, is marked `@switch.harness`,
+so that a self-run gives it no guard: the canary raising in it would leave the child
+running the parent's scheduler.
 """
 
 from __future__ import annotations
@@ -22,6 +26,8 @@ import traceback
 from collections.abc import Callable
 from types import FrameType
 from typing import NamedTuple
+
+from invective import switch
 
 #: A signal handler set from Python, or `SIG_DFL` or `SIG_IGN`.
 type _Handler = Callable[[int, FrameType | None], object] | int
@@ -56,6 +62,7 @@ STOPPING = (signal.SIGTERM, signal.SIGHUP)
 _RAISED = 70
 
 
+@switch.harness
 def _flush_stdio() -> None:
     """Flush `sys.stdout` and `sys.stderr`, ignoring a stream that cannot flush."""
     for stream in (sys.stdout, sys.stderr):
@@ -63,6 +70,7 @@ def _flush_stdio() -> None:
             stream.flush()
 
 
+@switch.harness
 def fork[K](job: Job[K], undo: Callable[[], None] = lambda: None) -> int:
     """Start *job* in a child and return its pid; the call does not return in the child.
 
@@ -162,6 +170,7 @@ def run_all[K](jobs: list[Job[K]], workers: int, done: Callable[[Done[K]], None]
         signal.signal(signum, before[signum])
         os.kill(os.getpid(), signum)
 
+    @switch.harness
     def undo() -> None:
         """In a child: restore the parent's handlers and close the scheduler's pipe."""
         signal.set_wakeup_fd(-1)

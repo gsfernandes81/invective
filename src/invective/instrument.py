@@ -19,7 +19,8 @@ first body statement.
 Only function bodies are mutated. Module-level code runs at import, which in the
 parent comes before any mutant is live, so cargo-mutants leaves it alone and so does
 invective. A function defined under `if __name__ == "__main__":` is left alone with
-it.
+it, and so is a function or class decorated `@switch.harness`, with everything
+defined in it.
 """
 
 from __future__ import annotations
@@ -35,6 +36,11 @@ _PROLOGUE = (
     f"{GLOBAL} = __import__('invective.switch', fromlist=('active',)).active(__file__)"
 )
 _CANARY = "raise __import__('invective.switch', fromlist=('Canary',)).Canary({name!r})"
+
+#: The spellings of `switch.harness` as a decorator. Only the qualified forms count,
+#: so that a project's own decorator named `harness` does not stop its functions
+#: being mutated.
+_HARNESS = frozenset({"switch.harness", "invective.switch.harness"})
 
 #: The attributes that place an AST node in its file.
 _POSITION = ("lineno", "col_offset", "end_lineno", "end_col_offset")
@@ -127,6 +133,11 @@ def _is_future_import(statement: ast.stmt) -> bool:
     return isinstance(statement, ast.ImportFrom) and statement.module == "__future__"
 
 
+def _is_harness(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> bool:
+    """Return whether *node* is decorated `@switch.harness`."""
+    return any(ast.unparse(decorator) in _HARNESS for decorator in node.decorator_list)
+
+
 class _Transformer(ast.NodeTransformer):
     """Adds the guard to every function of one module and collects its mutants."""
 
@@ -161,7 +172,12 @@ class _Transformer(ast.NodeTransformer):
         return node
 
     def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
-        """Instrument the class's methods, under the class's name."""
+        """Instrument the class's methods, under the class's name.
+
+        A class marked `@switch.harness` is left as written.
+        """
+        if _is_harness(node):
+            return node
         self.scope.append(node.name)
         self.generic_visit(node)
         self.scope.pop()
@@ -178,8 +194,11 @@ class _Transformer(ast.NodeTransformer):
     def _function[F: (ast.FunctionDef, ast.AsyncFunctionDef)](self, node: F) -> F:
         """Give *node* its guard, after its nested functions have theirs.
 
-        Each of its mutants is added to the table, numbered after those before it.
+        Each of its mutants is added to the table, numbered after those before it. A
+        function marked `@switch.harness` is left as written.
         """
+        if _is_harness(node):
+            return node
         qualname = ".".join([*self.scope, node.name])
         self.scope += [node.name, "<locals>"]
         self.generic_visit(node)

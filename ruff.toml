@@ -41,6 +41,10 @@ select = [
 convention = "google"
 
 [lint.per-file-ignores]
+# The plugin imports the engine inside its hooks, after the finder is installed:
+# an import at the top would put the engine's modules in sys.modules before the
+# finder exists, and a run of invective on its own code would be refused.
+"src/invective/plugin.py" = ["PLC0415"]
 # A test's expected value is its specification. Named, it would sit away from the
 # assertion that states it, and the reader would look it up to read the test.
 "tests/**" = ["PLR2004"]

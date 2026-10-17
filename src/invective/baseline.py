@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from invective import children, protocol, tracer
+from invective import children, protocol, switch, tracer
 from invective.errors import Refusal
 
 if TYPE_CHECKING:
@@ -120,6 +120,7 @@ def _entry(nodeid: str, prescan: _Prescan) -> dict[str, object]:
     }
 
 
+@switch.harness
 class _Prescan:
     """A pytest plugin, registered in child 0, that feeds the tracer its context.
 
@@ -196,6 +197,7 @@ def _fixtures_used(item: pytest.Item) -> list[int]:
     return sorted(found)
 
 
+@switch.harness
 def _cpu() -> float:
     """Return the CPU seconds of this process and the children it has waited for."""
     # Not `os.times`, whose 10 ms ticks read a whole test as no time at all.

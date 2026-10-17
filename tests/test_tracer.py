@@ -173,3 +173,30 @@ def test_the_tracer_takes_the_highest_free_tool_id() -> None:
         assert t.tool == max(free)
     finally:
         _release(t)
+
+
+def test_code_marked_harness_records_no_line(tmp_path: pathlib.Path) -> None:
+    """A target's code marked `switch.harness`, nested code and methods too, is untraced.
+
+    Child 0 runs some of the harness inside a test's phase, and a line it recorded
+    there would be credited to the test.
+    """
+    target = tmp_path / "marked.py"
+    target.write_text(
+        "from invective import switch\n\n\n"
+        "@switch.harness\ndef marked():\n    return (lambda: 1)()\n\n\n"
+        "@switch.harness\nclass Kept:\n    def method(self):\n        return 2\n\n\n"
+        "def plain():\n    return 3\n"
+    )
+    namespace: dict[str, Any] = {}
+    exec(compile(target.read_text(), str(target), "exec"), namespace)
+    t = tracer.Tracer({str(target.resolve())})
+    t.start()
+    try:
+        t.context = "a"
+        namespace["marked"]()
+        namespace["Kept"]().method()
+        namespace["plain"]()
+        assert t.lines_of("a") == {str(target.resolve()): [16]}
+    finally:
+        _release(t)

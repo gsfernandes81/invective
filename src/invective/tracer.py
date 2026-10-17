@@ -7,6 +7,9 @@ object does not fire the start event again. After the first call of every functi
 nothing outside the targets costs anything, and each line a target runs is one
 callback.
 
+The code of invective's own harness (`switch.harness`) is not traced: child 0 runs some
+of it inside each test's phase, and its lines would be credited to the test.
+
 Each line is recorded under the tracer's context. While the parent imports and
 collects, the context is `IMPORT`; in child 0, the baseline's plugin sets it to the
 test and phase, or the fixture set-up, in progress.
@@ -17,6 +20,8 @@ from __future__ import annotations
 import os
 import sys
 from types import CodeType
+
+from invective import switch
 
 #: The context module-level code at import and collection runs under.
 IMPORT = "<import>"
@@ -65,11 +70,12 @@ class Tracer:
     def _on_start(self, code: CodeType, _offset: int) -> object:
         """Record the file of *code* and, for a target's, turn on its line events.
 
-        Returns `DISABLE`, so *code* does not fire the start event again.
+        The line events of code marked `switch.harness` stay off. Returns `DISABLE`,
+        so *code* does not fire the start event again.
         """
         self.files.add(code.co_filename)
         target = self._target(code.co_filename)
-        if target is not None:
+        if target is not None and code not in switch.MARKED:
             self._paths[code.co_filename] = target
             sys.monitoring.set_local_events(self._tool(), code, _LINE)
             self.traced.append(code)

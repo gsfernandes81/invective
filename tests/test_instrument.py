@@ -6,6 +6,7 @@ import ast
 import dis
 import types
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -192,3 +193,61 @@ def test_the_prologue_follows_the_docstring_and_future_imports():
     assert isinstance(docstring, ast.Expr)
     assert isinstance(docstring.value, ast.Constant)
     assert ns["__doc__"] == docstring.value.value
+
+
+MARKED = """from invective import switch
+
+harness = switch.harness
+
+
+@switch.harness
+def marked() -> int:
+    def nested() -> int:
+        return 1
+    return nested()
+
+
+@switch.harness
+class Kept:
+    def method(self) -> bool:
+        return True
+
+
+@harness
+def bare() -> int:
+    return 2
+
+
+def plain() -> int:
+    return 3
+"""
+
+
+def test_code_marked_harness_has_no_guard_and_no_mutant():
+    """A function or class marked `switch.harness` is left as written, nested code too.
+
+    With the canary live, the marked code runs as written and the rest raises. Only
+    the qualified spelling marks: a decorator named `harness` alone does not.
+    """
+    code, info = instrument.instrument(MARKED, "/nowhere/marked.py", "marked")
+    ns: dict[str, Any] = {"__name__": "marked", "__file__": "/nowhere/marked.py"}
+    exec(code, ns)
+    assert [m.id for m in info.mutants] == [
+        "marked:bare:body:0",
+        "marked:bare:body:1",
+        "marked:bare:body:-1",
+        "marked:plain:body:0",
+        "marked:plain:body:1",
+        "marked:plain:body:-1",
+    ]
+    assert info.functions == 2
+    for function in (ns["marked"], ns["Kept"].method):
+        names = {i.argval for i in dis.get_instructions(function, show_caches=False)}
+        assert "__invective__" not in names, function
+
+    ns["__invective__"] = switch.CANARY
+    assert ns["marked"]() == 1
+    assert ns["Kept"]().method() is True
+    for call in (ns["bare"], ns["plain"]):
+        with pytest.raises(switch.Canary):
+            call()

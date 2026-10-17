@@ -6,21 +6,50 @@ over `pytest_runtestloop`: the engine runs every test in forked children and the
 parent runs none. The engine passes the baseline's reports through the parent's
 hooks, so the terminal shows the selection's run as pytest would have shown it, and
 the mutation report follows it.
+
+The plugin imports the engine and the report inside its hooks, after the finder is
+installed, so that a run on invective's own tree can mutate them. The files it
+imports before then are `HARNESS`: a target among them is left out of the run, and
+the report names it.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import os
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
-from invective import engine, report
+from invective import finder
 from invective.errors import Refusal
 
-_STATE = pytest.StashKey[engine.State]()
+if TYPE_CHECKING:
+    from invective import engine
+
+#: The files of the running invective, relative to its package, that are imported
+#: before the finder is installed: this module and what it imports. Each is in
+#: `sys.modules` before the finder exists, so none can be served instrumented.
+HARNESS = frozenset(
+    {
+        "__init__.py",
+        "environment.py",
+        "errors.py",
+        "finder.py",
+        "instrument.py",
+        "operators/__init__.py",
+        "operators/fn_value.py",
+        "plugin.py",
+        "switch.py",
+    }
+)
+
+#: The running invective's package directory, as a real path.
+_PACKAGE = os.path.dirname(finder.real(__file__))
+
+_STATE: pytest.StashKey[engine.State] = pytest.StashKey()
 _REFUSAL = pytest.StashKey[str]()
-_REPORT = pytest.StashKey[engine.Report]()
+_REPORT: pytest.StashKey[engine.Report] = pytest.StashKey()
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -56,17 +85,76 @@ def pytest_load_initial_conftests(early_config: pytest.Config) -> None:
     paths = early_config.known_args_namespace.mutate
     if not paths:
         return
+    here = str(early_config.invocation_params.dir)
     try:
         if not hasattr(os, "fork"):
             raise Refusal("this platform cannot fork; the slow path is not built yet")
-        targets = engine.targets_of(
-            paths,
-            str(early_config.invocation_params.dir),
-            early_config.getini("python_files"),
-        )
-        early_config.stash[_STATE] = engine.State(targets)
+        found = targets_of(paths, here, early_config.getini("python_files"))
+        skipped = {path for path in found if _is_harness(path)}
+        if skipped == found:
+            raise pytest.UsageError(
+                "--mutate: every file named is part of invective's harness, which is "
+                "imported before the finder exists: "
+                + ", ".join(os.path.relpath(path, here) for path in sorted(skipped))
+            )
+        targets = found - skipped
+        installed = finder.install(targets)
+        # Not imported at module level: a target among the engine's modules is
+        # served instrumented only when it is first imported after `install`.
+        from invective import engine
+
+        early_config.stash[_STATE] = engine.State(targets, installed, skipped)
     except Refusal as exc:
         early_config.stash[_REFUSAL] = str(exc)
+
+
+def targets_of(paths: list[str], here: str, test_patterns: list[str]) -> set[str]:
+    """Return the real paths of the files *paths* name, relative to *here*.
+
+    A directory stands for every `.py` file under it that is neither a conftest nor
+    a test module by *test_patterns*, outside hidden directories, `__pycache__` and
+    any directory that holds a `pyvenv.cfg`. Raises `pytest.UsageError` for a path
+    that does not exist, and when the paths hold nothing to mutate.
+    """
+    found: set[str] = set()
+    for given in paths:
+        path = os.path.join(here, given)
+        if os.path.isfile(path):
+            found.add(finder.real(path))
+        elif os.path.isdir(path):
+            found.update(_modules_under(path, test_patterns))
+        else:
+            raise pytest.UsageError(f"--mutate: no such file or directory: {given}")
+
+    if not found:
+        raise pytest.UsageError(f"--mutate: nothing to mutate under {', '.join(paths)}")
+    return found
+
+
+def _modules_under(directory: str, test_patterns: list[str]) -> list[str]:
+    """Return the real paths of the modules `targets_of` takes under *directory*."""
+    found = []
+    for top, dirs, files in os.walk(directory):
+        dirs[:] = sorted(
+            name
+            for name in dirs
+            if not name.startswith(".")
+            and name != "__pycache__"
+            and not os.path.exists(os.path.join(top, name, "pyvenv.cfg"))
+        )
+        found += [
+            finder.real(os.path.join(top, name))
+            for name in sorted(files)
+            if name.endswith(".py")
+            and name != "conftest.py"
+            and not any(fnmatch.fnmatch(name, pattern) for pattern in test_patterns)
+        ]
+    return found
+
+
+def _is_harness(path: str) -> bool:
+    """Return whether the real *path* is one of the `HARNESS` files of this invective."""
+    return os.path.relpath(path, _PACKAGE).replace(os.sep, "/") in HARNESS
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -131,6 +219,8 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     state = config.stash.get(_STATE, None)
     if state is None or config.option.collectonly:
         return None
+    from invective import engine, report
+
     try:
         result = engine.run(session, state, _workers(config))
     except Refusal as exc:
@@ -151,6 +241,8 @@ def pytest_terminal_summary(
     result = config.stash.get(_REPORT, None)
     if result is None:
         return
+    from invective import report
+
     terminalreporter.section("invective")
     for line in report.lines(result, str(config.invocation_params.dir)):
         terminalreporter.write_line(line)

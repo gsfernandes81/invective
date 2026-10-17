@@ -5,6 +5,11 @@ session the parent collected, with its output in a file of its own. A `Recorder`
 registered in the child writes each test report as one JSON line of the child's
 events file, which the parent reads after the child has ended. Nothing else a child
 does reaches the parent.
+
+`recapture`, `run_items`, `teardown` and `Recorder` run in a mutant's child, between
+the fork and the verdict line, and are marked `@switch.harness`, so that a self-run
+gives them no guard and no mutant: the canary raising in `Recorder` would stop every
+child answering.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import pytest
 from invective import switch
 
 
+@switch.harness
 def recapture(config: pytest.Config, out: str) -> None:
     """Restart pytest's global capture in the child, over the file *out*.
 
@@ -44,6 +50,7 @@ def recapture(config: pytest.Config, out: str) -> None:
         capman.suspend_global_capture()
 
 
+@switch.harness
 def run_items(items: list[pytest.Item], stop: Callable[[], bool]) -> None:
     """Run *items* in order through `pytest_runtest_protocol`.
 
@@ -58,6 +65,7 @@ def run_items(items: list[pytest.Item], stop: Callable[[], bool]) -> None:
             break
 
 
+@switch.harness
 def teardown(session: pytest.Session, recorder: Recorder) -> None:
     """Tear down everything still set up in the child.
 
@@ -81,6 +89,7 @@ class Failure(NamedTuple):
     canary: bool  #: the failure's exception is `switch.Canary`
 
 
+@switch.harness
 class Recorder:
     """A pytest plugin, registered in a child, that writes the child's events file.
 

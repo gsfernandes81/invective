@@ -7,12 +7,16 @@ a module first imported in the child reads, and the global of every module of th
 path the parent imported. The ordinal is the mutant's index in its module's table,
 from 1; `CANARY` is the ordinal of the canary, which raises in every instrumented
 function.
+
+A function or class of invective marked `@switch.harness` is left as written when its
+module is instrumented, with no guard and no mutant (`instrument`), and the tracer
+records none of its lines.
 """
 
 from __future__ import annotations
 
 import os
-from types import ModuleType
+from types import CodeType, ModuleType
 
 from invective import environment
 
@@ -29,6 +33,11 @@ ACTIVE: dict[str, int] = {}
 
 #: A module's `__file__` to its real path, so each file is resolved once.
 _REAL: dict[str, str] = {}
+
+#: The code objects of everything marked `harness`, with the functions nested in each.
+#: The tracer records none of their lines, which would otherwise be credited to the
+#: test they ran under.
+MARKED: set[CodeType] = set()
 
 
 class Canary(BaseException):
@@ -62,3 +71,29 @@ def activate(path: str, modules: list[ModuleType], ordinal: int, identity: str) 
     for module in modules:
         setattr(module, GLOBAL, ordinal)
     os.environ[environment.MUTANT] = identity
+
+
+def harness[T](marked: T) -> T:
+    """Mark a function or class as part of the harness, and return it unchanged.
+
+    `instrument` recognises the decorator by its name, `switch.harness`, and gives
+    the function, or every method of the class, no guard and no mutant; their code
+    objects go in `MARKED`, which the tracer does not trace. The decorator belongs on
+    the engine's own code that a child runs between the fork and the verdict line,
+    where a live mutant or the canary would stop the child from answering, and on
+    the code child 0 runs inside a test's phase.
+    """
+    functions = list(vars(marked).values()) if isinstance(marked, type) else [marked]
+    for function in functions:
+        code = getattr(getattr(function, "__func__", function), "__code__", None)
+        if isinstance(code, CodeType):
+            _mark(code)
+    return marked
+
+
+def _mark(code: CodeType) -> None:
+    """Add *code*, and the code of every function nested in it, to `MARKED`."""
+    MARKED.add(code)
+    for constant in code.co_consts:
+        if isinstance(constant, CodeType):
+            _mark(constant)

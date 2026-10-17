@@ -18,7 +18,6 @@ not killed by `switch.Canary`, or when a thread is alive in the parent at a fork
 
 from __future__ import annotations
 
-import fnmatch
 import gc
 import os
 import shutil
@@ -40,19 +39,23 @@ _SHOWN = 5
 class State:
     """What the plugin sets up before any conftest is imported.
 
-    That is the targets, the finder that serves them instrumented, and the tracer,
-    which runs from then on.
+    That is the targets, the finder that serves them instrumented, the tracer, which
+    runs from then on, and the files named for mutation that the run leaves out.
     """
 
-    def __init__(self, targets: set[str]) -> None:
-        """Start the tracer and install the finder for *targets*, as real paths.
+    def __init__(
+        self, targets: set[str], installed: finder.Finder, skipped: set[str]
+    ) -> None:
+        """Start the tracer for *targets*, as real paths, which *installed* serves.
 
-        Raises `Refusal` when a target is already imported.
+        *skipped* holds the real paths of the files of invective's harness that
+        were named for mutation and left out.
         """
         self.targets = targets
+        self.finder = installed
+        self.skipped = skipped
         self.tracer = tracer.Tracer(targets)
         self.tracer.start()
-        self.finder = finder.install(targets)
 
 
 class Context(NamedTuple):
@@ -67,54 +70,11 @@ class Report(NamedTuple):
     """What a run found, for the console report and the JSON file."""
 
     targets: list[str]
+    skipped: list[str]  #: files of invective's harness named and left out
     verdicts: list[mutants.Verdict]
     baseline: dict  #: the baseline's map, with its report events
     canary: str  #: the test the forced-fail canary failed
     seconds: float
-
-
-def targets_of(paths: list[str], here: str, test_patterns: list[str]) -> set[str]:
-    """Return the real paths of the files *paths* name, relative to *here*.
-
-    A directory stands for every `.py` file under it that is neither a conftest nor
-    a test module by *test_patterns*, outside hidden directories, `__pycache__` and
-    any directory that holds a `pyvenv.cfg`. Raises `pytest.UsageError` for a path
-    that does not exist, and when the paths hold nothing to mutate.
-    """
-    found: set[str] = set()
-    for given in paths:
-        path = os.path.join(here, given)
-        if os.path.isfile(path):
-            found.add(finder.real(path))
-        elif os.path.isdir(path):
-            found.update(_modules_under(path, test_patterns))
-        else:
-            raise pytest.UsageError(f"--mutate: no such file or directory: {given}")
-
-    if not found:
-        raise pytest.UsageError(f"--mutate: nothing to mutate under {', '.join(paths)}")
-    return found
-
-
-def _modules_under(directory: str, test_patterns: list[str]) -> list[str]:
-    """Return the real paths of the modules `targets_of` takes under *directory*."""
-    found = []
-    for top, dirs, files in os.walk(directory):
-        dirs[:] = sorted(
-            name
-            for name in dirs
-            if not name.startswith(".")
-            and name != "__pycache__"
-            and not os.path.exists(os.path.join(top, name, "pyvenv.cfg"))
-        )
-        found += [
-            finder.real(os.path.join(top, name))
-            for name in sorted(files)
-            if name.endswith(".py")
-            and name != "conftest.py"
-            and not any(fnmatch.fnmatch(name, pattern) for pattern in test_patterns)
-        ]
-    return found
 
 
 def run(session: pytest.Session, state: State, workers: int) -> Report:
@@ -172,7 +132,12 @@ def run(session: pytest.Session, state: State, workers: int) -> Report:
             shutil.rmtree(rundir, ignore_errors=True)
 
     return Report(
-        sorted(state.targets), verdicts, data, canary, time.monotonic() - started
+        sorted(state.targets),
+        sorted(state.skipped),
+        verdicts,
+        data,
+        canary,
+        time.monotonic() - started,
     )
 
 

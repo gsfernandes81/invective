@@ -7,6 +7,7 @@ refusal of stage 1.
 
 from __future__ import annotations
 
+import ast
 import glob
 import json
 import os
@@ -52,6 +53,24 @@ BASIC = {
     "basic.short:Box.get:body:1": "killed",
     "basic.short:Box.get:body:-1": "killed",
 }
+
+
+def test_the_one_line_functions_of_basic_keep_their_body_on_the_def_line():
+    """Each function of `basic/short.py` has its whole body on its `def` line.
+
+    Those functions are what the module exists for. A formatter splits each onto two
+    lines, and every verdict in `BASIC` stays the same, so only this check notices.
+    """
+    path = os.path.join(
+        os.path.dirname(__file__), "projects", "basic", "src", "basic", "short.py"
+    )
+    with open(path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+    assert [f.name for f in functions] == ["one", "get"]
+    for function in functions:
+        lines = {statement.lineno for statement in function.body}
+        assert lines == {function.lineno}, function.name
 
 
 def test_the_basic_projects_verdicts_are_the_ones_its_author_knows(project):

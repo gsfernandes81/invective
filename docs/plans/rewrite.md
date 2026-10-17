@@ -351,9 +351,12 @@ stage 1 and reviews the benchmark harness before its numbers are believed; stage
      are inherited by every child.
    - A kill caused by a test's own order dependence on a non-covering test is counted
      as a kill; the verdict-equality harness is where it shows.
-   - The plugin imports `resource` and names `signal.SIGHUP` at import, both Unix
-     only, so on Windows it may fail to load even without `--mutate`; the slow path
-     has to make the import clean there.
+   - `baseline` imports `resource` and `children` names `signal.SIGHUP`, both Unix
+     only; the engine imports them once a run starts, so the slow path has to keep
+     them off Windows's path.
+   - Code that runs only inside a `sys.monitoring` callback is invisible to the
+     tracer, so in a self-run the tracer's own callbacks report unreached though
+     `tests/test_tracer.py` runs them.
 
 3. **Operators and scope.** The binary tables above, structural ids, trivial
    equivalence if it stays trivial, accept comments with stale detection,

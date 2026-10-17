@@ -199,6 +199,7 @@ def _read_verdict(result: children.Done[_Pending]) -> Verdict:
     )
 
 
+@switch.harness
 def _activate(state: State, path: str | None, ordinal: int, identity: str) -> None:
     """Make *ordinal* live in the target *path* of this process.
 
@@ -210,6 +211,7 @@ def _activate(state: State, path: str | None, ordinal: int, identity: str) -> No
         switch.activate(each, state.finder.modules.get(each, []), ordinal, identity)
 
 
+@switch.harness
 def _child_run(context: Context, child: _Child) -> None:
     """Run in a forked child: the child's tests with its mutant live.
 
