@@ -1,0 +1,6 @@
+[[disagreement]]
+path = "src/inpk/__init__.py"
+function = "base"
+engine = "survived"
+truth = "killed"
+reason = "A2: under --import-mode=importlib pytest's own loader runs the package __init__, uninstrumented, and it counts as covered"

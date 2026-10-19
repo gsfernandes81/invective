@@ -1,0 +1,6 @@
+[[disagreement]]
+path = "src/runpath/script.py"
+function = "code"
+engine = "survived"
+truth = "killed"
+reason = "A2: a copy run by runpy.run_path has the target's co_filename and no switch, so it counts as covered"

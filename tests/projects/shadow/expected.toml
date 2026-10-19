@@ -1,0 +1,21 @@
+[[disagreement]]
+path = "src/shadow/m.py"
+function = "chunks"
+engine = "killed"
+truth = "survived"
+reason = "A9: the guard calls iter before the local iter is assigned, so UnboundLocalError kills"
+
+[[disagreement]]
+path = "src/shadow/m.py"
+function = "initials"
+value = "set()"
+engine = "killed"
+truth = "survived"
+reason = "A9: the guard calls set before the local set is assigned, so UnboundLocalError kills"
+
+[[disagreement]]
+path = "src/shadow/m.py"
+function = "distinct"
+engine = "killed"
+truth = "survived"
+reason = "A9: the guard calls frozenset before the local is assigned, so UnboundLocalError kills"

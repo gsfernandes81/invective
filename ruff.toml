@@ -41,6 +41,12 @@ select = [
 convention = "google"
 
 [lint.per-file-ignores]
+# The module must be first imported inside a test, which is what makes its
+# import-time code run in that test: the case the project exists for.
+"tests/projects/lazy2/tests/test_t.py" = ["PLC0415"]
+# The module must be first imported inside each test, after the baseline's save
+# has edited the file, so that each child compiles the edited file: the case.
+"tests/projects/edited/tests/test_m.py" = ["PLC0415"]
 # The plugin imports the engine inside its hooks, after the finder is installed:
 # an import at the top would put the engine's modules in sys.modules before the
 # finder exists, and a run of invective on its own code would be refused.

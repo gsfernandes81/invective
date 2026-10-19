@@ -7,6 +7,10 @@ parent runs none. The engine passes the baseline's reports through the parent's
 hooks, so the terminal shows the selection's run as pytest would have shown it, and
 the mutation report follows it.
 
+Without `--mutate`, a run with `environment.MUTANT` set runs the one mutant it names:
+the plugin installs the finder for that mutant's file and makes the mutant live before
+any conftest is imported, and pytest runs its tests as it always does.
+
 The plugin imports the engine and the report inside its hooks, after the finder is
 installed, so that a run on invective's own tree can mutate them. The files it
 imports before then are `HARNESS`: a target among them is left out of the run, and
@@ -21,7 +25,7 @@ from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
-from invective import finder
+from invective import environment, finder, switch
 from invective.errors import Refusal
 
 if TYPE_CHECKING:
@@ -80,12 +84,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def pytest_load_initial_conftests(early_config: pytest.Config) -> None:
     """With `--mutate`, set up the engine's state before any conftest is imported.
 
-    A refusal at this point is kept, and `pytest_configure` reports it.
+    Without it, make the mutant `environment.MUTANT` names live, if it names one. A
+    refusal at this point is kept, and `pytest_configure` reports it.
     """
     paths = early_config.known_args_namespace.mutate
-    if not paths:
-        return
     here = str(early_config.invocation_params.dir)
+    if not paths:
+        try:
+            _activate_named(here)
+        except Refusal as exc:
+            early_config.stash[_REFUSAL] = str(exc)
+        return
     try:
         if not hasattr(os, "fork"):
             raise Refusal("this platform cannot fork; the slow path is not built yet")
@@ -106,6 +115,31 @@ def pytest_load_initial_conftests(early_config: pytest.Config) -> None:
         early_config.stash[_STATE] = engine.State(targets, installed, skipped)
     except Refusal as exc:
         early_config.stash[_REFUSAL] = str(exc)
+
+
+def _activate_named(here: str) -> None:
+    """Make live the mutant `environment.MUTANT` names, as `<path>:<ordinal>`.
+
+    A relative path is taken from *here*. The value `canary`, or no value, makes
+    nothing live. Raises `pytest.UsageError` for a value that names no file or no
+    mutant of its file's table, and `Refusal` when the file is already imported.
+    """
+    value = os.environ.get(environment.MUTANT, "")
+    if value in ("", "canary"):
+        return
+    given, _, number = value.rpartition(":")
+    path = finder.real(os.path.join(here, given))
+    if not number.isdigit() or not os.path.isfile(path):
+        raise pytest.UsageError(
+            f"{environment.MUTANT}={value!r}: expected <path>:<ordinal> naming a file"
+        )
+    ordinal = int(number)
+    if ordinal not in {mutant.ordinal for mutant in finder.table(path).mutants}:
+        raise pytest.UsageError(
+            f"{environment.MUTANT}={value!r}: {given} has no mutant {ordinal}"
+        )
+    finder.install({path})
+    switch.activate(path, [], ordinal, value)
 
 
 def targets_of(paths: list[str], here: str, test_patterns: list[str]) -> set[str]:
@@ -158,15 +192,15 @@ def _is_harness(path: str) -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """With `--mutate`, stop the session if the run is refused before collection.
+    """Stop the session if the run is refused before collection.
 
-    It is refused for a refusal kept from `pytest_load_initial_conftests`, and when
-    pytest-xdist workers are asked for.
+    It is refused for a refusal kept from `pytest_load_initial_conftests`, and, with
+    `--mutate`, when pytest-xdist workers are asked for.
     """
-    if not config.getoption("mutate"):
-        return
     if config.stash.get(_REFUSAL, None):
         _refuse(config, config.stash[_REFUSAL])
+    if not config.getoption("mutate"):
+        return
     if config.getoption("numprocesses", None):
         _refuse(
             config,

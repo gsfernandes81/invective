@@ -1,0 +1,10 @@
+# The agreed direction: until the slow path lands, the engine reports these mutants
+# as unmeasured with the import-time note, which the harness accepts. When it does,
+# this entry is deleted.
+
+[[disagreement]]
+path = "src/lazy2/late.py"
+function = "compute"
+engine = "survived"
+truth = "killed"
+reason = "A6: import-time code of a lazily imported target is credited to the first importing test; to become unmeasured (import time)"

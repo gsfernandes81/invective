@@ -49,8 +49,8 @@ def project(tmp_path: pathlib.Path) -> Callable[..., Run]:
     The function takes the project's name and pytest's further arguments. With
     *files*, a relative path to its text, it writes those files into the copy
     first; with *targets*, it mutates those paths instead of the project's package;
-    *env* adds to the environment the run inherits. Each call gets a copy of its
-    own.
+    with *mutate* false, it runs plain pytest, with no `--mutate`; *env* adds to the
+    environment the run inherits. Each call gets a copy of its own.
 
     The name `CHECKOUT` copies invective's own `src`, `tests` and `pyproject.toml`,
     and the run imports invective from the copy.
@@ -62,6 +62,7 @@ def project(tmp_path: pathlib.Path) -> Callable[..., Run]:
         env: dict[str, str] | None = None,
         targets: tuple[str, ...] = (),
         files: dict[str, str] | None = None,
+        mutate: bool = True,
     ) -> Run:
         """Copy the project *name*, run pytest in the copy, and return the run."""
         root = str(tmp_path / name)
@@ -85,17 +86,11 @@ def project(tmp_path: pathlib.Path) -> Callable[..., Run]:
             with open(os.path.join(root, relative), "w", encoding="utf-8") as fh:
                 fh.write(text)
 
-        argv = [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-p",
-            "no:cacheprovider",
-            "--mutate-json",
-            "report.json",
-        ]
-        for target in targets or _default_targets(name):
-            argv += ["--mutate", target]
+        argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider"]
+        if mutate:
+            argv += ["--mutate-json", "report.json"]
+            for target in targets or _default_targets(name):
+                argv += ["--mutate", target]
         argv += list(args)
         environment = {**os.environ, "COLUMNS": "200", **(env or {})}
         environment.pop("PYTEST_ADDOPTS", None)

@@ -1,0 +1,38 @@
+# The `float` overload and the getter run in no test, but each shares its id with a
+# function a test kills (`_` with the `int` overload, `Temp.c` with the setter), and
+# the engine reports the killed verdict for both.
+
+[[disagreement]]
+path = "src/dup/m.py"
+ordinal = 5
+engine = "killed"
+truth = "unreached"
+reason = "A1: the two `_` overloads share one id, and the last verdict read wins"
+
+[[disagreement]]
+path = "src/dup/m.py"
+ordinal = 6
+engine = "killed"
+truth = "unreached"
+reason = "A1: the two `_` overloads share one id, and the last verdict read wins"
+
+[[disagreement]]
+path = "src/dup/m.py"
+ordinal = 7
+engine = "killed"
+truth = "unreached"
+reason = "A1: the getter and setter share one id, and the last verdict read wins"
+
+[[disagreement]]
+path = "src/dup/m.py"
+ordinal = 8
+engine = "killed"
+truth = "unreached"
+reason = "A1: the getter and setter share one id, and the last verdict read wins"
+
+[[disagreement]]
+path = "src/dup/m.py"
+ordinal = 9
+engine = "killed"
+truth = "unreached"
+reason = "A1: the getter and setter share one id, and the last verdict read wins"

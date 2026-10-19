@@ -14,11 +14,24 @@ a child's run after the fact. Unset or empty, the engine removes the directory.
 """
 
 MUTANT = "INVECTIVE_MUTANT"
-"""A signal from a child to the interpreters its tests start; the user does not set it.
+"""The one mutant a pytest run without `--mutate` makes live, as `<path>:<ordinal>`.
 
-The child sets it, before any test runs, to the id of the mutant live in it, or to
-`canary` in the canary child, and an interpreter a test starts inherits it. No
-process reads it yet: the finder is not installed in such an interpreter, which runs
-the original code. It is set so that the startup hook planned for that interpreter
-needs no new handshake.
+The path is the target's file, relative to the directory pytest starts in or
+absolute, and the ordinal the mutant's index in that file's table. The display id
+does not serve here, since two mutants can share one. Two kinds of process set it:
+
+- a mutant's child, before any test runs, to its target's real path and the mutant's
+  ordinal (and the canary child to `canary`), so that every interpreter a test
+  starts inherits it;
+- a caller that wants one mutant run in a fresh pytest, such as the
+  verdict-equality harness's subprocess arm, which sets it in that process's
+  environment.
+
+The plugin reads it in a pytest run without `--mutate`, which covers both a pytest
+a test starts inside a child and one a caller starts: it installs the finder for
+that file and makes the mutant live before any conftest is imported, so a run of
+any tests then runs that mutant (`plugin.pytest_load_initial_conftests`). A value
+that names no file or no mutant of its table is a usage error, and `canary` makes
+nothing live. An interpreter a test starts that is not pytest does not read it and
+runs the original code. A run with `--mutate` ignores it.
 """

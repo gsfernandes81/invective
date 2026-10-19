@@ -1,0 +1,20 @@
+[[disagreement]]
+path = "src/forks/m.py"
+function = "in_pool"
+engine = "unreached"
+truth = "killed"
+reason = "A7: the tracer does not follow a fork-context pool's workers, so the kill is hidden"
+
+[[disagreement]]
+path = "src/forks/m.py"
+function = "in_fork"
+engine = "unreached"
+truth = "killed"
+reason = "A7: the tracer does not follow a child the test forks, so the kill is hidden"
+
+[[disagreement]]
+path = "src/forks/m.py"
+function = "in_subprocess"
+engine = "unreached"
+truth = "killed"
+reason = "A7: documented limitation of 1.0, a fresh interpreter has no finder and no live mutant"

@@ -1,0 +1,3 @@
+[project]
+engine = "refused"
+reason = "B3: child 0 exits 70 because JSON cannot encode the datetime.date the test records with record_property"

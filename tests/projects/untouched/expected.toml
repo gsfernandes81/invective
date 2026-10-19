@@ -1,0 +1,6 @@
+# Not a review finding. The engine refuses by design (plan decision 8): the one test
+# that runs a line of the target runs a lambda, which has no guard, so the canary
+# survives. Plain pytest finds every mutant of `value` unreached.
+[project]
+engine = "refused"
+reason = "by design: the canary survives, since the only test touching the target runs a lambda"

@@ -1,0 +1,23 @@
+# The getter's mutants are unmeasured with the import-time note, which the plan
+# accepts. The setter never runs at import, yet gets the same note.
+
+[[disagreement]]
+path = "src/propimp/m.py"
+ordinal = 4
+engine = "unmeasured"
+truth = "killed"
+reason = "A1: the import-time check goes by qualname, so the setter is marked import-time with the getter"
+
+[[disagreement]]
+path = "src/propimp/m.py"
+ordinal = 5
+engine = "unmeasured"
+truth = "killed"
+reason = "A1: the import-time check goes by qualname, so the setter is marked import-time with the getter"
+
+[[disagreement]]
+path = "src/propimp/m.py"
+ordinal = 6
+engine = "unmeasured"
+truth = "killed"
+reason = "A1: the import-time check goes by qualname, so the setter is marked import-time with the getter"
