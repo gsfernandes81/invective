@@ -1,3 +1,7 @@
+[harness]
+targets = ["src/sym/alias.py", "src/sym/plain.py"]
+links = ["src/sym/alias.py"]
+
 [[disagreement]]
 path = "src/sym/alias.py"
 function = "double"

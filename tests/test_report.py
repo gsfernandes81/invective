@@ -11,9 +11,16 @@ from invective.mutants import Verdict
 
 
 def _verdict(
-    name: str, verdict: str, killer: str | None = None, tests: int = 0, note: str = ""
+    name: str,
+    verdict: str,
+    killer: str | None = None,
+    covering: tuple[str, ...] = (),
+    note: str = "",
 ) -> Verdict:
-    """Return *verdict* for the one mutant of the function *name*, in `/here/src`."""
+    """Return *verdict* for the one mutant of the function *name*, in `/here/src`.
+
+    *covering* is the node ids of the tests that cover the mutant.
+    """
     mutant = Mutant(
         id=f"mod:{name}:body:0",
         ordinal=1,
@@ -24,15 +31,20 @@ def _verdict(
         span=(3, 4),
         description=f"replace {name} -> int with 0",
     )
-    return Verdict(mutant, verdict, killer, "call" if killer else None, tests, note)
+    return Verdict(mutant, verdict, killer, "call" if killer else None, covering, note)
 
 
 FOUND = engine.Report(
     targets=["/here/src/mod.py"],
     skipped=["/here/src/invective/finder.py"],
     verdicts=[
-        _verdict("a", "killed", killer="tests/test_mod.py::test_a", tests=2),
-        _verdict("b", "survived", tests=1),
+        _verdict(
+            "a",
+            "killed",
+            killer="tests/test_mod.py::test_a",
+            covering=("tests/test_mod.py::test_a", "tests/test_mod.py::test_b"),
+        ),
+        _verdict("b", "survived", covering=("tests/test_mod.py::test_b",)),
         _verdict("c", "unreached", note="no test ran it"),
     ],
     baseline={},
@@ -68,6 +80,7 @@ def test_the_json_file_holds_every_mutant_and_every_file_left_out(
     ]
     assert data["mutants"][0] == {
         "id": "mod:a:body:0",
+        "ordinal": 1,
         "file": "src/mod.py",
         "line": 3,
         "function": "a",
@@ -76,6 +89,7 @@ def test_the_json_file_holds_every_mutant_and_every_file_left_out(
         "killer": "tests/test_mod.py::test_a",
         "when": "call",
         "tests": 2,
+        "covering": ["tests/test_mod.py::test_a", "tests/test_mod.py::test_b"],
         "note": "",
     }
     assert [m["verdict"] for m in data["mutants"]] == ["killed", "survived", "unreached"]

@@ -1,0 +1,7 @@
+# Not a review finding. The engine refuses by design (plan decision 8): the cheapest
+# covering test, test_read, fails in the canary child on test_fill's missing key, so
+# the canary's failure proves nothing. Plain pytest runs test_fill first, so every
+# mutant of `value` is killed.
+[project]
+engine = "refused"
+reason = "by design: the canary's first failure is test_read's order dependence, not the canary"

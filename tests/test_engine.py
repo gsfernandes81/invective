@@ -15,7 +15,7 @@ import shutil
 
 import pytest
 
-from invective import environment
+from invective import environment, finder
 
 # The verdicts the docstrings of the modules under `tests/projects/basic/src/basic/`
 # give; the mutants' ids are structural, so a reformat of the files leaves this table
@@ -52,14 +52,52 @@ BASIC = {
     "basic.short:Box.get:body:0": "killed",
     "basic.short:Box.get:body:1": "killed",
     "basic.short:Box.get:body:-1": "killed",
+    # Unreached, as their docstrings say; the engine reports them survived, the
+    # disagreement A8 that `tests/projects/basic/expected.toml` lists.
+    "basic.short:never:body:False": "survived",
+    "basic.short:wrapped.<locals>.inner:body:False": "survived",
+    "basic.short:wrapped:body:''": "killed",
+    "basic.short:wrapped:body:'xyzzy'": "killed",
+    "basic.names:greet:body:''": "killed",
+    "basic.names:greet:body:'xyzzy'": "killed",
+    "basic.names:part:body:''": "killed",
+    "basic.names:part:body:'xyzzy'": "killed",
+    "basic.scopes:stock:body:None": "killed",
+    "basic.scopes:sold_out:body:True": "survived",
+    "basic.scopes:sold_out:body:False": "killed",
+    "basic.scopes:fill:body:None": "killed",
+    "basic.scopes:eaten:body:True": "survived",
+    "basic.scopes:eaten:body:False": "killed",
+    "basic.marks:is_weekend:body:True": "killed",
+    "basic.marks:is_weekend:body:False": "killed",
+    "basic.marks:in_stock:body:True": "survived",
+    "basic.marks:in_stock:body:False": "survived",
+    "basic.kinds:is_even:body:True": "killed",
+    "basic.kinds:is_even:body:False": "killed",
+    "basic.kinds:alternating:body:iter([])": "killed",
+    "basic.kinds:alternating:body:iter([True])": "killed",
+    "basic.kinds:alternating:body:iter([False])": "killed",
+    "basic.shapes:registered:body:None": "unmeasured",
+    "basic.shapes:default_tags:body:[]": "killed",
+    "basic.shapes:default_tags:body:['']": "killed",
+    "basic.shapes:default_tags:body:['xyzzy']": "killed",
+    "basic.shapes:Tile.fits:body:True": "killed",
+    "basic.shapes:Tile.fits:body:False": "killed",
+    "basic.shapes:Tile.unit:body:None": "killed",
+    "basic.shapes:Tile.is_unit:body:True": "killed",
+    "basic.shapes:Tile.is_unit:body:False": "killed",
+    "basic.shapes:scaler:body:None": "killed",
+    "basic.ids:tidy:body:''": "killed",
+    "basic.ids:tidy:body:'xyzzy'": "killed",
 }
 
 
 def test_the_one_line_functions_of_basic_keep_their_body_on_the_def_line():
-    """Each function of `basic/short.py` has its whole body on its `def` line.
+    """Each one-line function of `basic/short.py` has its whole body on its `def` line.
 
-    Those functions are what the module exists for. A formatter splits each onto two
-    lines, and every verdict in `BASIC` stays the same, so only this check notices.
+    Those functions are what the module exists for; `wrapped` is there to hold
+    `inner`. A formatter splits each onto two lines, and the verdicts in `BASIC` of
+    those a test calls stay the same, so only this check notices.
     """
     path = os.path.join(
         os.path.dirname(__file__), "projects", "basic", "src", "basic", "short.py"
@@ -67,8 +105,9 @@ def test_the_one_line_functions_of_basic_keep_their_body_on_the_def_line():
     with open(path, encoding="utf-8") as fh:
         tree = ast.parse(fh.read())
     functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
-    assert [f.name for f in functions] == ["one", "get"]
-    for function in functions:
+    one_line = [f for f in functions if f.name != "wrapped"]
+    assert [f.name for f in one_line] == ["one", "never", "get", "inner"]
+    for function in one_line:
         lines = {statement.lineno for statement in function.body}
         assert lines == {function.lineno}, function.name
 
@@ -115,8 +154,8 @@ def test_the_console_report_lists_every_mutant_and_the_canary(project):
     assert "replace value -> int with 0  SURVIVED 1 test" in run.out
     assert "canary killed by tests/test_gate.py::" in run.out
     assert (
-        "31 mutants in 4 files: 19 killed, 8 survived, 2 unreached, 2 unmeasured; "
-        "score 65.5%, 19 killed of 29"
+        "66 mutants in 10 files: 47 killed, 14 survived, 2 unreached, 3 unmeasured; "
+        "score 74.6%, 47 killed of 63"
     ) in run.out
     assert run.report["canary"].startswith("tests/test_gate.py::")
 
@@ -127,7 +166,7 @@ def test_the_baselines_run_shows_as_pytests_own(project):
     The parent passes child 0's reports through its own hooks.
     """
     run = project("basic")
-    assert "11 passed" in run.out
+    assert "29 passed, 1 xfailed" in run.out
     assert "no tests ran" not in run.out
 
 
@@ -199,7 +238,13 @@ def test_a_directory_target_takes_its_modules_but_not_its_tests(project):
     assert run.report["targets"] == [
         "src/basic/__init__.py",
         "src/basic/gate.py",
+        "src/basic/ids.py",
+        "src/basic/kinds.py",
+        "src/basic/marks.py",
+        "src/basic/names.py",
         "src/basic/other.py",
+        "src/basic/scopes.py",
+        "src/basic/shapes.py",
         "src/basic/short.py",
     ]
 
@@ -344,7 +389,7 @@ def test_the_map_holds_each_tests_wall_and_cpu_time_by_phase(project, tmp_path):
     assert run.returncode == 0, run.out
     (rundir,) = tmp.glob("invective-*")
     tests = json.loads((rundir / "map.json").read_text())["tests"]
-    assert len(tests) == 11
+    assert len(tests) == 30
     for nodeid, test in tests.items():
         assert set(test["wall"]) == set(test["cpu"]) == {"setup", "call", "teardown"}, (
             nodeid
@@ -412,3 +457,46 @@ def test_a_collection_error_is_refused(project):
     )
     assert run.returncode == 2, run.out
     assert "refused the run: 1 error(s) during collection" in run.out
+
+
+def _ordinal(path: str, mutant_id: str) -> int:
+    """Return the ordinal of the mutant *mutant_id* in the table of the file *path*."""
+    table = finder.table(os.path.join(os.path.dirname(__file__), "projects", path))
+    (ordinal,) = [m.ordinal for m in table.mutants if m.id == mutant_id]
+    return ordinal
+
+
+def test_a_mutant_the_environment_names_is_live_in_a_run_without_mutate(project):
+    """A plain pytest run with `environment.MUTANT` set runs that one mutant.
+
+    `count -> 1` fails the two tests that call `count`, and nothing else; `count ->
+    0` fails none. The same run without the variable passes.
+    """
+    gate = "src/basic/gate.py"
+    killed = _ordinal(f"basic/{gate}", "basic.gate:count:body:1")
+    survived = _ordinal(f"basic/{gate}", "basic.gate:count:body:0")
+
+    run = project(
+        "basic", "-rf", mutate=False, env={environment.MUTANT: f"{gate}:{killed}"}
+    )
+    assert run.returncode == 1, run.out
+    failed = sorted(line for line in run.out.splitlines() if line.startswith("FAILED"))
+    assert [line.split()[1] for line in failed] == [
+        "tests/test_gate.py::test_count_is_not_one",
+        "tests/test_other.py::test_sign_and_a_count",
+    ]
+    run = project("basic", mutate=False, env={environment.MUTANT: f"{gate}:{survived}"})
+    assert run.returncode == 0, run.out
+    run = project("basic", mutate=False)
+    assert run.returncode == 0, run.out
+
+
+def test_a_mutant_the_environment_names_that_does_not_exist_is_a_usage_error(project):
+    """A value that names no file or no mutant of its table is a usage error.
+
+    The run exits with status 4 rather than running with no mutant live.
+    """
+    for value in ("src/basic/nowhere.py:1", "src/basic/gate.py:999"):
+        run = project("basic", mutate=False, env={environment.MUTANT: value})
+        assert run.returncode == 4, run.out
+        assert environment.MUTANT in run.out

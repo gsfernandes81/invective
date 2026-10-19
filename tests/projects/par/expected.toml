@@ -1,3 +1,6 @@
+[harness]
+workers = [4]
+
 [[disagreement]]
 path = "src/par/m.py"
 function = "f1"
