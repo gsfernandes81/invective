@@ -1,0 +1,15 @@
+[[disagreement]]
+path = "src/edited/m.py"
+function = "total"
+value = "0"
+engine = "survived"
+truth = "killed"
+reason = "A10: the child compiles the edited file and runs the prepended function's mutant instead"
+
+[[disagreement]]
+path = "src/edited/m.py"
+function = "greeting"
+value = "''"
+engine = "survived"
+truth = "killed"
+reason = "A10: the child compiles the edited file and runs total's -1, which no covering test calls"

@@ -1,0 +1,31 @@
+[[disagreement]]
+path = "src/par/m.py"
+function = "f1"
+workers = 4
+engine = "killed"
+truth = "survived"
+reason = "A11: four children run test_alone at once and each fails on seeing the others"
+
+[[disagreement]]
+path = "src/par/m.py"
+function = "f2"
+workers = 4
+engine = "killed"
+truth = "survived"
+reason = "A11: four children run test_alone at once and each fails on seeing the others"
+
+[[disagreement]]
+path = "src/par/m.py"
+function = "f3"
+workers = 4
+engine = "killed"
+truth = "survived"
+reason = "A11: four children run test_alone at once and each fails on seeing the others"
+
+[[disagreement]]
+path = "src/par/m.py"
+function = "f4"
+workers = 4
+engine = "killed"
+truth = "survived"
+reason = "A11: four children run test_alone at once and each fails on seeing the others"
