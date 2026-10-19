@@ -1,0 +1,6 @@
+[[disagreement]]
+path = "src/fin2/shop.py"
+function = "closing"
+engine = "survived"
+truth = "killed"
+reason = "A3: the session fixture's teardown is credited to the test that tore it down, which does not use it"

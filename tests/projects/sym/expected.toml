@@ -1,0 +1,6 @@
+[[disagreement]]
+path = "src/sym/alias.py"
+function = "double"
+engine = "survived"
+truth = "killed"
+reason = "A5: a target that is a symbolic link to a file of another name is served uninstrumented"

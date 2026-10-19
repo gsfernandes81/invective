@@ -1,0 +1,6 @@
+[[disagreement]]
+path = "src/ns/b/util.py"
+function = "helper"
+engine = "killed"
+truth = "unreached"
+reason = "A1: same-stem files in a namespace package share the id `util:helper`, and a's kills land on b"

@@ -1,0 +1,15 @@
+[[disagreement]]
+path = "src/ro/m.py"
+function = "size"
+value = "0"
+engine = "killed"
+truth = "survived"
+reason = "A4: cheapest-first runs test_b between test_a's two tests, so the module fixture is set up twice and errors"
+
+[[disagreement]]
+path = "src/ro/m.py"
+function = "size"
+value = "1"
+engine = "killed"
+truth = "survived"
+reason = "A4: cheapest-first runs test_b between test_a's two tests, so the module fixture is set up twice and errors"
