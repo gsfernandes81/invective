@@ -1,0 +1,9 @@
+# The build context for Dockerfile.dev, as an allow-list: the image copies only the lock, the
+# project file and its two scripts, and the source arrives at start as a clone in /workspace.
+# So nothing else (a venv, `.invective/` killers, bench results, a stray secret) can reach a
+# local build. infra builds from this repo's git URL, whose context is the tracked tree.
+*
+!pyproject.toml
+!uv.lock
+!docker-child-init.dev.sh
+!docker-login.dev.sh

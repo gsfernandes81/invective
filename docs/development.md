@@ -18,6 +18,25 @@ controlling process collects nothing and an empty selection is refused.
 under test comes from here, not from an installed copy: a run of invective
 against itself tests a copy, and the copy's `src` holds the mutant.
 
+## The dev container
+
+`invective-dev` is the owner's container for working on invective, one of the dev
+containers on the infra repo's hub. infra builds it from this repo's `main` on GitHub, so
+a change to the three files below reaches the container once it is merged and infra
+rebuilds it. Starting it, logging in, its volumes and the hub are infra's, described in
+[infra's dev README](https://github.com/gsfernandes81/infra/blob/main/dev/README.md).
+
+| File | What it does |
+|---|---|
+| `Dockerfile.dev` | adds the uv that `checks` pins and a venv holding the locked dependencies |
+| `docker-child-init.dev.sh` | at every start, adds invective itself to that venv, editable |
+| `docker-login.dev.sh` | reports the GitHub token and logs Claude in; infra's `make login` runs it |
+
+Two things are kept equal by hand. The uv version in `Dockerfile.dev` is the `version:` in
+`.github/workflows/checks.yml`, so a lock regenerated in the container is one `checks`
+accepts. Both syncs pass `--all-extras`, because `uv sync` uninstalls what it is not asked
+for, and a start with fewer flags would remove the coverage extra the build installed.
+
 ## CI
 
 `.github/workflows/checks.yml` runs the suite on every supported Python
