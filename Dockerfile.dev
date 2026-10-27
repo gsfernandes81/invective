@@ -1,0 +1,90 @@
+# syntax=docker/dockerfile:1
+
+# invective-dev: a thin child of gsrpi-dev-base, the image every dev container in the owner's
+# infra repo is built on. The base carries everything the containers share: Python 3.13, git,
+# gh, Claude Code, fish, zmx, sshd, the `dev` user and the entrypoint that clones this repo
+# into /workspace and starts the lot. What is left here is only what makes this container
+# invective's: the uv that invective's CI uses, and a venv holding invective's dependencies.
+#
+# infra builds it, as the `invective-dev` service in its dev Compose project, straight from
+# this repo's `main` on GitHub, and passes BASE_TAG from its own pin. So a change here reaches
+# the container only once it is on `main` and infra rebuilds it; the ARG default is a
+# fallback for a build outside infra. The container's name, volumes and environment are that
+# service's. infra's dev/README.md is the lifecycle.
+#
+# No compiler layer: every package in uv.lock is pure Python except coverage, which has
+# wheels for both arches the base is built for.
+ARG BASE_TAG=2026.10.26
+FROM ghcr.io/gsfernandes81/gsrpi-dev-base:${BASE_TAG}
+
+# Re-declared, since an ARG before FROM is out of scope after it, and recorded as a label so
+# which base a running container is on can be read off it with `docker inspect`.
+ARG BASE_TAG
+LABEL uk.gsrpi.base-tag="${BASE_TAG}"
+
+# The base ends as the dev user; everything below writes system paths until USER dev.
+USER root
+
+# The uv `checks` pins, over the base's own (the base puts it in /bin so that a child's
+# replaces it). `pyproject.toml` bounds the build backend to uv_build 0.10, which this uv
+# bundles, so the editable install at start is built by the backend the bound names; a newer
+# uv builds it with its own, outside the bound, and warns at every start. And the lock a
+# version bump regenerates with `uv lock` is written by the uv that `checks` then reads it
+# with under `uv sync --locked`. Keep it equal to the `version:` in checks.yml.
+COPY --from=ghcr.io/astral-sh/uv:0.10.11 /uv /uvx /bin/
+
+# The dev account's login shell goes back to bash, which the base sets to fish. sshd takes
+# $SHELL from /etc/passwd, and the base's door runs every forwarded command as
+# `$SHELL -c '<cmd>'`: the hub's own calls, `ssh dev ssh invective-dev '<cmd>'`, the menu's
+# shell. Those are POSIX command lines, and fish rejects `x=$(...)`, `if …; then … fi` and
+# heredocs. fish is still installed; type `fish` in that shell.
+RUN usermod --shell /bin/bash dev
+
+# The venv lives outside /workspace, so the workspace volume cannot shadow it. VIRTUAL_ENV
+# mirrors UV_PROJECT_ENVIRONMENT because ty, ruff and editors find an environment by it, and
+# this repo has no project-local .venv. PATH is set in the image so that a `docker exec` and
+# an ssh session answer `python` and `pytest` the same way; the base publishes the PATH it
+# inherits to ssh sessions. UV_PYTHON_DOWNLOADS=0 keeps uv on the base's interpreter, which
+# is inside `requires-python` and one of the Pythons `checks` runs.
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0 \
+    UV_PROJECT_ENVIRONMENT=/home/dev/venv \
+    VIRTUAL_ENV=/home/dev/venv \
+    PATH=/home/dev/venv/bin:$PATH
+
+# Every dependency of the suite, from the lock, into /home/dev/venv: the `dev` group
+# (pytest-xdist and coverage; uv syncs it by default) and every extra (`coverage`), so the
+# coverage-guided tests run. The project itself is added at start by child-init.sh, once
+# /workspace holds the clone. KEEP THESE FLAGS IN STEP with docker-child-init.dev.sh: uv sync
+# makes the venv match what it is asked for, so a start with fewer flags would uninstall
+# what the build put there.
+#
+# Run as root against a root-owned cache mount and handed to dev in the same layer: a
+# BuildKit cache mount takes a numeric uid to be owned by anyone else, and the base's dev uid
+# is not fixed (CI bakes 1001, a local base build bakes the host owner's).
+COPY --chown=dev:dev pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_CACHE_DIR=/root/.cache/uv \
+    uv sync --frozen --no-install-project --all-extras \
+    && chown -R dev:dev /home/dev/venv
+
+USER dev
+
+# Mountpoints for the volumes infra's service may give this container (a uv cache, an
+# editor's remote server). An empty volume takes the ownership of the directory it covers,
+# and one Docker creates is root's, which uv and the editor cannot write to.
+RUN mkdir -p /home/dev/.cache/uv /home/dev/.zed_server
+
+# No ssh_config of its own: invective needs no identity and no host beyond GitHub, which is
+# reached over https with the hub's token, so the base's /home/dev/ssh_config is the whole of
+# it. No known_hosts.extra for the same reason.
+
+# The login walkthrough: the hub's token, Claude, the clone. infra's `make login
+# C=invective-dev` runs it.
+COPY --chown=dev:dev docker-login.dev.sh /home/dev/login.sh
+
+# What this image does at start that the base cannot: the editable project in the venv.
+COPY --chown=dev:dev docker-child-init.dev.sh /home/dev/child-init.sh
+
+# WORKDIR, EXPOSE and CMD are the base's.
