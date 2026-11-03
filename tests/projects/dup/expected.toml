@@ -6,6 +6,7 @@
 path = "src/dup/m.py"
 ordinal = 5
 engine = "killed"
+subprocess = "survived"
 truth = "unreached"
 reason = "A1: the two `_` overloads share one id, and the last verdict read wins"
 
@@ -13,6 +14,7 @@ reason = "A1: the two `_` overloads share one id, and the last verdict read wins
 path = "src/dup/m.py"
 ordinal = 6
 engine = "killed"
+subprocess = "survived"
 truth = "unreached"
 reason = "A1: the two `_` overloads share one id, and the last verdict read wins"
 
@@ -20,6 +22,7 @@ reason = "A1: the two `_` overloads share one id, and the last verdict read wins
 path = "src/dup/m.py"
 ordinal = 7
 engine = "killed"
+subprocess = "survived"
 truth = "unreached"
 reason = "A1: the getter and setter share one id, and the last verdict read wins"
 
@@ -27,6 +30,7 @@ reason = "A1: the getter and setter share one id, and the last verdict read wins
 path = "src/dup/m.py"
 ordinal = 8
 engine = "killed"
+subprocess = "survived"
 truth = "unreached"
 reason = "A1: the getter and setter share one id, and the last verdict read wins"
 
@@ -34,5 +38,6 @@ reason = "A1: the getter and setter share one id, and the last verdict read wins
 path = "src/dup/m.py"
 ordinal = 9
 engine = "killed"
+subprocess = "survived"
 truth = "unreached"
 reason = "A1: the getter and setter share one id, and the last verdict read wins"

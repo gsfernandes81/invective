@@ -5,6 +5,7 @@
 path = "src/propimp/m.py"
 ordinal = 4
 engine = "unmeasured"
+subprocess = "killed"
 truth = "killed"
 reason = "A1: the import-time check goes by qualname, so the setter is marked import-time with the getter"
 
@@ -12,6 +13,7 @@ reason = "A1: the import-time check goes by qualname, so the setter is marked im
 path = "src/propimp/m.py"
 ordinal = 5
 engine = "unmeasured"
+subprocess = "killed"
 truth = "killed"
 reason = "A1: the import-time check goes by qualname, so the setter is marked import-time with the getter"
 
@@ -19,5 +21,6 @@ reason = "A1: the import-time check goes by qualname, so the setter is marked im
 path = "src/propimp/m.py"
 ordinal = 6
 engine = "unmeasured"
+subprocess = "killed"
 truth = "killed"
 reason = "A1: the import-time check goes by qualname, so the setter is marked import-time with the getter"

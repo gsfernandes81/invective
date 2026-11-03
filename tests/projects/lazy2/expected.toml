@@ -6,5 +6,6 @@
 path = "src/lazy2/late.py"
 function = "compute"
 engine = "survived"
+subprocess = "survived"
 truth = "killed"
 reason = "A6: import-time code of a lazily imported target is credited to the first importing test; to become unmeasured (import time)"

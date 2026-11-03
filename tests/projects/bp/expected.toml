@@ -2,5 +2,6 @@
 path = "src/bp/plug.py"
 function = "answer"
 engine = "survived"
+subprocess = "survived"
 truth = "killed"
 reason = "A2: a copy loaded by spec_from_file_location has the target's co_filename and no switch, so it counts as covered"
