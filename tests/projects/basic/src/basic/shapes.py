@@ -15,9 +15,10 @@ REGISTRY: list[str] = []
 
 
 def registered[F: Callable[..., object]](function: F) -> F:
-    """Unmeasured: it runs at import, before any switch, to register `default_tags`.
+    """`None` is killed: `default_tags` is then None, and making a tile raises.
 
-    With it replaced by `None`, `default_tags` is None and making a tile raises.
+    The engine leaves it unmeasured, since it runs at import, before any switch, to
+    register `default_tags`.
     """
     REGISTRY.append(getattr(function, "__name__", "?"))
     return function

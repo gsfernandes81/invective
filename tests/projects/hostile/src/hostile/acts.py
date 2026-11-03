@@ -29,16 +29,18 @@ def returns() -> bool:
 
 
 def lives() -> bool:
-    """Unmeasured: `False` ends the child with `os._exit(0)` before it writes a verdict.
+    """`False` is killed: the test ends its process with `os._exit(0)`.
 
-    Plain pytest exits 0 there, with no report for that test or any after it.
+    Plain pytest exits 0 there, with no report for that test or any after it. The
+    engine leaves it unmeasured, since its child exits without a verdict.
     """
     return True
 
 
 def uninterrupted() -> bool:
-    """Unmeasured: `False` raises `KeyboardInterrupt`, which ends the child unanswered.
+    """`False` is killed: the test raises `KeyboardInterrupt`.
 
     Plain pytest stops the session there and exits 2, with no report for the test.
+    The engine leaves it unmeasured, since its child exits without a verdict.
     """
     return True
