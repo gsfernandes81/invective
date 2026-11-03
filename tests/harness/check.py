@@ -8,6 +8,7 @@ every run, of every arm, is in a fresh copy of that first copy.
 from __future__ import annotations
 
 import concurrent.futures
+import configparser
 import fnmatch
 import os
 import shutil
@@ -39,6 +40,7 @@ class _Target(NamedTuple):
     real: str  #: its real path, relative to the copy
     mutants: list[Mutant]
     spans: dict[int, tuple[str, int, int]]  #: an ordinal's site key in `sites`
+    ids: dict[int, str]  #: an ordinal's display id
     sites: dict[tuple[str, int, int], edit.Site]
 
 
@@ -204,7 +206,7 @@ def _targets(source: str, targets: list[str]) -> list[_Target]:
                 sites = edit.sites(fh.read())
         except (OSError, SyntaxError, ValueError) as exc:
             raise HarnessError(f"{name} cannot be read as Python: {exc}") from exc
-        mutants, spans = [], {}
+        mutants, spans, ids = [], {}, {}
         for m in info.mutants:
             key = (m.qualname, *m.span)
             if key not in sites:
@@ -213,20 +215,50 @@ def _targets(source: str, targets: list[str]) -> list[_Target]:
                 Mutant(name, m.ordinal, m.qualname, m.id.partition(":body:")[2])
             )
             spans[m.ordinal] = key
-        found[relative] = _Target(name, relative, mutants, spans, sites)
+            ids[m.ordinal] = m.id
+        found[relative] = _Target(name, relative, mutants, spans, ids, sites)
     return [found[key] for key in sorted(found)]
 
 
 def _python_files(source: str) -> list[str]:
-    """Return the project's test module patterns, from its `pyproject.toml`."""
-    default = ["test_*.py", "*_test.py"]
-    path = os.path.join(source, "pyproject.toml")
-    if not os.path.exists(path):
-        return default
-    with open(path, "rb") as fh:
-        options = tomllib.load(fh).get("tool", {}).get("pytest", {})
-    patterns = options.get("ini_options", {}).get("python_files", default)
+    """Return the project's test module patterns, from its pytest settings file.
+
+    The file is the first of pytest's own order that holds pytest settings:
+    `pytest.ini` or `.pytest.ini` (whether or not they do), `pyproject.toml`,
+    `tox.ini` and `setup.cfg`.
+    """
+    patterns = _python_files_setting(source)
+    if patterns is None:
+        return ["test_*.py", "*_test.py"]
     return patterns.split() if isinstance(patterns, str) else list(patterns)
+
+
+def _python_files_setting(source: str) -> str | list[str] | None:
+    """Return `python_files` from the project's pytest settings file, or None."""
+    for name, section in (
+        ("pytest.ini", "pytest"),
+        (".pytest.ini", "pytest"),
+        ("pyproject.toml", None),
+        ("tox.ini", "pytest"),
+        ("setup.cfg", "tool:pytest"),
+    ):
+        path = os.path.join(source, name)
+        if not os.path.isfile(path):
+            continue
+        if section is None:
+            with open(path, "rb") as fh:
+                tool = tomllib.load(fh).get("tool", {})
+            options = tool.get("pytest", {})
+            options = options.get("ini_options", options) if options else None
+        else:
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read(path, encoding="utf-8")
+            options = parser[section] if parser.has_section(section) else None
+            if options is None and name.endswith("pytest.ini"):
+                return None
+        if options is not None:
+            return options.get("python_files")
+    return None
 
 
 def _modules_under(source: str, directory: str, patterns: list[str]) -> list[str]:
@@ -285,28 +317,48 @@ def _engine_verdicts(
     The report's rows come in the order of its targets' tables, and each row names
     its file and ordinal; a row that names another mutant than its place gives is a
     row whose verdict was read for a mutant of the same id, and its note says so.
+    Raises `HarnessError` when arm 1 mutated other files than the harness's tables,
+    when its rows outnumber or fall short of the tables, and for a row in another
+    mutant's place that shares no id with it.
     """
     if engine.result != "ok":
         return {}
     by_real = {target.real: target for target in context.files}
+    reported = [os.path.normpath(real) for real in engine.targets]
+    skipped = sorted(os.path.normpath(real) for real in engine.skipped)
+    if skipped:
+        raise HarnessError(
+            "arm 1 left out these targets as invective's harness; name the others: "
+            + ", ".join(skipped)
+        )
+    if set(reported) != set(by_real):
+        missing = sorted(set(by_real) - set(reported))
+        extra = sorted(set(reported) - set(by_real))
+        raise HarnessError(
+            f"arm 1's targets differ from the harness's: missing {missing or 'none'}, "
+            f"extra {extra or 'none'}"
+        )
     rows = iter(engine.rows)
     found = {}
-    for real in engine.targets:
-        target = by_real.get(os.path.normpath(real))
-        if target is None:
-            raise HarnessError(
-                f"arm 1 mutated {real}, which the harness has no table for"
-            )
+    for real in reported:
+        target = by_real[real]
         for mutant in target.mutants:
             row = next(rows, None)
             if row is None:
                 raise HarnessError("arm 1's report has fewer rows than the tables")
             note = row["note"]
             if (os.path.normpath(row["file"]), row["ordinal"]) != (real, mutant.ordinal):
+                if row["id"] != target.ids[mutant.ordinal]:
+                    raise HarnessError(
+                        f"arm 1's row for {real}:{mutant.ordinal} names "
+                        f"{row['file']}:{row['ordinal']}, which shares no id with it"
+                    )
                 named = f"the row names {row['file']}:{row['ordinal']}"
                 note = f"{named}; {note}" if note else named
             verdict = Verdict(row["verdict"], row["killer"], note)
             found[mutant] = (verdict, list(row.get("covering", [])))
+    if next(rows, None) is not None:
+        raise HarnessError("arm 1's report has more rows than the tables")
     return found
 
 

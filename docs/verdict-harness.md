@@ -44,6 +44,17 @@ own words keep the meanings of decision 7 in `docs/plans/rewrite.md`. Arm 2 does
 measure reach, so its `survived` covers what arm 1 calls `unreached`. Arm 3's
 `unreached` is a survivor whose function never ran in the probe run below.
 
+The harness stops with an error rather than a table when arm 1's report does not match
+the harness's own mutant tables (`check._engine_verdicts`):
+
+- the engine mutated other files than the harness's targets;
+- its report has more or fewer rows than the tables;
+- a row sits in another mutant's place without sharing its display id (a shared id is
+  fault A1, and the row's note says so).
+
+On a run over invective's own tree, the engine leaves out the files it imports before
+its finder exists (`plugin.HARNESS`), so name only the other files as targets.
+
 ### How arms 2 and 3 are judged
 
 Arms 2 and 3 are judged against arm 3's baseline, one unmutated plain pytest run of

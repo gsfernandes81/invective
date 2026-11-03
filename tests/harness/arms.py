@@ -79,6 +79,7 @@ class Engine(NamedTuple):
     note: str  #: why, for a run that is not ok
     rows: list[dict]  #: the JSON report's mutant rows, in its order
     targets: list[str]  #: the JSON report's targets, real paths relative to the copy
+    skipped: list[str]  #: the targets it left out as invective's harness, likewise
 
 
 class Runs(NamedTuple):
@@ -266,13 +267,13 @@ def engine(root: str, targets: list[str], workers: int, runs: Runs) -> Engine:
     ran = pytest(root, argv, runs.env, ENGINE_LIMIT, None)
     if ran.returncode == 2 and "invective refused the run" in ran.out:
         refusal = ran.out[ran.out.index("invective refused the run") :]
-        return Engine("refused", refusal.splitlines()[0], [], [])
+        return Engine("refused", refusal.splitlines()[0], [], [], [])
     if ran.timed_out or ran.returncode != 0 or not os.path.exists(report):
         why = "timed out" if ran.timed_out else f"exited {ran.returncode}"
-        return Engine("crashed", f"{why}:\n{_tail(ran.out)}", [], [])
+        return Engine("crashed", f"{why}:\n{_tail(ran.out)}", [], [], [])
     with open(report, encoding="utf-8") as fh:
         data = json.load(fh)
-    return Engine("ok", "", data["mutants"], data["targets"])
+    return Engine("ok", "", data["mutants"], data["targets"], data["skipped"])
 
 
 def subprocess_arm(
