@@ -31,7 +31,7 @@ def test_alone():
         pass
     try:
         seen = set(_others())
-        time.sleep(1.0)
+        time.sleep(3.0)
         seen.update(_others())
     finally:
         os.remove(mine)

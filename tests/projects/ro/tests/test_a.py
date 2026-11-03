@@ -21,5 +21,5 @@ def test_a_fast():
 @pytest.mark.usefixtures("data")
 def test_a_slow():
     """The size is not negative, after a delay."""
-    time.sleep(0.2)
+    time.sleep(1.0)
     assert m.size() >= 0
