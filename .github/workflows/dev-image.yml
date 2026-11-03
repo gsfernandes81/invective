@@ -1,0 +1,104 @@
+name: dev-image
+
+# Builds `Dockerfile.dev` for linux/arm64 and keeps its layers as a registry
+# cache, `ghcr.io/gsfernandes81/invective-dev:buildcache-arm64`. zero, the Pi
+# that runs the dev containers, builds invective-dev itself from this repo's
+# `main` and reads that cache, so after a base bump each step it would
+# otherwise rebuild is a layer pull. No image is pushed: zero reads only the
+# cache. This keeps the contract in infra's `plans/dev-image-caches.md`, "The
+# contract a child's dev-image.yml keeps".
+#
+# A cache hit on zero needs the same base, the same build args and the same
+# context as zero's own build:
+# - The base is infra's `x-base-tag`, never `Dockerfile.dev`'s ARG default.
+#   infra's `dev-cache` workflow dispatches this one on `main` with `base_tag`
+#   after every base it publishes; a push here reads infra's current tag from
+#   its `dev/compose.yaml`.
+# - `BASE_TAG` is the only build arg, as it is the only one zero passes.
+# - The context is this repository's Git context at the commit,
+#   build-push-action's default, as zero fetches it; not the checkout.
+#
+# arm64 only, natively on GitHub's arm64 runner: zero is arm64, and nothing
+# reads an amd64 cache.
+#
+# The package must stay anonymously readable, since zero pulls with no
+# credential. A package first pushed from a public repository takes its
+# visibility, and this repository is public.
+
+on:
+  # The files `Dockerfile.dev` copies in, and the two that say how it is
+  # built.
+  push:
+    branches: [main]
+    paths: ['Dockerfile.dev', 'pyproject.toml', 'uv.lock',
+            'docker-login.dev.sh', 'docker-child-init.dev.sh',
+            '.github/workflows/dev-image.yml']
+  workflow_dispatch:
+    inputs:
+      base_tag:
+        description: "infra's base tag to build on; empty reads infra's current x-base-tag"
+        type: string
+        required: false
+        default: ''
+
+# Two builds would race on the cache tag; the second waits.
+concurrency:
+  group: dev-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CACHE: ghcr.io/${{ github.repository_owner }}/invective-dev:buildcache-arm64
+
+jobs:
+  cache:
+    # zero builds `main`, so a dispatch on another branch would replace the
+    # cache with layers zero never asks for.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      # The input arrives as data in an env var, never pasted into the
+      # script, and is held to a tag's shape before it reaches a build arg.
+      - name: Infra's base tag
+        id: base
+        env:
+          GIVEN: ${{ inputs.base_tag }}
+        run: |
+          tag="$GIVEN"
+          if [ -z "$tag" ]; then
+            tag=$(curl -fsSL https://raw.githubusercontent.com/gsfernandes81/infra/main/dev/compose.yaml \
+              | sed -n 's/^x-base-tag: &base-tag //p')
+          fi
+          printf '%s' "$tag" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._-]{0,127}' \
+            || { echo "::error::not a base tag: '$tag'"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # No `context`, so the Git context at this commit. `cacheonly` exports
+      # nothing but the cache.
+      - name: Build linux/arm64 and write its cache
+        uses: docker/build-push-action@v6
+        with:
+          file: Dockerfile.dev
+          build-args: BASE_TAG=${{ steps.base.outputs.tag }}
+          platforms: linux/arm64
+          outputs: type=cacheonly
+          cache-from: type=registry,ref=${{ env.CACHE }}
+          cache-to: type=registry,ref=${{ env.CACHE }},mode=max,compression=zstd,oci-mediatypes=true
+
+      - name: Summary
+        env:
+          BASE: ${{ steps.base.outputs.tag }}
+        run: |
+          echo "Cached \`$CACHE\` on \`gsrpi-dev-base:$BASE\`." >> "$GITHUB_STEP_SUMMARY"
