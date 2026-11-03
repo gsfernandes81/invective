@@ -47,9 +47,10 @@ measure reach, so its `survived` covers what arm 1 calls `unreached`. Arm 3's
 ### How arms 2 and 3 are judged
 
 Arms 2 and 3 are judged against arm 3's baseline, one unmutated plain pytest run of
-the same command. A test that passed there and fails or errors in any phase now kills
-the mutant, and the first such test is named; a collection that fails kills it too. A
-test that is skipped or never starts does not kill. The baseline is green when pytest
+the same command. A test that fails or errors in any phase kills the mutant, and the
+first such test is named; a collection that fails kills it too. That includes a test
+the baseline never ran, such as a parameter the mutant adds. A test that is skipped or
+never starts does not kill. The baseline is green when pytest
 exits 0 having run a test; on a red baseline no mutant is run and only the project
 level is compared.
 

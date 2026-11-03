@@ -180,24 +180,22 @@ def _tail(out: str, count: int = 15) -> str:
     return "\n".join(out.splitlines()[-count:])
 
 
-def judge(ran: Ran, passed: frozenset[str], limit: float) -> Verdict:
-    """Return the verdict of a mutant's run, against the baseline's *passed* tests.
+def judge(ran: Ran, limit: float) -> Verdict:
+    """Return the verdict of a mutant's run, which follows a green baseline.
 
-    A test in *passed* that fails or errors in any phase kills the mutant, and so
-    does a collection that fails. A test that is skipped, or that never starts, does
-    not. A run that ends inside a test, by an exit or an interrupt, kills the mutant
-    through that test, and the verdict is marked as not plain.
+    A test that fails or errors in any phase kills the mutant, and so does a
+    collection that fails. No test failed in the baseline, so this takes in a test
+    the baseline never ran, such as a parameter the mutant adds. A test that is
+    skipped, or that never starts, does not. A run that ends inside a test, by an
+    exit or an interrupt, kills the mutant through that test, and the verdict is
+    marked as not plain.
     """
     if ran.timed_out:
         return Verdict("timeout", note=f"over the wall limit of {limit:.0f} s")
     for line in ran.lines:
         if line["event"] == "collect":
             return Verdict("killed", line["nodeid"] or "<collection>", "collection")
-        if (
-            line["event"] == "report"
-            and line["outcome"] == "failed"
-            and line["nodeid"] in passed
-        ):
+        if line["event"] == "report" and line["outcome"] == "failed":
             return Verdict("killed", line["nodeid"], line["when"])
     finish = [line["exitstatus"] for line in ran.lines if line["event"] == "finish"]
     if finish and finish[-1] in (0, 1):
@@ -240,8 +238,7 @@ def baseline(root: str, runs: Runs, work: str) -> Baseline:
         for line in ran.lines
         if line["event"] == "report" and line["outcome"] == "failed"
     }
-    # Every test that started and did not fail, so that a strict xfail, which
-    # reports as skipped, is killed by passing under a mutant.
+    # Every test that started and did not fail.
     passed = frozenset(
         line["nodeid"]
         for line in ran.lines
@@ -302,7 +299,7 @@ def subprocess_arm(
     )
     if ran.returncode == 2 and "invective refused the run" in ran.out:
         return Verdict("refused", note=_tail(ran.out, 3), plain=False)
-    return judge(ran, base.passed, limit)
+    return judge(ran, limit)
 
 
 def truth_arm(root: str, runs: Runs, base: Baseline) -> Verdict:
@@ -316,4 +313,4 @@ def truth_arm(root: str, runs: Runs, base: Baseline) -> Verdict:
         limit,
         os.path.join(work, "results.jsonl"),
     )
-    return judge(ran, base.passed, limit)
+    return judge(ran, limit)
