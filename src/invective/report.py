@@ -62,14 +62,17 @@ def _said(verdict: Verdict) -> str:
     if verdict.verdict == "killed":
         return f"killed by {verdict.killer} ({verdict.when})"
     if verdict.verdict == "survived":
-        return f"SURVIVED {verdict.tests} test{'' if verdict.tests == 1 else 's'}"
+        tests = len(verdict.covering)
+        return f"SURVIVED {tests} test{'' if tests == 1 else 's'}"
     return f"{verdict.verdict.upper()}: {verdict.note}"
 
 
 def write_json(report: Report, path: str, here: str) -> None:
     """Write every mutant with its verdict, as JSON, to the file *path*.
 
-    Paths in the file are relative to *here*.
+    Paths in the file are relative to *here*. A mutant's `ordinal` is its index in
+    its file's table, and `covering` holds the node ids of the tests that cover it,
+    in the order its child runs them.
     """
     data = {
         "targets": [os.path.relpath(t, here) for t in report.targets],
@@ -80,6 +83,7 @@ def write_json(report: Report, path: str, here: str) -> None:
         "mutants": [
             {
                 "id": v.mutant.id,
+                "ordinal": v.mutant.ordinal,
                 "file": os.path.relpath(v.mutant.path, here),
                 "line": v.mutant.line,
                 "function": v.mutant.qualname,
@@ -87,7 +91,8 @@ def write_json(report: Report, path: str, here: str) -> None:
                 "verdict": v.verdict,
                 "killer": v.killer,
                 "when": v.when,
-                "tests": v.tests,
+                "tests": len(v.covering),
+                "covering": list(v.covering),
                 "note": v.note,
             }
             for v in report.verdicts

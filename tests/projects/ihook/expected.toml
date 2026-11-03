@@ -1,0 +1,3 @@
+[project]
+engine = "refused"
+reason = "B2: children run a test through item.ihook, which leaves out a sibling directory's conftest wrapper, so the baseline is red"

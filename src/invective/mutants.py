@@ -39,7 +39,7 @@ class Verdict(NamedTuple):
     verdict: str  #: killed, survived, unreached or unmeasured
     killer: str | None  #: the node id of the first failing test
     when: str | None  #: the phase it failed in
-    tests: int  #: how many tests cover the mutant
+    covering: tuple[str, ...]  #: the node ids of the tests that cover the mutant
     note: str  #: why, for a verdict that is not a kill
 
 
@@ -58,7 +58,7 @@ class _Pending(NamedTuple):
     """A mutant whose child the scheduler runs, as the job's key."""
 
     mutant: Mutant
-    tests: int  #: how many tests cover the mutant
+    covering: tuple[str, ...]  #: the node ids of the tests that cover the mutant
     child: _Child
     budget: float  #: the child's wall budget in seconds
 
@@ -115,14 +115,14 @@ def run(
     for path in sorted(state.targets):
         at_import = ran_at_import.get(path, set())
         for mutant in tables[path].mutants:
-            covering = _covering(mutant, path, tests, order)
+            covering = tuple(_covering(mutant, path, tests, order))
             if mutant.qualname in at_import:
                 verdicts[mutant.id] = Verdict(
                     mutant,
                     "unmeasured",
                     killer=None,
                     when=None,
-                    tests=len(covering),
+                    covering=covering,
                     note="the function ran at import, before any switch; the slow "
                     "path is not built yet",
                 )
@@ -132,7 +132,7 @@ def run(
                     "unreached",
                     killer=None,
                     when=None,
-                    tests=0,
+                    covering=(),
                     note="no test ran the function in the baseline",
                 )
             else:
@@ -140,14 +140,14 @@ def run(
                 child = _Child(
                     path,
                     mutant.ordinal,
-                    mutant.id,
+                    f"{path}:{mutant.ordinal}",
                     [items[nodeid] for nodeid in covering],
                     os.path.join(rundir, f"{number}.jsonl"),
                     os.path.join(rundir, f"{number}.out"),
                 )
                 seconds = sum(baseline.wall(tests[nodeid]) for nodeid in covering)
                 budget = max(FLOOR, MULTIPLIER * seconds)
-                pending = _Pending(mutant, len(covering), child, budget)
+                pending = _Pending(mutant, covering, child, budget)
                 run_child = functools.partial(_child_run, context, child)
                 jobs.append(children.Job(pending, run_child, child.out, budget))
 
@@ -168,7 +168,7 @@ def _read_verdict(result: children.Done[_Pending]) -> Verdict:
     A child that wrote no verdict is unmeasured, with a note naming whether it ran
     over its budget or how it ended, with the end of its output.
     """
-    mutant, tests, child, budget = result.key
+    mutant, covering, child, budget = result.key
     line = _verdict_line(child.events)
     if line is not None:
         return Verdict(
@@ -176,7 +176,7 @@ def _read_verdict(result: children.Done[_Pending]) -> Verdict:
             line["verdict"],
             killer=line.get("killer"),
             when=line.get("when"),
-            tests=tests,
+            covering=covering,
             note="",
         )
     if result.timed_out:
@@ -185,7 +185,7 @@ def _read_verdict(result: children.Done[_Pending]) -> Verdict:
             "unmeasured",
             killer=None,
             when=None,
-            tests=tests,
+            covering=covering,
             note=f"over its wall budget of {budget:.1f} s, unconfirmed",
         )
     return Verdict(
@@ -193,7 +193,7 @@ def _read_verdict(result: children.Done[_Pending]) -> Verdict:
         "unmeasured",
         killer=None,
         when=None,
-        tests=tests,
+        covering=covering,
         note=f"the child {children.describe_status(result.status)} without a "
         f"verdict; its output ends:\n{children.tail(child.out, 10)}",
     )

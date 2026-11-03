@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+# Every run of the project, plain or mutating, gets these: stop at the first failure
+# (`-x` is `--maxfail=1`), and leave out one test by keyword and one by node id.
+addopts = "-x -k 'not unselected' --deselect tests/test_pick.py::test_deselected"

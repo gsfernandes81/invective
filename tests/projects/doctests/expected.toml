@@ -1,0 +1,3 @@
+[project]
+engine = "refused"
+reason = "B1: the canary raised in a doctest example fails it as a doctest failure, so the first failure is not the canary's"

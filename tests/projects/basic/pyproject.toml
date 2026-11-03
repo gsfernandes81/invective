@@ -1,3 +1,5 @@
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# Node ids keep their non-ASCII letters (tests/test_ids.py) rather than escapes.
+disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true

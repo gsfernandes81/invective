@@ -1,0 +1,3 @@
+[project]
+engine = "refused"
+reason = "B4: the parent's gc.freeze keeps a cycle made at collection out of gc.collect in the child, so the baseline is red"

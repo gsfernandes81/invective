@@ -1,0 +1,15 @@
+[[disagreement]]
+path = "src/basic/short.py"
+function = "never"
+engine = "survived"
+subprocess = "survived"
+truth = "unreached"
+reason = "A8: a one-line function that is never called counts as covered, since the module runs its def line"
+
+[[disagreement]]
+path = "src/basic/short.py"
+function = "wrapped.<locals>.inner"
+engine = "survived"
+subprocess = "survived"
+truth = "unreached"
+reason = "A8: a one-line nested function that is never called counts as covered, since its enclosing function runs its def line"
