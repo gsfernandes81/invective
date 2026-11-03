@@ -53,8 +53,11 @@ def _functions(
     return found
 
 
-def _running(node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.stmt:
-    """Return the first statement of *node* after its docstring and declarations."""
+def _running(node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.stmt | None:
+    """Return the first statement of *node* after its docstring and declarations.
+
+    None for a function whose body is only a docstring.
+    """
     body = node.body
     first = body[0]
     if (
@@ -63,6 +66,8 @@ def _running(node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.stmt:
         and isinstance(first.value.value, str)
     ):
         body = body[1:]
+    if not body:
+        return None
     lead = 0
     while lead < len(body) and isinstance(body[lead], (ast.Global, ast.Nonlocal)):
         lead += 1
@@ -87,7 +92,7 @@ def sites(source: bytes) -> dict[tuple[str, int, int], Site]:
     """Return every function of *source* by (qualname, first running line, last line).
 
     The key is the one a mutant of the instrumenter's table carries as its qualname
-    and span.
+    and span. A function whose body is only a docstring has no mutant, and no site.
     """
     tree = ast.parse(source)
     lines = source.splitlines(keepends=True)
@@ -98,6 +103,8 @@ def sites(source: bytes) -> dict[tuple[str, int, int], Site]:
     found = {}
     for qualname, node in _functions(tree, []):
         first = _running(node)
+        if first is None:
+            continue
         line, col = first.lineno, first.col_offset
         decorators = getattr(first, "decorator_list", [])
         if decorators:
