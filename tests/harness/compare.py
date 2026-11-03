@@ -196,13 +196,22 @@ def rules(arms: dict[str, Verdict], outside: bool) -> tuple[str, ...]:
     engine, sub, truth = (arms.get(arm) for arm in ARMS)
     if engine is not None and truth is not None:
         pair = {engine.verdict, truth.verdict}
-        if engine.verdict == "unmeasured":
-            if (
-                truth.plain
-                and truth.verdict in ("killed", "survived")
-                and not _accepted(engine.note, outside)
-            ):
+        # Rule 3 judges an unmeasured against a plain kill or survivor. A child that
+        # exited without a verdict agrees with a kill that was an exit too; against
+        # any other truth, an unmeasured is a difference rule 6 takes.
+        if (
+            engine.verdict == "unmeasured"
+            and truth.plain
+            and truth.verdict in ("killed", "survived")
+        ):
+            if not _accepted(engine.note, outside):
                 fired.append("3: unmeasured, for no reason the plan accepts")
+        elif (
+            engine.verdict == "unmeasured"
+            and truth.verdict == "killed"
+            and "without a verdict" in engine.note
+        ):
+            pass
         elif engine.verdict == "unreached" and truth.verdict == "killed":
             fired.append("2: a false unreached")
         elif engine.verdict != truth.verdict and pair != {"killed", "survived"}:
