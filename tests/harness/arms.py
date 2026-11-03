@@ -23,6 +23,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from typing import NamedTuple
 
@@ -36,6 +38,12 @@ FLOOR = 10.0
 
 #: Arm 1's wall limit for the whole run, in seconds.
 ENGINE_LIMIT = 900.0
+
+#: The pytest processes running now, and whether `stop` has been called since the
+#: last `resume`.
+_LIVE: set[subprocess.Popen[bytes]] = set()
+_STOPPING = threading.Event()
+_LOCK = threading.Lock()
 
 #: What a copy of a project leaves out.
 _IGNORED = ("__pycache__", "*.pyc", ".git", ".tox", ".nox", ".pytest_cache", ".venv")
@@ -147,25 +155,37 @@ def pytest(
     if results is not None:
         env = {**env, recorder.RESULTS: results}
     started = time.monotonic()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "pytest", *args],
-        cwd=root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        errors="replace",
-        env=env,
-        start_new_session=True,
-    )
-    timed_out = False
-    try:
-        out, _ = proc.communicate(timeout=limit)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        out, _ = proc.communicate()
+    # Output goes to a file, not a pipe: a process the run leaves behind in a session
+    # of its own would hold a pipe open, and reading it to the end would wait for it.
+    with tempfile.TemporaryFile() as output:
+        with _LOCK:
+            if _STOPPING.is_set():
+                raise KeyboardInterrupt
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "pytest", *args],
+                cwd=root,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+            )
+            _LIVE.add(proc)
+        timed_out = False
+        try:
+            proc.wait(timeout=limit)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill(proc)
+            proc.wait()
+        except BaseException:
+            _kill(proc)
+            raise
+        finally:
+            with _LOCK:
+                _LIVE.discard(proc)
+        output.seek(0)
+        out = output.read().decode(errors="replace")
     seconds = time.monotonic() - started
     lines = []
     if results is not None and os.path.exists(results):
@@ -174,6 +194,30 @@ def pytest(
                 with contextlib.suppress(ValueError):
                     lines.append(json.loads(line))
     return Ran(proc.returncode, out, seconds, timed_out, lines)
+
+
+def stop() -> None:
+    """Kill every pytest the harness is running, and start no more.
+
+    The runs sit in sessions of their own, out of reach of the terminal's SIGINT, so
+    a case that ends in an exception calls this before it waits for its pool.
+    """
+    with _LOCK:
+        _STOPPING.set()
+        live = list(_LIVE)
+    for proc in live:
+        _kill(proc)
+
+
+def resume() -> None:
+    """Let runs start again after `stop`, for the next case."""
+    _STOPPING.clear()
+
+
+def _kill(proc: subprocess.Popen[bytes]) -> None:
+    """Kill *proc*'s session, every process it started included."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
 
 
 def _tail(out: str, count: int = 15) -> str:

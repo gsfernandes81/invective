@@ -76,6 +76,7 @@ def check(
     *args* further pytest arguments every run takes. Raises `HarnessError` when a
     target cannot be read, or when arm 3's probes change the baseline's outcome.
     """
+    arms.resume()
     env = arms.environ(arms.install_recorder(os.path.join(work, "plugins")))
     source = arms.copy(project, os.path.join(work, "source"))
     context = _Context(
@@ -85,47 +86,56 @@ def check(
     workers = sorted({1, *expected.workers, *(e.workers for e in expected.entries)})
 
     with concurrent.futures.ThreadPoolExecutor(jobs()) as pool:
-        base_job = pool.submit(
-            arms.baseline,
-            _fresh(context, "baseline"),
-            context.runs,
-            os.path.join(work, "baseline"),
-        )
-        probe_job = pool.submit(_probe, context)
-        engine_jobs = {
-            count: pool.submit(
-                arms.engine,
-                _fresh(context, f"engine-{count}"),
-                targets,
-                count,
+        # The pool waits for every queued run as it closes; an interrupt cancels
+        # them and kills the running ones first.
+        try:
+            base_job = pool.submit(
+                arms.baseline,
+                _fresh(context, "baseline"),
                 context.runs,
+                os.path.join(work, "baseline"),
             )
-            for count in workers
-        }
-        base = base_job.result()
-        engines = {count: job.result() for count, job in engine_jobs.items()}
-        probed, seen = probe_job.result()
-        if base.green and probed.returncode != 0:
-            raise HarnessError(f"arm 3's probes changed the baseline:\n{probed.out}")
-
-        verdicts = {count: _engine_verdicts(engines[count], context) for count in workers}
-        lines = [
-            f"arm 1 with {count} worker{'s' if count > 1 else ''}: "
-            f"{engines[count].result} {engines[count].note}".rstrip()
-            for count in workers
-        ]
-        lines.append(
-            f"arm 3 baseline: {'green' if base.green else 'red'}, "
-            f"{len(base.passed)} passed, {base.seconds:.1f} s {base.note}".rstrip()
-        )
-        rows = []
-        if base.green:
-            run = _per_mutant(pool, context, verdicts[1], base)
-            rows = [
-                _row(mutant, count, verdicts[count].get(mutant), run[mutant], seen)
+            probe_job = pool.submit(_probe, context)
+            engine_jobs = {
+                count: pool.submit(
+                    arms.engine,
+                    _fresh(context, f"engine-{count}"),
+                    targets,
+                    count,
+                    context.runs,
+                )
                 for count in workers
-                for mutant in table
+            }
+            base = base_job.result()
+            engines = {count: job.result() for count, job in engine_jobs.items()}
+            probed, seen = probe_job.result()
+            if base.green and probed.returncode != 0:
+                raise HarnessError(f"arm 3's probes changed the baseline:\n{probed.out}")
+
+            verdicts = {
+                count: _engine_verdicts(engines[count], context) for count in workers
+            }
+            lines = [
+                f"arm 1 with {count} worker{'s' if count > 1 else ''}: "
+                f"{engines[count].result} {engines[count].note}".rstrip()
+                for count in workers
             ]
+            lines.append(
+                f"arm 3 baseline: {'green' if base.green else 'red'}, "
+                f"{len(base.passed)} passed, {base.seconds:.1f} s {base.note}".rstrip()
+            )
+            rows = []
+            if base.green:
+                run = _per_mutant(pool, context, verdicts[1], base)
+                rows = [
+                    _row(mutant, count, verdicts[count].get(mutant), run[mutant], seen)
+                    for count in workers
+                    for mutant in table
+                ]
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            arms.stop()
+            raise
 
     level = _project_level(engines[1].result, base.green)
     differences = compare.unmatched(rows, level, expected, table)
