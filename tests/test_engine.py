@@ -500,3 +500,59 @@ def test_a_mutant_the_environment_names_that_does_not_exist_is_a_usage_error(pro
         run = project("basic", mutate=False, env={environment.MUTANT: value})
         assert run.returncode == 4, run.out
         assert environment.MUTANT in run.out
+
+
+def test_a_pytest_a_test_starts_in_process_runs_under_the_childs_mutant(project):
+    """A test that runs pytest in its own process does not refuse its own target.
+
+    The inner run's plugin reads `environment.MUTANT`, which the child exported, but
+    the mutant is live in this process already. `f`'s value is never checked, so
+    each of its mutants survives.
+    """
+    run = project(
+        "basic",
+        "tests/test_nest.py",
+        targets=("src/basic/nest.py",),
+        files={
+            "src/basic/nest.py": "def f():\n    return 1\n",
+            "tests/test_nest.py": (
+                "from basic import nest\n"
+                "\n"
+                "pytest_plugins = ['pytester']\n"
+                "\n"
+                "\n"
+                "def test_nested(pytester):\n"
+                "    nest.f()\n"
+                "    pytester.makepyfile('def test_ok():\\n    pass\\n')\n"
+                "    assert pytester.runpytest().ret == 0\n"
+            ),
+        },
+    )
+    assert "0 killed" in run.out, run.out
+
+
+def test_a_pytest_a_test_starts_elsewhere_finds_a_relative_mutant(project):
+    """A run given a relative `environment.MUTANT` exports the target's real path.
+
+    `pytester` starts the inner pytest in a directory of its own, where the relative
+    path names nothing, which would make the inner run a usage error.
+    """
+    gate = "src/basic/gate.py"
+    survived = _ordinal(f"basic/{gate}", "basic.gate:count:body:0")
+    run = project(
+        "basic",
+        "tests/test_nest.py",
+        mutate=False,
+        env={environment.MUTANT: f"{gate}:{survived}"},
+        files={
+            "tests/test_nest.py": (
+                "pytest_plugins = ['pytester']\n"
+                "\n"
+                "\n"
+                "def test_nested(pytester):\n"
+                "    pytester.makepyfile('def test_ok():\\n    pass\\n')\n"
+                "    assert pytester.runpytest_subprocess().ret == 0\n"
+            ),
+        },
+    )
+    assert run.returncode == 0, run.out

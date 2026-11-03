@@ -121,11 +121,12 @@ def _activate_named(here: str) -> None:
     """Make live the mutant `environment.MUTANT` names, as `<path>:<ordinal>`.
 
     A relative path is taken from *here*. The value `canary`, or no value, makes
-    nothing live. Raises `pytest.UsageError` for a value that names no file or no
-    mutant of its file's table, and `Refusal` when the file is already imported.
+    nothing live, and so does a pytest a test starts inside this process, where the
+    mutant is live already. Raises `pytest.UsageError` for a value that names no file
+    or no mutant of its file's table, and `Refusal` when the file is already imported.
     """
     value = os.environ.get(environment.MUTANT, "")
-    if value in ("", "canary"):
+    if value in ("", "canary") or switch.ACTIVE:
         return
     given, _, number = value.rpartition(":")
     path = finder.real(os.path.join(here, given))
@@ -139,7 +140,8 @@ def _activate_named(here: str) -> None:
             f"{environment.MUTANT}={value!r}: {given} has no mutant {ordinal}"
         )
     finder.install({path})
-    switch.activate(path, [], ordinal, value)
+    # The real path, so that a pytest a test starts in another directory finds it.
+    switch.activate(path, [], ordinal, f"{path}:{ordinal}")
 
 
 def targets_of(paths: list[str], here: str, test_patterns: list[str]) -> set[str]:

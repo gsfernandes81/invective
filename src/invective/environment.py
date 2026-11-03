@@ -32,6 +32,8 @@ a test starts inside a child and one a caller starts: it installs the finder for
 that file and makes the mutant live before any conftest is imported, so a run of
 any tests then runs that mutant (`plugin.pytest_load_initial_conftests`). A value
 that names no file or no mutant of its table is a usage error, and `canary` makes
-nothing live. An interpreter a test starts that is not pytest does not read it and
+nothing live. A pytest a test starts in its own process ignores it, since the mutant
+is live there already, and a run given a relative path exports the real one. An
+interpreter a test starts that is not pytest does not read it and
 runs the original code. A run with `--mutate` ignores it.
 """
